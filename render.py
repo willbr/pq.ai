@@ -19,6 +19,7 @@ sys.setrecursionlimit(20000)   # BSP back-to-front walk can recurse deep
 NEAR = 1.0
 BACKFACE_EPS = 0.01
 MIN_SEG_PX2 = 9.0          # drop segments shorter than 3px (Tk cost, no detail)
+MIN_POLY_PX2 = 16.0        # drop polygons smaller than this area (Tk fill cost)
 
 
 def angle_vectors(yaw_deg, pitch_deg):
@@ -53,24 +54,15 @@ class Renderer:
         self.face_edges = []
         self.face_verts = []
         self.face_plane = []
-        self.face_centroid = []     # world-space centroid (for sorting model faces)
         for planenum, side, firstedge, numedges, texinfo in bsp.faces:
             eidx = []
             vidx = []
-            sx = sy = sz = 0.0
             for k in range(numedges):
                 se = bsp.surfedges[firstedge + k]
                 eidx.append(abs(se))
-                vi = bsp.edges[se][0] if se >= 0 else bsp.edges[-se][1]
-                vidx.append(vi)
-                vx, vy, vz = bsp.vertexes[vi]
-                sx += vx
-                sy += vy
-                sz += vz
+                vidx.append(bsp.edges[se][0] if se >= 0 else bsp.edges[-se][1])
             self.face_edges.append(eidx)
             self.face_verts.append(vidx)
-            inv = 1.0 / numedges if numedges else 0.0
-            self.face_centroid.append((sx * inv, sy * inv, sz * inv))
             (nx, ny, nz), dist, _ = bsp.planes[planenum]
             if side:
                 nx, ny, nz, dist = -nx, -ny, -nz, -dist
@@ -114,6 +106,22 @@ class Renderer:
 
         # vis decompression scratch
         self.vis_row = (len(bsp.leafs) + 7) >> 3
+
+        # BSP parent links + visframe markers, for node-based back-to-front
+        # world drawing with PVS culling (flat-shading painter's algorithm)
+        self.node_parent = [-1] * len(bsp.nodes)
+        self.leaf_parent = [-1] * len(bsp.leafs)
+        self.node_visframe = [0] * len(bsp.nodes)
+        stack = [(self.headnode, -1)]
+        while stack:
+            num, par = stack.pop()
+            if num < 0:
+                self.leaf_parent[-num - 1] = par
+                continue
+            self.node_parent[num] = par
+            ch = bsp.nodes[num][1]
+            stack.append((ch[0], num))
+            stack.append((ch[1], num))
 
     def _texture_colors(self):
         """Average RGB per miptex via a palette histogram. None where unusable."""
@@ -361,9 +369,21 @@ class Renderer:
         hw = self.width / 2
         hh = self.height / 2
         backface = self.backface
+        # camera-space clip planes (a*x+b*y+c*z+d >= 0 is inside): near + the
+        # four view-frustum sides, so clipped polygons project on-screen and Tk
+        # never has to fill a huge off-screen area.
+        tanx = hw / focal
+        tany = hh / focal
+        clip_planes = ((0.0, 0.0, 1.0, -NEAR),
+                       (1.0, 0.0, tanx, 0.0), (-1.0, 0.0, tanx, 0.0),
+                       (0.0, 1.0, tany, 0.0), (0.0, -1.0, tany, 0.0))
 
         leaf = self.point_leaf(origin)
-        vis = self.decompress_vis(leafs[leaf][1])
+        # in a solid leaf (noclip in the void) there's no PVS -> show everything
+        if leafs[leaf][0] == -2 or leafs[leaf][1] < 0:
+            vis = b"\xff" * self.vis_row
+        else:
+            vis = self.decompress_vis(leafs[leaf][1])
 
         def transform(vi):
             if vert_frame[vi] == frame:
@@ -387,48 +407,63 @@ class Renderer:
             if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
                 return                                  # backface
 
-            pts = [transform(vi) for vi in face_verts[fi]]
+            poly = [transform(vi) for vi in face_verts[fi]]
 
-            # Sutherland-Hodgman clip against the near plane (cz >= NEAR)
-            clipped = []
-            n = len(pts)
-            for i in range(n):
-                ax, ay, az = pts[i]
-                bx, by, bz = pts[(i + 1) % n]
-                ain = az >= NEAR
-                if ain:
-                    clipped.append(pts[i])
-                if ain != (bz >= NEAR):
-                    t = (NEAR - az) / (bz - az)
-                    clipped.append((ax + (bx - ax) * t,
-                                    ay + (by - ay) * t, NEAR))
-            if len(clipped) < 3:
-                return
+            # Sutherland-Hodgman clip against near + the 4 frustum sides
+            for a, b, c, d in clip_planes:
+                out = []
+                A = poly[-1]
+                da = a * A[0] + b * A[1] + c * A[2] + d
+                for B in poly:
+                    db = a * B[0] + b * B[1] + c * B[2] + d
+                    if da >= 0:
+                        out.append(A)
+                    if (da >= 0) != (db >= 0):
+                        t = da / (da - db)
+                        out.append((A[0] + (B[0] - A[0]) * t,
+                                    A[1] + (B[1] - A[1]) * t,
+                                    A[2] + (B[2] - A[2]) * t))
+                    A, da = B, db
+                poly = out
+                if len(poly) < 3:
+                    return
 
             flat = []
-            for cx, cy, cz in clipped:
+            for cx, cy, cz in poly:
                 flat.append(hw + cx * focal / cz)
                 flat.append(hh - cy * focal / cz)
+
+            # drop tiny far polygons: not worth a Tk fill (shoelace area)
+            area2 = 0.0
+            px, py = flat[-2], flat[-1]
+            for i in range(0, len(flat), 2):
+                qx, qy = flat[i], flat[i + 1]
+                area2 += px * qy - qx * py
+                px, py = qx, qy
+            if -MIN_POLY_PX2 < area2 < MIN_POLY_PX2:
+                return
+
             polys.append((flat, face_color[fi]))
 
-        face_centroid = self.face_centroid
-
         def emit_model(md):
-            ff = md["firstface"]
-            nf = md["numfaces"]
-            if nf <= 1:
-                emit_face_poly(ff)
-                return
-            # a brush model isn't convex/BSP-ordered, so sort its own faces
-            # back-to-front by centroid depth before painting them
-            order = []
-            for fi in range(ff, ff + nf):
-                cx, cy, cz = face_centroid[fi]
-                d = (cx - ox) * fx + (cy - oy) * fy + (cz - oz) * fz
-                order.append((d, fi))
-            order.sort(reverse=True)        # far first
-            for _, fi in order:
-                emit_face_poly(fi)
+            # a brush model has its own BSP sub-tree; walk it far-child-first so
+            # its faces paint back-to-front (correct even when non-convex)
+            def rec(num):
+                if num < 0:
+                    return
+                planenum, children, ff, nf = nodes[num]
+                (nx, ny, nz), dist, _ = planes[planenum]
+                if ox * nx + oy * ny + oz * nz - dist >= 0:
+                    rec(children[1])                    # far side first
+                    for fi in range(ff, ff + nf):
+                        emit_face_poly(fi)
+                    rec(children[0])                    # near side last
+                else:
+                    rec(children[0])
+                    for fi in range(ff, ff + nf):
+                        emit_face_poly(fi)
+                    rec(children[1])
+            rec(md["headnodes"][0])
 
         def emit_models(mlist):
             if len(mlist) > 1:              # several at one depth -> sort by centre
@@ -461,20 +496,26 @@ class Renderer:
                 if self.box_in_pvs(md["mins"], md["maxs"], vis):
                     pending.append(md)
 
-        # walk the world BSP far-child-first -> back-to-front, weaving each brush
-        # model in at its own depth (partitioned by every split plane it crosses)
+        # PVS: mark every node on the path from each visible leaf up to the root
+        node_visframe = self.node_visframe
+        node_parent = self.node_parent
+        leaf_parent = self.leaf_parent
+        for i in range(len(leafs) - 1):
+            if vis[i >> 3] & (1 << (i & 7)):
+                p = leaf_parent[i + 1]
+                while p >= 0 and node_visframe[p] != frame:
+                    node_visframe[p] = frame
+                    p = node_parent[p]
+
+        # node-based back-to-front walk. Each world face lies on exactly one node,
+        # so it is drawn once at its true depth (correct painter's order, unlike
+        # leaf-marksurface drawing which mis-orders faces spanning leaves). Brush
+        # models are partitioned by each split plane and woven in at their depth.
         def walk(num, models):
-            if num < 0:
-                li = -num - 1
-                if li > 0:
-                    bit = li - 1
-                    if vis[bit >> 3] & (1 << (bit & 7)):
-                        _, _, fm, nm = leafs[li]
-                        for m in range(fm, fm + nm):
-                            emit_face_poly(marks[m])
-                emit_models(models)
+            if num < 0 or node_visframe[num] != frame:
+                emit_models(models)                       # leaf or PVS-culled
                 return
-            planenum, children, _, _ = nodes[num]
+            planenum, children, ff, nf = nodes[num]
             (nx, ny, nz), dist, _ = planes[planenum]
             if models:
                 front, back, on = [], [], []
@@ -485,10 +526,14 @@ class Renderer:
                 front = back = on = ()
             if ox * nx + oy * ny + oz * nz - dist >= 0:   # camera in front
                 walk(children[1], back)                   # far = back side
+                for fi in range(ff, ff + nf):
+                    emit_face_poly(fi)
                 emit_models(on)
                 walk(children[0], front)                  # near = front side
             else:
                 walk(children[0], front)                  # far = front side
+                for fi in range(ff, ff + nf):
+                    emit_face_poly(fi)
                 emit_models(on)
                 walk(children[1], back)
 

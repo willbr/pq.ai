@@ -15,6 +15,7 @@ import math
 
 NEAR = 1.0
 BACKFACE_EPS = 0.01
+MIN_SEG_PX2 = 9.0          # drop segments shorter than 3px (Tk cost, no detail)
 
 
 def angle_vectors(yaw_deg, pitch_deg):
@@ -205,6 +206,11 @@ class Renderer:
                         continue
                     if (y0 < 0 and y1 < 0) or (y0 > H and y1 > H):
                         continue
+
+                    dxp = x1 - x0
+                    dyp = y1 - y0
+                    if dxp * dxp + dyp * dyp < MIN_SEG_PX2:
+                        continue            # sub-pixel: not worth a Tk line draw
 
                     segments.append((x0, y0, x1, y1))
 

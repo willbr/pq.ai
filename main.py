@@ -28,6 +28,9 @@ NOCLIP_SPEED = 500.0       # units / second when flying
 LOOK_SENS = 0.15           # degrees / pixel
 YAW_SPEED = 140.0          # degrees / second (keyboard turning)
 
+LINE_COLOR = "#00ff66"
+PREGROW = 2048             # line items pre-created up front to avoid hitches
+
 
 class App:
     def __init__(self, mapname):
@@ -54,8 +57,11 @@ class App:
         self.root.geometry("800x600")
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
-        self.lines = []            # reusable Canvas line item ids
-        self.prev_used = 0
+        # reusable line-item pool; unused items are parked off-screen with a
+        # cheap coords() call (no itemconfig state churn, no extra item count)
+        self.pool = [self.canvas.create_line(-10, -10, -10, -10, fill=LINE_COLOR)
+                     for _ in range(PREGROW)]
+        self.prev_n = 0
         self.hud = self.canvas.create_text(
             8, 8, anchor="nw", fill="#00ff66", font=("Menlo", 11), text="")
 
@@ -197,30 +203,23 @@ class App:
                   f"{'MOUSELOOK' if self.mouselook else 'click to capture mouse'} "
                   f"[N]oclip"))
         self.canvas.tag_raise(self.hud)
-        self.root.after(8, self.tick)
+        # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
+        work_ms = (time.perf_counter() - now) * 1000
+        self.root.after(max(1, int(16 - work_ms)), self.tick)
 
     def _draw(self, segs):
         c = self.canvas
-        lines = self.lines
-        n = len(segs)
-        # grow the pool if needed
-        while len(lines) < n:
-            lines.append(c.create_line(0, 0, 0, 0, fill="#00ff66"))
+        pool = self.pool
         coords = c.coords
+        n = len(segs)
+        while len(pool) < n:
+            pool.append(c.create_line(-10, -10, -10, -10, fill=LINE_COLOR))
         for i in range(n):
             x0, y0, x1, y1 = segs[i]
-            coords(lines[i], x0, y0, x1, y1)
-        # hide the ones used last frame but not this frame
-        if self.prev_used > n:
-            itemconfig = c.itemconfig
-            for i in range(n, self.prev_used):
-                itemconfig(lines[i], state="hidden")
-        # reveal any reused-from-hidden
-        if n > self.prev_used:
-            itemconfig = c.itemconfig
-            for i in range(self.prev_used, n):
-                itemconfig(lines[i], state="normal")
-        self.prev_used = n
+            coords(pool[i], x0, y0, x1, y1)
+        for i in range(n, self.prev_n):      # park last frame's surplus off-screen
+            coords(pool[i], -10, -10, -10, -10)
+        self.prev_n = n
 
     def run(self):
         self.root.mainloop()

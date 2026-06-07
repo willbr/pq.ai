@@ -37,8 +37,17 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 | `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool |
 
 The trick that makes it fast enough: wireframe needs **no framebuffer**. We draw edges
-with `Canvas.create_line` (C-implemented), and PVS culling cuts a ~5,500-face level
-down to ~200 visible faces per frame, so the Python-side math is ~1 ms/frame.
+with `Canvas.create_line` (C-implemented), and PVS + backface culling cut a ~5,500-face
+level down to a few hundred visible edges per frame.
+
+**Where the time goes:** the Python render math is only ~2 ms/frame — the bottleneck is
+tkinter rasterizing the lines (`update()`). So the optimizations that matter all reduce
+work *for Tk*: a pre-grown line pool (no `create_line` hitches), parking unused lines
+off-screen with `coords()` instead of `itemconfig(state=...)` (no redraw churn), and
+dropping sub-pixel segments (far edges too small to see). Typical: ~520 fps on e1m1,
+~60 on e1m2, ~30 on the open `start` hub. (Frustum culling and depth-shading were
+tried and removed — measurement showed they added cost without reducing the line count
+Tk actually draws.)
 
 ## Status
 

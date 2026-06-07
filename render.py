@@ -402,37 +402,63 @@ class Renderer:
                 flat.append(hh - cy * focal / cz)
             polys.append((flat, face_color[fi]))
 
-        # walk the world BSP far-child-first -> leaves in back-to-front order
-        def walk(num):
+        def emit_model(md):
+            ff = md["firstface"]
+            for fi in range(ff, ff + md["numfaces"]):
+                emit_face_poly(fi)
+
+        def box_side(mins, maxs, nx, ny, nz, dist):
+            # +1 box fully in front of plane, -1 fully behind, 0 straddles
+            pmin = (nx * (mins[0] if nx >= 0 else maxs[0]) +
+                    ny * (mins[1] if ny >= 0 else maxs[1]) +
+                    nz * (mins[2] if nz >= 0 else maxs[2])) - dist
+            if pmin >= 0:
+                return 1
+            pmax = (nx * (maxs[0] if nx >= 0 else mins[0]) +
+                    ny * (maxs[1] if ny >= 0 else mins[1]) +
+                    nz * (maxs[2] if nz >= 0 else mins[2])) - dist
+            return -1 if pmax <= 0 else 0
+
+        # collect the visible brush submodels (doors, lifts, buttons, platforms)
+        pending = []
+        if self.brushmodels:
+            for md in bsp.models[1:]:
+                if self.box_in_pvs(md["mins"], md["maxs"], vis):
+                    pending.append(md)
+
+        # walk the world BSP far-child-first -> back-to-front, weaving each brush
+        # model in at its own depth (partitioned by every split plane it crosses)
+        def walk(num, models):
             if num < 0:
                 li = -num - 1
-                if li == 0:
-                    return
-                bit = li - 1
-                if not (vis[bit >> 3] & (1 << (bit & 7))):
-                    return
-                _, _, fm, nm = leafs[li]
-                for m in range(fm, fm + nm):
-                    emit_face_poly(marks[m])
+                if li > 0:
+                    bit = li - 1
+                    if vis[bit >> 3] & (1 << (bit & 7)):
+                        _, _, fm, nm = leafs[li]
+                        for m in range(fm, fm + nm):
+                            emit_face_poly(marks[m])
+                for md in models:
+                    emit_model(md)
                 return
             planenum, children, _, _ = nodes[num]
             (nx, ny, nz), dist, _ = planes[planenum]
-            if ox * nx + oy * ny + oz * nz - dist >= 0:
-                walk(children[1])           # far side first
-                walk(children[0])
+            if models:
+                front, back, on = [], [], []
+                for md in models:
+                    s = box_side(md["mins"], md["maxs"], nx, ny, nz, dist)
+                    (front if s > 0 else back if s < 0 else on).append(md)
             else:
-                walk(children[0])
-                walk(children[1])
+                front = back = on = ()
+            if ox * nx + oy * ny + oz * nz - dist >= 0:   # camera in front
+                walk(children[1], back)                   # far = back side
+                for md in on:
+                    emit_model(md)
+                walk(children[0], front)                  # near = front side
+            else:
+                walk(children[0], front)                  # far = front side
+                for md in on:
+                    emit_model(md)
+                walk(children[1], back)
 
-        walk(self.headnode)
-
-        # brush submodels last (drawn on top; approximate vs world depth)
-        if self.brushmodels:
-            for md in bsp.models[1:]:
-                if not self.box_in_pvs(md["mins"], md["maxs"], vis):
-                    continue
-                ff = md["firstface"]
-                for fi in range(ff, ff + md["numfaces"]):
-                    emit_face_poly(fi)
-
+        walk(self.headnode, pending)
         return polys, leaf

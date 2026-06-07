@@ -66,7 +66,7 @@ class App:
                      for _ in range(PREGROW)]
         self.prev_n = 0
         # filled-polygon pool for flat-shading mode (drawn back-to-front)
-        self.flat = False
+        self.flat = True
         self.polypool = [self.canvas.create_polygon(
             -10, -10, -10, -10, -10, -10, outline="", fill="#000000")
             for _ in range(PREGROW_POLY)]

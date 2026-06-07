@@ -32,8 +32,8 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 | File | Role |
 |------|------|
 | `pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
-| `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing |
-| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). World + brush submodels, both PVS-culled. |
+| `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing; texinfo + embedded miptex decode |
+| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). Faces are tinted by each texture's average colour (sampled from the embedded miptex + the Quake palette) and lit by a static directional light. World + brush submodels, both PVS-culled. |
 | `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove` |
 | `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool |
 

@@ -40,7 +40,9 @@ class App:
         if path not in pak.files:
             sys.exit(f"no such map: {path}")
         self.bsp = Bsp(pak.read(path))
-        self.rend = Renderer(self.bsp)
+        pal = pak.read("gfx/palette.lmp")
+        palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]) for i in range(256)]
+        self.rend = Renderer(self.bsp, palette)
         self.phys = Physics(self.bsp)
 
         # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)

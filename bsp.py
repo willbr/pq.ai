@@ -22,6 +22,8 @@ _S_FACE = struct.Struct("<hhihh4Bi")    # plane side firstedge numedges texinfo 
 _S_PLANE = struct.Struct("<4fi")        # nx ny nz dist type
 _S_NODE = struct.Struct("<i8hHH")       # planenum child[2] mins[3] maxs[3] firstface numfaces
 _S_LEAF = struct.Struct("<ii6hHH4B")    # contents visofs mins[3] maxs[3] firstmark nummark ambient[4]
+_S_TEXINFO = struct.Struct("<8fii")     # vecs[2][4] miptex flags
+_S_MIPTEX = struct.Struct("<16sII4I")   # name width height offsets[4]
 _S_MARK = struct.Struct("<H")
 _S_MODEL = struct.Struct("<9f7i")       # mins[3] maxs[3] origin[3] headnode[4] visleafs firstface numfaces
 _S_CLIPNODE = struct.Struct("<i2h")     # planenum child[2]
@@ -44,9 +46,17 @@ class Bsp:
         self.edges = [e for e in _S_EDGE.iter_unpack(lump(EDGES))]
         self.surfedges = [s[0] for s in _S_SURFEDGE.iter_unpack(lump(SURFEDGES))]
 
-        # faces: keep (planenum, side, firstedge, numedges)
-        self.faces = [(f[0], f[1], f[2], f[3])
+        # faces: keep (planenum, side, firstedge, numedges, texinfo)
+        self.faces = [(f[0], f[1], f[2], f[3], f[4])
                       for f in _S_FACE.iter_unpack(lump(FACES))]
+
+        # texinfo: keep (miptex index, flags); the s/t vectors aren't needed here
+        self.texinfo = [(t[8], t[9])
+                        for t in _S_TEXINFO.iter_unpack(lump(TEXINFO))]
+
+        # textures: decode each embedded miptex to (name, w, h, mip0 index bytes).
+        # The lump is: int nummiptex; int dataofs[nummiptex]; then miptex_t blobs.
+        self.textures = self._load_textures(lump(TEXTURES))
 
         # planes: (normal(3), dist, type)
         self.planes = [((p[0], p[1], p[2]), p[3], p[4])
@@ -79,9 +89,29 @@ class Bsp:
         self.entities = lump(ENTITIES).split(b"\0", 1)[0].decode("latin-1")
 
     # ---- helpers ----
+    def _load_textures(self, tex):
+        """Decode the TEXTURES lump -> list of (name, w, h, mip0_indices) | None.
+        Layout: int nummiptex; int dataofs[nummiptex]; then miptex_t blobs."""
+        out = []
+        if len(tex) < 4:
+            return out
+        nummip, = struct.unpack_from("<i", tex, 0)
+        for i in range(nummip):
+            ofs, = struct.unpack_from("<i", tex, 4 + i * 4)
+            if ofs < 0 or ofs + _S_MIPTEX.size > len(tex):
+                out.append(None)
+                continue
+            name, w, h, o0, o1, o2, o3 = _S_MIPTEX.unpack_from(tex, ofs)
+            name = name.split(b"\0", 1)[0].decode("latin-1")
+            px = None
+            if o0 and ofs + o0 + w * h <= len(tex):
+                px = tex[ofs + o0: ofs + o0 + w * h]   # mip level 0, 8-bit indices
+            out.append((name, w, h, px))
+        return out
+
     def face_vertices(self, face_index):
         """Ordered vertex indices around a face (following surfedge winding)."""
-        _, _, firstedge, numedges = self.faces[face_index]
+        firstedge, numedges = self.faces[face_index][2], self.faces[face_index][3]
         out = []
         for i in range(firstedge, firstedge + numedges):
             se = self.surfedges[i]

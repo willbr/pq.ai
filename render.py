@@ -33,8 +33,9 @@ def angle_vectors(yaw_deg, pitch_deg):
 
 
 class Renderer:
-    def __init__(self, bsp):
+    def __init__(self, bsp, palette=None):
         self.bsp = bsp
+        self.palette = palette          # list of 256 (r,g,b) for texture colours
         self.headnode = bsp.models[0]["headnode"]
         self.width = 800
         self.height = 600
@@ -52,7 +53,7 @@ class Renderer:
         self.face_edges = []
         self.face_verts = []
         self.face_plane = []
-        for planenum, side, firstedge, numedges in bsp.faces:
+        for planenum, side, firstedge, numedges, texinfo in bsp.faces:
             eidx = []
             vidx = []
             for k in range(numedges):
@@ -66,15 +67,34 @@ class Renderer:
                 nx, ny, nz, dist = -nx, -ny, -nz, -dist
             self.face_plane.append((nx, ny, nz, dist))
 
-        # precompute a flat-shade fill colour per face (static directional light)
+        # average RGB per texture (from its mip-0 palette indices)
+        tex_rgb = self._texture_colors()
+
+        # precompute a flat-shade fill colour per face: texture's average colour
+        # modulated by a static directional light. Falls back to grey if a face
+        # has no usable texture / no palette was supplied.
         lx, ly, lz = 0.35, 0.25, 0.90
         lm = math.sqrt(lx * lx + ly * ly + lz * lz)
         lx, ly, lz = lx / lm, ly / lm, lz / lm
+        # Quake texture averages are very dark (the engine brightens with
+        # lightmaps, which we don't apply) -> boost so the scene is visible.
+        gain = 2.2
+        texinfo = bsp.texinfo
         self.face_color = []
-        for nx, ny, nz, dist in self.face_plane:
-            inten = 0.30 + 0.70 * max(0.0, nx * lx + ny * ly + nz * lz)
-            v = min(255, int(25 + 230 * inten))
-            self.face_color.append(f"#{v:02x}{v:02x}{v:02x}")
+        for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
+            inten = (0.50 + 0.50 * max(0.0, nx * lx + ny * ly + nz * lz)) * gain
+            base = None
+            ti = bsp.faces[fi][4]
+            if 0 <= ti < len(texinfo):
+                mt = texinfo[ti][0]
+                if 0 <= mt < len(tex_rgb):
+                    base = tex_rgb[mt]
+            if base is None:
+                base = (140.0, 140.0, 140.0)
+            r = min(255, int(base[0] * inten))
+            g = min(255, int(base[1] * inten))
+            b = min(255, int(base[2] * inten))
+            self.face_color.append(f"#{r:02x}{g:02x}{b:02x}")
 
         # per-frame staleness markers (avoid clearing big arrays every frame)
         self.frame = 0
@@ -85,6 +105,25 @@ class Renderer:
 
         # vis decompression scratch
         self.vis_row = (len(bsp.leafs) + 7) >> 3
+
+    def _texture_colors(self):
+        """Average RGB per miptex via a palette histogram. None where unusable."""
+        from collections import Counter
+        pal = self.palette
+        out = []
+        for t in self.bsp.textures:
+            if t is None or t[3] is None or pal is None:
+                out.append(None)
+                continue
+            r = g = b = tot = 0
+            for idx, c in Counter(t[3]).items():     # idx -> pixel count
+                pr, pg, pb = pal[idx]
+                r += pr * c
+                g += pg * c
+                b += pb * c
+                tot += c
+            out.append((r / tot, g / tot, b / tot) if tot else None)
+        return out
 
     def _update_focal(self):
         self.focal = (self.width / 2) / math.tan(math.radians(self.fov) / 2)

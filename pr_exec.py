@@ -84,6 +84,80 @@ class VM:
     def ent_base(self, num):
         return num * self.edict_size
 
+    # field get/set: num = edict number, slot = field offset (in 32-bit slots)
+    def fget_f(self, num, slot):
+        return self.ef[num * self.edict_size + slot]
+
+    def fset_f(self, num, slot, v):
+        self.ef[num * self.edict_size + slot] = v
+
+    def fget_i(self, num, slot):
+        return self.ei[num * self.edict_size + slot]
+
+    def fset_i(self, num, slot, v):
+        self.ei[num * self.edict_size + slot] = v
+
+    def fget_v(self, num, slot):
+        b = num * self.edict_size + slot
+        return (self.ef[b], self.ef[b + 1], self.ef[b + 2])
+
+    def fset_v(self, num, slot, v):
+        b = num * self.edict_size + slot
+        self.ef[b], self.ef[b + 1], self.ef[b + 2] = v[0], v[1], v[2]
+
+    # ----- builtin parameter / return access (OFS_PARM* and OFS_RETURN) -----
+    def parm_f(self, i):
+        return self.gf[OFS_PARM0 + i * OFS_PARM_STRIDE]
+
+    def parm_i(self, i):
+        return self.gi[OFS_PARM0 + i * OFS_PARM_STRIDE]
+
+    def parm_v(self, i):
+        o = OFS_PARM0 + i * OFS_PARM_STRIDE
+        return (self.gf[o], self.gf[o + 1], self.gf[o + 2])
+
+    def parm_strofs(self, i):
+        return self.gi[OFS_PARM0 + i * OFS_PARM_STRIDE]
+
+    def parm_str(self, i):
+        return self.pr.string(self.gi[OFS_PARM0 + i * OFS_PARM_STRIDE])
+
+    def ret_f(self, v):
+        self.gf[OFS_RETURN] = v
+
+    def ret_i(self, v):
+        self.gi[OFS_RETURN] = v
+
+    def ret_v(self, x, y, z):
+        self.gf[OFS_RETURN] = x
+        self.gf[OFS_RETURN + 1] = y
+        self.gf[OFS_RETURN + 2] = z
+
+    # ----- edict allocation (ED_Alloc / ED_Free / ED_ClearEdict) -----
+    def clear_edict(self, num):
+        b = num * self.edict_size * 4
+        self._ent_buf[b:b + self.edict_size * 4] = bytes(self.edict_size * 4)
+        self.free[num] = False
+
+    def alloc_edict(self):
+        # no clients in our single-player walker, so reuse starts at edict 1
+        for i in range(1, self.num_edicts):
+            if self.free[i]:
+                self.clear_edict(i)
+                return i
+        i = self.num_edicts
+        if i >= self.max_edicts:
+            raise PR_RunError("ED_Alloc: no free edicts")
+        self.num_edicts += 1
+        self.clear_edict(i)
+        return i
+
+    def free_edict(self, num):
+        self.clear_edict(num)
+        if self.fld_nextthink is not None:
+            self.fset_f(num, self.fld_nextthink, -1.0)
+        self.free[num] = True
+
     # ======================================================================
     # call frame management
     # ======================================================================

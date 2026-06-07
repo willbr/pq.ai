@@ -72,8 +72,11 @@ class Progs:
          ofs_fn, n_fn, ofs_str, n_str, ofs_gl, n_gl) = h[2:14]
         self.entityfields = h[14]       # field slots per edict
 
-        # --- strings: one blob of NUL-terminated strings, indexed by byte offset ---
-        self.strings = data[ofs_str:ofs_str + n_str]
+        # --- strings: one NUL-terminated blob, indexed by byte offset. Mutable +
+        # growable so new_string() can append runtime strings (entity values,
+        # ftos results) and hand back a positive offset -- our stand-in for C's
+        # pr_strings heap, where G_STRING is just strings + offset. ---
+        self.strings = bytearray(data[ofs_str:ofs_str + n_str])
 
         # --- statements: (op, a, b, c) tuples ---
         self.statements = [s for s in
@@ -121,6 +124,16 @@ class Progs:
         if end < 0:
             end = len(self.strings)
         return self.strings[ofs:end].decode("latin-1")
+
+    def new_string(self, s):
+        """Append a runtime string to the heap, return its offset (like ED_NewString).
+        Handles the \\n and \\\\ escapes ED_NewString does."""
+        if isinstance(s, str):
+            s = s.encode("latin-1")
+        s = s.replace(b"\\n", b"\n").replace(b"\\\\", b"\\")
+        ofs = len(self.strings)
+        self.strings += s + b"\0"
+        return ofs
 
     def global_ofs(self, name):
         """Global-variable offset by name, or None."""

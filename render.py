@@ -37,6 +37,7 @@ class Renderer:
         self.height = 600
         self.fov = 90.0
         self.backface = True
+        self.brushmodels = True     # draw doors/lifts/buttons (submodels 1..N)
         self._update_focal()
 
         nfaces = len(bsp.faces)
@@ -83,6 +84,39 @@ class Renderer:
             d = px * nx + py * ny + pz * nz - dist
             node = children[0] if d >= 0 else children[1]
         return -node - 1   # leaf index
+
+    def box_in_pvs(self, mins, maxs, vis):
+        """True if the AABB touches any leaf marked visible in the PVS bitset.
+        Walks the world BSP, descending both sides where the box straddles a
+        plane (Quake's Mod_BoxLeafnums, short-circuited on the first hit)."""
+        nodes = self.bsp.nodes
+        planes = self.bsp.planes
+        stack = [self.headnode]
+        while stack:
+            num = stack.pop()
+            while num >= 0:
+                planenum, children, _, _ = nodes[num]
+                (nx, ny, nz), dist, _ = planes[planenum]
+                # project the box extents onto the plane normal
+                near = (nx * (maxs[0] if nx >= 0 else mins[0]) +
+                        ny * (maxs[1] if ny >= 0 else mins[1]) +
+                        nz * (maxs[2] if nz >= 0 else mins[2])) - dist
+                far = (nx * (mins[0] if nx >= 0 else maxs[0]) +
+                       ny * (mins[1] if ny >= 0 else maxs[1]) +
+                       nz * (mins[2] if nz >= 0 else maxs[2])) - dist
+                if far >= 0:
+                    num = children[0]          # fully in front
+                elif near < 0:
+                    num = children[1]          # fully behind
+                else:
+                    stack.append(children[1])  # straddle: visit back later
+                    num = children[0]
+            leafidx = -num - 1
+            if leafidx > 0:
+                bit = leafidx - 1
+                if vis[bit >> 3] & (1 << (bit & 7)):
+                    return True
+        return False
 
     def decompress_vis(self, visofs):
         row = self.vis_row
@@ -161,57 +195,72 @@ class Renderer:
             return c
 
         segments = []
+
+        def emit_face(fi):
+            if face_frame[fi] == frame:
+                return
+            face_frame[fi] = frame
+
+            if backface:
+                nx, ny, nz, dist = face_plane[fi]
+                if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
+                    return
+
+            for ei in face_edges[fi]:
+                if edge_frame[ei] == frame:
+                    continue
+                edge_frame[ei] = frame
+                a, b = edges[ei]
+                cax, cay, caz = transform(a)
+                cbx, cby, cbz = transform(b)
+
+                # near-plane clip (caz/cbz are depth)
+                if caz < NEAR and cbz < NEAR:
+                    continue
+                if caz < NEAR:
+                    t = (NEAR - caz) / (cbz - caz)
+                    cax += (cbx - cax) * t
+                    cay += (cby - cay) * t
+                    caz = NEAR
+                elif cbz < NEAR:
+                    t = (NEAR - cbz) / (caz - cbz)
+                    cbx += (cax - cbx) * t
+                    cby += (cay - cby) * t
+                    cbz = NEAR
+
+                x0 = hw + cax * focal / caz
+                y0 = hh - cay * focal / caz
+                x1 = hw + cbx * focal / cbz
+                y1 = hh - cby * focal / cbz
+
+                # cheap off-screen reject (both ends past one edge)
+                if (x0 < 0 and x1 < 0) or (x0 > W and x1 > W):
+                    continue
+                if (y0 < 0 and y1 < 0) or (y0 > H and y1 > H):
+                    continue
+
+                dxp = x1 - x0
+                dyp = y1 - y0
+                if dxp * dxp + dyp * dyp < MIN_SEG_PX2:
+                    continue                # sub-pixel: not worth a Tk line draw
+
+                segments.append((x0, y0, x1, y1))
+
+        # world (model 0): only the PVS-visible leaves' surfaces
         for li in visible_leaves:
             _, _, firstmark, nummark = leafs[li]
             for m in range(firstmark, firstmark + nummark):
-                fi = marks[m]
-                if face_frame[fi] == frame:
+                emit_face(marks[m])
+
+        # brush submodels (doors, lifts, buttons, secret walls). These aren't in
+        # any leaf's marksurfaces, so the PVS walk never reaches them. They're few,
+        # so just feed them all through backface/off-screen culling.
+        if self.brushmodels:
+            for md in bsp.models[1:]:
+                if not self.box_in_pvs(md["mins"], md["maxs"], vis):
                     continue
-                face_frame[fi] = frame
-
-                if backface:
-                    nx, ny, nz, dist = face_plane[fi]
-                    if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
-                        continue
-
-                for ei in face_edges[fi]:
-                    if edge_frame[ei] == frame:
-                        continue
-                    edge_frame[ei] = frame
-                    a, b = edges[ei]
-                    cax, cay, caz = transform(a)
-                    cbx, cby, cbz = transform(b)
-
-                    # near-plane clip (caz/cbz are depth)
-                    if caz < NEAR and cbz < NEAR:
-                        continue
-                    if caz < NEAR:
-                        t = (NEAR - caz) / (cbz - caz)
-                        cax += (cbx - cax) * t
-                        cay += (cby - cay) * t
-                        caz = NEAR
-                    elif cbz < NEAR:
-                        t = (NEAR - cbz) / (caz - cbz)
-                        cbx += (cax - cbx) * t
-                        cby += (cay - cby) * t
-                        cbz = NEAR
-
-                    x0 = hw + cax * focal / caz
-                    y0 = hh - cay * focal / caz
-                    x1 = hw + cbx * focal / cbz
-                    y1 = hh - cby * focal / cbz
-
-                    # cheap off-screen reject (both ends past one edge)
-                    if (x0 < 0 and x1 < 0) or (x0 > W and x1 > W):
-                        continue
-                    if (y0 < 0 and y1 < 0) or (y0 > H and y1 > H):
-                        continue
-
-                    dxp = x1 - x0
-                    dyp = y1 - y0
-                    if dxp * dxp + dyp * dyp < MIN_SEG_PX2:
-                        continue            # sub-pixel: not worth a Tk line draw
-
-                    segments.append((x0, y0, x1, y1))
+                ff = md["firstface"]
+                for fi in range(ff, ff + md["numfaces"]):
+                    emit_face(fi)
 
         return segments, leaf

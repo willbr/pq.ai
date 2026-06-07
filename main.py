@@ -24,6 +24,7 @@ from render import Renderer, angle_vectors
 from physics import Physics, VIEW_HEIGHT, MAXSPEED
 from progs import Progs
 from sv import Server
+from mdl import Mdl
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
 SV_TICK = 0.1              # server runs the QC at a fixed 10 Hz (like Quake)
@@ -54,6 +55,15 @@ class App:
         self.sv = Server(Progs(pak.read("progs.dat")), bsp=self.bsp, mapname=path)
         self.sv.load_level()
         self.sv_accum = 0.0
+
+        # load the .mdl models the level precached, indexed to match modelindex
+        self.models = [None] * len(self.sv.model_precache)
+        for idx, name in enumerate(self.sv.model_precache):
+            if name.endswith(".mdl") and name in pak.files:
+                try:
+                    self.models[idx] = Mdl(pak.read(name), palette)
+                except Exception as e:
+                    print(f"mdl load failed for {name}: {e}")
 
         # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
         (sx, sy, sz), yaw = self.bsp.find_spawn()
@@ -226,14 +236,17 @@ class App:
             self.sv_accum -= SV_TICK
             steps += 1
         brush_ents = self.sv.brush_models()
+        alias_ents = self._alias_ents()
 
         eye = (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT)
         if self.flat:
-            polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch, brush_ents)
+            polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
+                                                  brush_ents, alias_ents)
             self._draw_polys(polys)
             nprim = len(polys)
         else:
-            segs, leaf = self.rend.render(eye, self.yaw, self.pitch, brush_ents)
+            segs, leaf = self.rend.render(eye, self.yaw, self.pitch,
+                                          brush_ents, alias_ents)
             self._draw(segs)
             nprim = len(segs)
 
@@ -252,6 +265,19 @@ class App:
         # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
         work_ms = (time.perf_counter() - now) * 1000
         self.root.after(max(1, int(16 - work_ms)), self.tick)
+
+    def _alias_ents(self):
+        """Resolve live .mdl entities to (mdl, current-frame verts, origin, angles)."""
+        out = []
+        models = self.models
+        nmodels = len(models)
+        now = self.sv.time
+        for mi, org, ang, frame in self.sv.alias_entities():
+            m = models[mi] if mi < nmodels else None
+            if m is None:
+                continue
+            out.append((m, m.frame_verts(frame, now), org, ang))
+        return out
 
     def _draw(self, segs):
         c = self.canvas

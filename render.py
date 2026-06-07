@@ -33,6 +33,26 @@ def angle_vectors(yaw_deg, pitch_deg):
     return forward, right, up
 
 
+def model_axes(angles):
+    """Standard Quake AngleVectors for an alias model (pitch is negated, as in
+    R_AliasSetUpTransform). angles = (pitch, yaw, roll) in degrees."""
+    p = math.radians(-angles[0]); y = math.radians(angles[1]); r = math.radians(angles[2])
+    sp, cp = math.sin(p), math.cos(p)
+    sy, cy = math.sin(y), math.cos(y)
+    sr, cr = math.sin(r), math.cos(r)
+    forward = (cp * cy, cp * sy, -sp)
+    right = (-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp)
+    up = (cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp)
+    return forward, right, up
+
+
+# directional light for flat-shading alias models (matches the world's look)
+_AL = (0.35, 0.25, 0.90)
+_ALM = math.sqrt(_AL[0] ** 2 + _AL[1] ** 2 + _AL[2] ** 2)
+ALIAS_LIGHT = (_AL[0] / _ALM, _AL[1] / _ALM, _AL[2] / _ALM)
+ALIAS_GAIN = 2.0           # Quake skin averages are dark; brighten to be visible
+
+
 class Renderer:
     def __init__(self, bsp, palette=None):
         self.bsp = bsp
@@ -221,7 +241,7 @@ class Renderer:
         return bytes(out)
 
     # ---- main entry ----
-    def render(self, origin, yaw, pitch, brush_ents=None):
+    def render(self, origin, yaw, pitch, brush_ents=None, alias_ents=None):
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -373,11 +393,39 @@ class Renderer:
                 for fi in range(ff, ff + md["numfaces"]):
                     emit_face_ofs(fi, ofx, ofy, ofz)
 
+        # alias (.mdl) entities as triangle wireframe
+        if alias_ents:
+            for mdl, verts, org, ang in alias_ents:
+                r = mdl.boundingradius
+                if not self.box_in_pvs((org[0] - r, org[1] - r, org[2] - r),
+                                       (org[0] + r, org[1] + r, org[2] + r), vis):
+                    continue
+                ox_e, oy_e, oz_e = org
+                afwd, arr, aup = model_axes(ang)
+                afx, afy, afz = afwd
+                arx, ary, arz = arr
+                aux, auy, auz = aup
+                cam = []
+                for vx, vy, vz in verts:
+                    wx = ox_e + vx * afx - vy * arx + vz * aux
+                    wy = oy_e + vx * afy - vy * ary + vz * auy
+                    wz = oz_e + vx * afz - vy * arz + vz * auz
+                    dx, dy, dz = wx - ox, wy - oy, wz - oz
+                    cam.append((dx * rx + dy * ry + dz * rz,
+                                dx * ux + dy * uy + dz * uz,
+                                dx * fx + dy * fy + dz * fz))
+                for a, b, c in mdl.tris:
+                    ca, cb, cc = cam[a], cam[b], cam[c]
+                    emit_seg(ca[0], ca[1], ca[2], cb[0], cb[1], cb[2])
+                    emit_seg(cb[0], cb[1], cb[2], cc[0], cc[1], cc[2])
+                    emit_seg(cc[0], cc[1], cc[2], ca[0], ca[1], ca[2])
+
         return segments, leaf
 
-    def render_shaded(self, origin, yaw, pitch, brush_ents=None):
+    def render_shaded(self, origin, yaw, pitch, brush_ents=None, alias_ents=None):
         """Flat-shaded polygons, back-to-front (painter's algorithm via the BSP).
-        Returns (polys, leaf) where each poly is (flat_xy_coords, fill_color)."""
+        Returns (polys, leaf) where each poly is (flat_xy_coords, fill_color).
+        alias_ents: (mdl, model_space_verts, origin, angles) for .mdl entities."""
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -494,7 +542,60 @@ class Renderer:
                             dx * fx + dy * fy + dz * fz))
             project_poly(pts, face_color[fi])
 
+        def emit_alias(item):
+            # alias (.mdl) entity: rotate model verts by angles, translate to the
+            # entity origin, draw triangles back-to-front (no backface cull -- a
+            # closed mesh painted far-to-near self-occludes correctly).
+            verts = item["verts"]
+            ox_e, oy_e, oz_e = item["origin"]
+            afwd, arr, aup = model_axes(item["angles"])
+            afx, afy, afz = afwd
+            arx, ary, arz = arr
+            aux, auy, auz = aup
+            cam = []
+            wpos = []
+            for vx, vy, vz in verts:
+                wx = ox_e + vx * afx - vy * arx + vz * aux
+                wy = oy_e + vx * afy - vy * ary + vz * auy
+                wz = oz_e + vx * afz - vy * arz + vz * auz
+                dx, dy, dz = wx - ox, wy - oy, wz - oz
+                cam.append((dx * rx + dy * ry + dz * rz,
+                            dx * ux + dy * uy + dz * uz,
+                            dx * fx + dy * fy + dz * fz))
+                wpos.append((wx, wy, wz))
+
+            base = item["mdl"].skin_color or (150.0, 150.0, 150.0)
+            br, bg, bb = base
+            lx, ly, lz = ALIAS_LIGHT
+            tris = item["mdl"].tris
+            # back-to-front by triangle centroid depth (camera z)
+            order = sorted(range(len(tris)),
+                           key=lambda ti: -(cam[tris[ti][0]][2] + cam[tris[ti][1]][2]
+                                            + cam[tris[ti][2]][2]))
+            for ti in order:
+                a, b, c = tris[ti]
+                ca, cb, cc = cam[a], cam[b], cam[c]
+                if ca[2] < NEAR and cb[2] < NEAR and cc[2] < NEAR:
+                    continue
+                # world-space face normal for shading (abs dot: sign-independent)
+                ax, ay, az = wpos[a]
+                ux1, uy1, uz1 = wpos[b][0] - ax, wpos[b][1] - ay, wpos[b][2] - az
+                vx1, vy1, vz1 = wpos[c][0] - ax, wpos[c][1] - ay, wpos[c][2] - az
+                nx = uy1 * vz1 - uz1 * vy1
+                ny = uz1 * vx1 - ux1 * vz1
+                nz = ux1 * vy1 - uy1 * vx1
+                nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+                inten = (0.5 + 0.5 * abs((nx * lx + ny * ly + nz * lz) / nl)) * ALIAS_GAIN \
+                    if nl else 0.6 * ALIAS_GAIN
+                r = min(255, int(br * inten))
+                g = min(255, int(bg * inten))
+                bl = min(255, int(bb * inten))
+                project_poly([ca, cb, cc], f"#{r:02x}{g:02x}{bl:02x}")
+
         def emit_model(item):
+            if "mdl" in item:
+                emit_alias(item)
+                return
             # a brush model has its own BSP sub-tree; walk it far-child-first so
             # its faces paint back-to-front (correct even when non-convex). The
             # plane sides are tested in the model's own space (camera - offset).
@@ -559,6 +660,17 @@ class Renderer:
                 if self.box_in_pvs(mins, maxs, vis):
                     pending.append({"headnode": md["headnodes"][0],
                                     "mins": mins, "maxs": maxs, "ofs": ofs})
+
+        # alias (.mdl) entities -- monsters, items. Woven into the same painter's
+        # walk by a bounding cube (origin +/- the model radius), like brush models.
+        if alias_ents:
+            for mdl, verts, org, ang in alias_ents:
+                r = mdl.boundingradius
+                mins = (org[0] - r, org[1] - r, org[2] - r)
+                maxs = (org[0] + r, org[1] + r, org[2] + r)
+                if self.box_in_pvs(mins, maxs, vis):
+                    pending.append({"mdl": mdl, "verts": verts, "origin": org,
+                                    "angles": ang, "mins": mins, "maxs": maxs})
 
         # PVS: mark every node on the path from each visible leaf up to the root
         node_visframe = self.node_visframe

@@ -311,6 +311,23 @@ class Server:
                 out.append((int(mp[mi][1:]), vm.fget_v(num, forg), vm.fget_v(num, fang)))
         return out
 
+    def alias_entities(self):
+        """Live .mdl entities as (modelindex, origin, angles, frame), for the
+        renderer (monsters, items). Skips brush '*N' and non-.mdl models."""
+        vm = self.vm
+        mp = self.model_precache
+        fmi, forg, fang, ffr = (self.f["modelindex"], self.f["origin"],
+                                self.f["angles"], self.f["frame"])
+        out = []
+        for num in range(1, vm.num_edicts):
+            if vm.free[num]:
+                continue
+            mi = vm.fget_i(num, fmi)
+            if 0 < mi < len(mp) and mp[mi][-4:] == ".mdl":
+                out.append((mi, vm.fget_v(num, forg), vm.fget_v(num, fang),
+                            int(vm.fget_f(num, ffr))))
+        return out
+
     # ================================================================
     # builtins
     # ================================================================

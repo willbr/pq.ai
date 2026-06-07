@@ -33,10 +33,11 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 |------|------|
 | `pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
 | `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing; texinfo + embedded miptex decode |
+| `mdl.py` | Alias model (`.mdl`) reader: header, skins, triangles, and per-frame vertex sets (single + time-animated groups), decoded to float positions |
 | `progs.py` | `progs.dat` (QuakeC v6) loader: statements, defs, functions, a growable string heap, and the globals block as one buffer with aliased float/int views (the `eval_t` union) |
 | `pr_exec.py` | The QuakeC bytecode interpreter — `PR_ExecuteProgram`'s opcode loop, call frames, and a flat integer-indexed edict store (all edict fields in one buffer, edict *N* at *N·edict_size*) |
 | `sv.py` | Server layer: the ~65 builtins (`pr_cmds.c`), entity spawning from the BSP string (`ED_LoadFromFile`), and the think/movetype frame loop. Runs id's **actual compiled game code** |
-| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). Faces are tinted by each texture's average colour (sampled from the embedded miptex + the Quake palette) and lit by a static directional light. World + brush-model **entities**, drawn at the origins the QC sets, both PVS-culled |
+| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). Faces are tinted by each texture's average colour (sampled from the embedded miptex + the Quake palette) and lit by a static directional light. Draws the world, brush-model **entities** (at the origins the QC sets), and **alias models** (monsters/items — rotated, animated, woven into the painter's walk by bounding box), all PVS-culled |
 | `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove` |
 | `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool; ticks the QC server at a fixed 10 Hz |
 
@@ -65,10 +66,12 @@ A **QuakeC virtual machine** (`progs.py` + `pr_exec.py` + `sv.py`) runs the genu
 and ticks every entity's think chain at 10 Hz. Doors, lifts and buttons are real
 entities — their brush models are drawn at the origins the QC sets — and invisible
 trigger volumes correctly stop rendering (the static renderer used to draw them as
-solid blocks). Monster/item think chains run, so monsters *animate* even though
-their `.mdl` models aren't drawn yet.
+solid blocks). Monsters and items are drawn as **animated `.mdl` models**, their
+frames advancing through the real QuakeC animation chains (a grunt cycles its eight
+`army_stand` frames via the `STATE` opcode, etc.).
 
 **Still stubbed:** collision builtins (`traceline`, `walkmove`, `droptofloor`, …)
 return clear-path defaults, and there's no player entity in the simulation yet — so
-nothing *triggers* the doors as you walk through. Wiring the builtins to `physics.py`
-and drawing `.mdl` models are the next milestones.
+monsters stand and animate but don't navigate, and nothing *triggers* the doors as
+you walk through. Wiring the builtins to `physics.py` (and adding a player edict so
+touch/trigger works) is the next milestone.

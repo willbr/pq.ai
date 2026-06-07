@@ -67,7 +67,9 @@ class Bsp:
         for m in _S_MODEL.iter_unpack(lump(MODELS)):
             self.models.append({
                 "mins": m[0:3], "maxs": m[3:6], "origin": m[6:9],
-                "headnode": m[9], "firstface": m[14], "numfaces": m[15],
+                "headnode": m[9],              # hull 0 (visual BSP nodes)
+                "headnodes": (m[9], m[10], m[11], m[12]),  # all 4 hulls
+                "firstface": m[14], "numfaces": m[15],
             })
 
         # clipnodes (for collision later): (planenum, (child0, child1))

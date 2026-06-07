@@ -33,6 +33,7 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 | `pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
 | `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing |
 | `render.py` | Per-frame pipeline: find camera leaf → decompress PVS → backface cull → near-plane clip → perspective project |
+| `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove` |
 | `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool |
 
 The trick that makes it fast enough: wireframe needs **no framebuffer**. We draw edges
@@ -41,5 +42,6 @@ down to ~200 visible faces per frame, so the Python-side math is ~1 ms/frame.
 
 ## Status
 
-Loads + renders + flies through all episode-1 shareware maps. Noclip only — no
-collision yet.
+Loads, renders, and **walks** through all episode-1 shareware maps with real Quake
+collision: gravity, floor/wall sliding, stair stepping, and jumping. Press `N` for
+noclip flight. No entities/monsters yet — that's the next milestone.

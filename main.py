@@ -7,21 +7,23 @@ it as wireframe 3D drawn with tkinter Canvas lines.
 
 Controls:
     WASD / arrows   move          mouse        look (click window to capture)
-    Space / Ctrl    up / down     Shift        move faster
-    Tab             toggle mouselook            Esc   release mouse / quit
+    Space           jump (walk) / up (noclip)  Shift   move faster
+    N               toggle noclip flight        Tab    toggle mouselook
+    Esc             release mouse / quit
 """
 
+import math
 import sys
 import time
 import tkinter as tk
 
 from pak import Pak
 from bsp import Bsp
-from render import Renderer
+from render import Renderer, angle_vectors
+from physics import Physics, VIEW_HEIGHT, MAXSPEED
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
-EYE_HEIGHT = 22.0          # Quake viewheight
-MOVE_SPEED = 400.0         # units / second
+NOCLIP_SPEED = 500.0       # units / second when flying
 LOOK_SENS = 0.15           # degrees / pixel
 
 
@@ -33,10 +35,14 @@ class App:
             sys.exit(f"no such map: {path}")
         self.bsp = Bsp(pak.read(path))
         self.rend = Renderer(self.bsp)
+        self.phys = Physics(self.bsp)
 
-        # camera from the level's spawn point
+        # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
         (sx, sy, sz), yaw = self.bsp.find_spawn()
-        self.pos = [sx, sy, sz + EYE_HEIGHT]
+        self.pos = [sx, sy, sz]
+        self.vel = [0.0, 0.0, 0.0]
+        self.onground = False
+        self.noclip = False
         self.yaw = yaw
         self.pitch = 0.0
 
@@ -81,6 +87,10 @@ class App:
         if k == "tab":
             self._set_mouselook(not self.mouselook)
             return
+        if k == "n":
+            self.noclip = not self.noclip
+            self.vel = [0.0, 0.0, 0.0]
+            return
         self.keys.add(k)
 
     def _keyup(self, e):
@@ -118,20 +128,46 @@ class App:
                              self.canvas.winfo_height())
 
     # ---- movement ----
-    def _move(self, dt):
-        from render import angle_vectors
-        forward, right, up = angle_vectors(self.yaw, self.pitch)
-        speed = MOVE_SPEED * (3.0 if "shift_l" in self.keys or
-                              "shift_r" in self.keys else 1.0) * dt
+    def _wishmove(self):
+        """Forward/strafe intent from keys, as -1..1 each."""
         fwd = (("w" in self.keys or "up" in self.keys) -
                ("s" in self.keys or "down" in self.keys))
         strafe = (("d" in self.keys or "right" in self.keys) -
                   ("a" in self.keys or "left" in self.keys))
-        rise = (("space" in self.keys) - ("control_l" in self.keys or
-                                          "control_r" in self.keys))
-        for i in range(3):
-            self.pos[i] += (forward[i] * fwd + right[i] * strafe +
-                            up[i] * rise) * speed
+        return fwd, strafe
+
+    def _move(self, dt):
+        fwd, strafe = self._wishmove()
+        fast = "shift_l" in self.keys or "shift_r" in self.keys
+
+        if self.noclip:
+            # free fly along the full view direction (pitch included), no gravity
+            forward, right, up = angle_vectors(self.yaw, self.pitch)
+            rise = (("space" in self.keys) -
+                    ("control_l" in self.keys or "control_r" in self.keys))
+            speed = NOCLIP_SPEED * (3.0 if fast else 1.0) * dt
+            for i in range(3):
+                self.pos[i] += (forward[i] * fwd + right[i] * strafe +
+                                up[i] * rise) * speed
+            self.vel = [0.0, 0.0, 0.0]
+            return
+
+        # walking: build a horizontal wish direction from yaw only
+        forward, right, _ = angle_vectors(self.yaw, 0.0)
+        wx = forward[0] * fwd + right[0] * strafe
+        wy = forward[1] * fwd + right[1] * strafe
+        wl = math.hypot(wx, wy)
+        if wl < 1e-6:
+            wishdir, wishspeed = (0.0, 0.0, 0.0), 0.0
+        else:
+            wishdir = (wx / wl, wy / wl, 0.0)
+            wishspeed = MAXSPEED * (1.6 if fast else 1.0)
+
+        # clamp dt so a hitch can't tunnel the player through a wall
+        step = min(dt, 0.05)
+        self.onground = self.phys.player_move(
+            self.pos, self.vel, wishdir, wishspeed,
+            self.onground, "space" in self.keys, step)
 
     # ---- main loop ----
     def tick(self):
@@ -142,15 +178,19 @@ class App:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
 
         self._move(dt)
-        segs, leaf = self.rend.render(self.pos, self.yaw, self.pitch)
+        eye = (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT)
+        segs, leaf = self.rend.render(eye, self.yaw, self.pitch)
         self._draw(segs)
 
+        spd = math.hypot(self.vel[0], self.vel[1])
+        mode = "NOCLIP" if self.noclip else ("ground" if self.onground else "air")
         self.canvas.itemconfig(
             self.hud,
-            text=(f"{self.fps:5.1f} fps   segs {len(segs)}   leaf {leaf}\n"
+            text=(f"{self.fps:5.1f} fps   segs {len(segs)}   leaf {leaf}   {mode}\n"
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
-                  f"yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
-                  f"{'MOUSELOOK' if self.mouselook else 'click to capture mouse'}"))
+                  f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
+                  f"{'MOUSELOOK' if self.mouselook else 'click to capture mouse'} "
+                  f"[N]oclip"))
         self.canvas.tag_raise(self.hud)
         self.root.after(8, self.tick)
 

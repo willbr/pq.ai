@@ -13,6 +13,7 @@ Controls:
     F               toggle flat shading         Esc    release mouse / quit
 """
 
+import ctypes
 import math
 import sys
 import time
@@ -35,6 +36,28 @@ YAW_SPEED = 140.0          # degrees / second (keyboard turning)
 LINE_COLOR = "#00ff66"
 PREGROW = 2048             # line items pre-created up front to avoid hitches
 PREGROW_POLY = 768         # polygon items pre-created for flat-shading mode
+
+
+def _make_cursor_reassociator():
+    """macOS warps the cursor with CGWarpMouseCursorPosition, which suppresses
+    mouse-delta events for ~0.25s afterwards — so warp-based mouselook stutters
+    (the view 'clamps' at each recenter). Re-associating the mouse and cursor
+    right after the warp cancels that suppression (the SDL workaround). Returns
+    a no-arg callable, or None off macOS / if the framework can't be loaded."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        cg = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices."
+                         "framework/ApplicationServices")
+        fn = cg.CGAssociateMouseAndMouseCursorPosition
+        fn.argtypes = [ctypes.c_int]
+        fn.restype = ctypes.c_int
+        return lambda: fn(True)
+    except OSError:
+        return None
+
+
+_reassociate_cursor = _make_cursor_reassociator()
 
 
 class App:
@@ -98,6 +121,7 @@ class App:
         # input state
         self.keys = set()
         self.mouselook = False
+        self._last_mouse = None
         self.last_t = time.perf_counter()
         self.fps = 0.0
 
@@ -148,27 +172,47 @@ class App:
         self.mouselook = on
         self.canvas.config(cursor="none" if on else "")
         if on:
+            self._last_mouse = None
             self._warp_center()
 
     def _warp_center(self):
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
+        # record the centre BEFORE generating the event: Tk delivers the warp's
+        # <Motion> synchronously, re-entering _motion, so _last_mouse must
+        # already be the centre or that event computes a movement-cancelling
+        # delta (the view snaps back toward where it started).
+        self._last_mouse = (w // 2, h // 2)
         self.canvas.event_generate("<Motion>", warp=True,
                                    x=w // 2, y=h // 2)
+        # cancel macOS's post-warp event suppression so turning stays smooth
+        if _reassociate_cursor is not None:
+            _reassociate_cursor()
 
     def _motion(self, e):
         if not self.mouselook:
             return
-        w = self.canvas.winfo_width()
-        h = self.canvas.winfo_height()
-        cx, cy = w // 2, h // 2
-        dx, dy = e.x - cx, e.y - cy
+        # accumulate deltas from the previous cursor position rather than from
+        # the centre. macOS suppresses mouse-motion events for ~250ms after a
+        # programmatic warp, so warping every frame eats most of the movement;
+        # instead we only recenter near the window edge (rarely), keeping motion
+        # smooth in between.
+        if self._last_mouse is None:
+            self._last_mouse = (e.x, e.y)
+            return
+        lx, ly = self._last_mouse
+        dx, dy = e.x - lx, e.y - ly
+        self._last_mouse = (e.x, e.y)
         if dx == 0 and dy == 0:
             return
         self.yaw -= dx * LOOK_SENS
-        self.pitch -= dy * LOOK_SENS
+        self.pitch += dy * LOOK_SENS
         self.pitch = max(-89.0, min(89.0, self.pitch))
-        self._warp_center()
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        margin = 100
+        if e.x < margin or e.x > w - margin or e.y < margin or e.y > h - margin:
+            self._warp_center()
 
     def _resize(self, e):
         self.rend.resize(e.width, e.height)

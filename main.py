@@ -112,7 +112,10 @@ class App:
         r.bind("<KeyRelease>", self._keyup)
         r.bind("<Motion>", self._motion)
         self.canvas.bind("<Button-1>", lambda e: self._set_mouselook(True))
-        r.bind("<Configure>", self._resize)
+        # bind on the canvas (not root) and use the event's own size: at startup
+        # the canvas may not be laid out when the root's first <Configure> fires,
+        # so winfo_width() would read 1 and the projection would collapse.
+        self.canvas.bind("<Configure>", self._resize)
 
     def _keydown(self, e):
         k = e.keysym.lower()
@@ -168,9 +171,7 @@ class App:
         self._warp_center()
 
     def _resize(self, e):
-        if e.widget is self.root:
-            self.rend.resize(self.canvas.winfo_width(),
-                             self.canvas.winfo_height())
+        self.rend.resize(e.width, e.height)
 
     # ---- movement ----
     def _wishmove(self):

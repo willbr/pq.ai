@@ -6,7 +6,8 @@ it as wireframe 3D drawn with tkinter Canvas lines.
     python3 main.py [mapname]      e.g. python3 main.py e1m1
 
 Controls:
-    WASD / arrows   move          mouse        look (click window to capture)
+    WASD            move          mouse        look (click window to capture)
+    left / right    turn          up / down    forward / back
     Space           jump (walk) / up (noclip)  Shift   move faster
     N               toggle noclip flight        Tab    toggle mouselook
     Esc             release mouse / quit
@@ -25,6 +26,7 @@ from physics import Physics, VIEW_HEIGHT, MAXSPEED
 PAK_PATH = "quake-shareware/id1/pak0.pak"
 NOCLIP_SPEED = 500.0       # units / second when flying
 LOOK_SENS = 0.15           # degrees / pixel
+YAW_SPEED = 140.0          # degrees / second (keyboard turning)
 
 
 class App:
@@ -132,11 +134,14 @@ class App:
         """Forward/strafe intent from keys, as -1..1 each."""
         fwd = (("w" in self.keys or "up" in self.keys) -
                ("s" in self.keys or "down" in self.keys))
-        strafe = (("d" in self.keys or "right" in self.keys) -
-                  ("a" in self.keys or "left" in self.keys))
+        strafe = ("d" in self.keys) - ("a" in self.keys)
         return fwd, strafe
 
     def _move(self, dt):
+        # left/right arrows turn (yaw)
+        turn = ("right" in self.keys) - ("left" in self.keys)
+        self.yaw -= turn * YAW_SPEED * dt
+
         fwd, strafe = self._wishmove()
         fast = "shift_l" in self.keys or "shift_r" in self.keys
 

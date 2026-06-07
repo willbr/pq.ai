@@ -53,15 +53,24 @@ class Renderer:
         self.face_edges = []
         self.face_verts = []
         self.face_plane = []
+        self.face_centroid = []     # world-space centroid (for sorting model faces)
         for planenum, side, firstedge, numedges, texinfo in bsp.faces:
             eidx = []
             vidx = []
+            sx = sy = sz = 0.0
             for k in range(numedges):
                 se = bsp.surfedges[firstedge + k]
                 eidx.append(abs(se))
-                vidx.append(bsp.edges[se][0] if se >= 0 else bsp.edges[-se][1])
+                vi = bsp.edges[se][0] if se >= 0 else bsp.edges[-se][1]
+                vidx.append(vi)
+                vx, vy, vz = bsp.vertexes[vi]
+                sx += vx
+                sy += vy
+                sz += vz
             self.face_edges.append(eidx)
             self.face_verts.append(vidx)
+            inv = 1.0 / numedges if numedges else 0.0
+            self.face_centroid.append((sx * inv, sy * inv, sz * inv))
             (nx, ny, nz), dist, _ = bsp.planes[planenum]
             if side:
                 nx, ny, nz, dist = -nx, -ny, -nz, -dist
@@ -402,10 +411,36 @@ class Renderer:
                 flat.append(hh - cy * focal / cz)
             polys.append((flat, face_color[fi]))
 
+        face_centroid = self.face_centroid
+
         def emit_model(md):
             ff = md["firstface"]
-            for fi in range(ff, ff + md["numfaces"]):
+            nf = md["numfaces"]
+            if nf <= 1:
+                emit_face_poly(ff)
+                return
+            # a brush model isn't convex/BSP-ordered, so sort its own faces
+            # back-to-front by centroid depth before painting them
+            order = []
+            for fi in range(ff, ff + nf):
+                cx, cy, cz = face_centroid[fi]
+                d = (cx - ox) * fx + (cy - oy) * fy + (cz - oz) * fz
+                order.append((d, fi))
+            order.sort(reverse=True)        # far first
+            for _, fi in order:
                 emit_face_poly(fi)
+
+        def emit_models(mlist):
+            if len(mlist) > 1:              # several at one depth -> sort by centre
+                def keyf(md):
+                    mn, mx = md["mins"], md["maxs"]
+                    cx = (mn[0] + mx[0]) * 0.5
+                    cy = (mn[1] + mx[1]) * 0.5
+                    cz = (mn[2] + mx[2]) * 0.5
+                    return -((cx - ox) * fx + (cy - oy) * fy + (cz - oz) * fz)
+                mlist = sorted(mlist, key=keyf)
+            for md in mlist:
+                emit_model(md)
 
         def box_side(mins, maxs, nx, ny, nz, dist):
             # +1 box fully in front of plane, -1 fully behind, 0 straddles
@@ -437,8 +472,7 @@ class Renderer:
                         _, _, fm, nm = leafs[li]
                         for m in range(fm, fm + nm):
                             emit_face_poly(marks[m])
-                for md in models:
-                    emit_model(md)
+                emit_models(models)
                 return
             planenum, children, _, _ = nodes[num]
             (nx, ny, nz), dist, _ = planes[planenum]
@@ -451,13 +485,11 @@ class Renderer:
                 front = back = on = ()
             if ox * nx + oy * ny + oz * nz - dist >= 0:   # camera in front
                 walk(children[1], back)                   # far = back side
-                for md in on:
-                    emit_model(md)
+                emit_models(on)
                 walk(children[0], front)                  # near = front side
             else:
                 walk(children[0], front)                  # far = front side
-                for md in on:
-                    emit_model(md)
+                emit_models(on)
                 walk(children[1], back)
 
         walk(self.headnode, pending)

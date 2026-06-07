@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Quake game data (id Software copyright — download separately, do not redistribute)
+quake-shareware/
+quake106.zip
+
+# id Software GPL source, kept locally as reference (its own git repo)
+quake-source/

@@ -33,9 +33,12 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 |------|------|
 | `pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
 | `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing; texinfo + embedded miptex decode |
-| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). Faces are tinted by each texture's average colour (sampled from the embedded miptex + the Quake palette) and lit by a static directional light. World + brush submodels, both PVS-culled. |
+| `progs.py` | `progs.dat` (QuakeC v6) loader: statements, defs, functions, a growable string heap, and the globals block as one buffer with aliased float/int views (the `eval_t` union) |
+| `pr_exec.py` | The QuakeC bytecode interpreter — `PR_ExecuteProgram`'s opcode loop, call frames, and a flat integer-indexed edict store (all edict fields in one buffer, edict *N* at *N·edict_size*) |
+| `sv.py` | Server layer: the ~65 builtins (`pr_cmds.c`), entity spawning from the BSP string (`ED_LoadFromFile`), and the think/movetype frame loop. Runs id's **actual compiled game code** |
+| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). Faces are tinted by each texture's average colour (sampled from the embedded miptex + the Quake palette) and lit by a static directional light. World + brush-model **entities**, drawn at the origins the QC sets, both PVS-culled |
 | `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove` |
-| `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool |
+| `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool; ticks the QC server at a fixed 10 Hz |
 
 The trick that makes it fast enough: wireframe needs **no framebuffer**. We draw edges
 with `Canvas.create_line` (C-implemented), and PVS + backface culling cut a ~5,500-face
@@ -55,6 +58,17 @@ Tk actually draws.)
 Loads, renders, and **walks** through all episode-1 shareware maps with real Quake
 collision: gravity, floor/wall sliding, stair stepping, and jumping. Press `N` for
 noclip flight, `F` to toggle **flat shading** (Tk `create_polygon`, drawn
-back-to-front via the BSP — no z-buffer needed). World geometry **and** brush
-submodels (doors, lifts, buttons, platforms) are drawn, both PVS-culled. No point
-entities/monsters (`.mdl` models) yet — that's the next milestone.
+back-to-front via the BSP — no z-buffer needed).
+
+A **QuakeC virtual machine** (`progs.py` + `pr_exec.py` + `sv.py`) runs the genuine
+`progs.dat` game logic: it spawns the whole entity list, runs each spawn function,
+and ticks every entity's think chain at 10 Hz. Doors, lifts and buttons are real
+entities — their brush models are drawn at the origins the QC sets — and invisible
+trigger volumes correctly stop rendering (the static renderer used to draw them as
+solid blocks). Monster/item think chains run, so monsters *animate* even though
+their `.mdl` models aren't drawn yet.
+
+**Still stubbed:** collision builtins (`traceline`, `walkmove`, `droptofloor`, …)
+return clear-path defaults, and there's no player entity in the simulation yet — so
+nothing *triggers* the doors as you walk through. Wiring the builtins to `physics.py`
+and drawing `.mdl` models are the next milestones.

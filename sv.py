@@ -23,14 +23,16 @@ SPAWNFLAG_NOT_DEATHMATCH = 2048
 
 FL_ONGROUND = 512
 SOLID_BSP = 4
+MOVETYPE_NONE = 0
 MOVETYPE_PUSH = 7
+MOVETYPE_NOCLIP = 8
 CONTENTS_EMPTY = -1
 
 # entity fields we touch from the engine side
 _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs",
            "size", "nextthink", "think", "frame", "flags", "solid", "movetype",
-           "velocity", "groundentity", "ideal_yaw", "yaw_speed", "chain",
-           "spawnflags", "view_ofs")
+           "velocity", "avelocity", "groundentity", "ideal_yaw", "yaw_speed",
+           "chain", "spawnflags", "view_ofs")
 
 # system globals we read/write
 _GLOBALS = ("self", "other", "time", "frametime", "force_retouch",
@@ -261,10 +263,26 @@ class Server:
         self.gset_f("frametime", dt)
         self.gset_f("time", self.time)
 
-        ntf, thf = self.f["nextthink"], self.f["think"]
+        ntf, thf, mtf = self.f["nextthink"], self.f["think"], self.f["movetype"]
+        forg, fang = self.f["origin"], self.f["angles"]
+        fvel, favel = self.f["velocity"], self.f["avelocity"]
         for num in range(1, vm.num_edicts):
             if vm.free[num]:
                 continue
+            # brush movers (doors/plats/buttons) + simple movers: integrate the
+            # linear move, then run think. Full SV_Physics (riders, blocking,
+            # gravity) comes with player/collision integration later.
+            mt = int(vm.fget_f(num, mtf))
+            if mt == MOVETYPE_PUSH or mt == MOVETYPE_NOCLIP:
+                vx, vy, vz = vm.fget_v(num, fvel)
+                if vx or vy or vz:
+                    ox, oy, oz = vm.fget_v(num, forg)
+                    vm.fset_v(num, forg, (ox + vx * dt, oy + vy * dt, oz + vz * dt))
+                ax, ay, az = vm.fget_v(num, favel)
+                if ax or ay or az:
+                    cx, cy, cz = vm.fget_v(num, fang)
+                    vm.fset_v(num, fang, (cx + ax * dt, cy + ay * dt, cz + az * dt))
+
             nt = vm.fget_f(num, ntf)
             if nt <= 0 or nt > self.time:
                 continue
@@ -276,6 +294,22 @@ class Server:
             if think:
                 vm.execute(think)
         self.gset_f("time", self.time)
+
+    def brush_models(self):
+        """Live brush-model entities as (submodel_index, origin, angles), for the
+        renderer. Skips entities whose modelindex isn't an inline '*N' model --
+        notably triggers, which QC makes invisible by clearing modelindex."""
+        vm = self.vm
+        mp = self.model_precache
+        fmi, forg, fang = self.f["modelindex"], self.f["origin"], self.f["angles"]
+        out = []
+        for num in range(1, vm.num_edicts):
+            if vm.free[num]:
+                continue
+            mi = vm.fget_i(num, fmi)
+            if 0 < mi < len(mp) and mp[mi][:1] == "*":
+                out.append((int(mp[mi][1:]), vm.fget_v(num, forg), vm.fget_v(num, fang)))
+        return out
 
     # ================================================================
     # builtins

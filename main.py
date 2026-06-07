@@ -22,8 +22,11 @@ from pak import Pak
 from bsp import Bsp
 from render import Renderer, angle_vectors
 from physics import Physics, VIEW_HEIGHT, MAXSPEED
+from progs import Progs
+from sv import Server
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
+SV_TICK = 0.1              # server runs the QC at a fixed 10 Hz (like Quake)
 NOCLIP_SPEED = 500.0       # units / second when flying
 LOOK_SENS = 0.15           # degrees / pixel
 YAW_SPEED = 140.0          # degrees / second (keyboard turning)
@@ -44,6 +47,13 @@ class App:
         palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]) for i in range(256)]
         self.rend = Renderer(self.bsp, palette)
         self.phys = Physics(self.bsp)
+
+        # QuakeC server: spawn the level's entities and run their logic. Doors,
+        # buttons and lifts are entities now; their brush models are drawn at the
+        # origins the QC sets, and invisible triggers no longer render.
+        self.sv = Server(Progs(pak.read("progs.dat")), bsp=self.bsp, mapname=path)
+        self.sv.load_level()
+        self.sv_accum = 0.0
 
         # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
         (sx, sy, sz), yaw = self.bsp.find_spawn()
@@ -206,13 +216,24 @@ class App:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
 
         self._move(dt)
+
+        # advance the QC server at a fixed tick (catch up real time, capped so a
+        # hitch can't trigger a spiral of death), then read back entity positions
+        self.sv_accum += dt
+        steps = 0
+        while self.sv_accum >= SV_TICK and steps < 5:
+            self.sv.run_frame(SV_TICK)
+            self.sv_accum -= SV_TICK
+            steps += 1
+        brush_ents = self.sv.brush_models()
+
         eye = (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT)
         if self.flat:
-            polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch)
+            polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch, brush_ents)
             self._draw_polys(polys)
             nprim = len(polys)
         else:
-            segs, leaf = self.rend.render(eye, self.yaw, self.pitch)
+            segs, leaf = self.rend.render(eye, self.yaw, self.pitch, brush_ents)
             self._draw(segs)
             nprim = len(segs)
 

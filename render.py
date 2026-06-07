@@ -221,7 +221,7 @@ class Renderer:
         return bytes(out)
 
     # ---- main entry ----
-    def render(self, origin, yaw, pitch):
+    def render(self, origin, yaw, pitch, brush_ents=None):
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -273,16 +273,46 @@ class Renderer:
 
         segments = []
 
+        def emit_seg(cax, cay, caz, cbx, cby, cbz):
+            # near-plane clip (caz/cbz are depth)
+            if caz < NEAR and cbz < NEAR:
+                return
+            if caz < NEAR:
+                t = (NEAR - caz) / (cbz - caz)
+                cax += (cbx - cax) * t
+                cay += (cby - cay) * t
+                caz = NEAR
+            elif cbz < NEAR:
+                t = (NEAR - cbz) / (caz - cbz)
+                cbx += (cax - cbx) * t
+                cby += (cay - cby) * t
+                cbz = NEAR
+
+            x0 = hw + cax * focal / caz
+            y0 = hh - cay * focal / caz
+            x1 = hw + cbx * focal / cbz
+            y1 = hh - cby * focal / cbz
+
+            # cheap off-screen reject (both ends past one edge)
+            if (x0 < 0 and x1 < 0) or (x0 > W and x1 > W):
+                return
+            if (y0 < 0 and y1 < 0) or (y0 > H and y1 > H):
+                return
+
+            dxp = x1 - x0
+            dyp = y1 - y0
+            if dxp * dxp + dyp * dyp < MIN_SEG_PX2:
+                return                  # sub-pixel: not worth a Tk line draw
+            segments.append((x0, y0, x1, y1))
+
         def emit_face(fi):
             if face_frame[fi] == frame:
                 return
             face_frame[fi] = frame
-
             if backface:
                 nx, ny, nz, dist = face_plane[fi]
                 if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
                     return
-
             for ei in face_edges[fi]:
                 if edge_frame[ei] == frame:
                     continue
@@ -290,38 +320,34 @@ class Renderer:
                 a, b = edges[ei]
                 cax, cay, caz = transform(a)
                 cbx, cby, cbz = transform(b)
+                emit_seg(cax, cay, caz, cbx, cby, cbz)
 
-                # near-plane clip (caz/cbz are depth)
-                if caz < NEAR and cbz < NEAR:
+        # same, but for a brush-model entity translated by (ofx, ofy, ofz). The
+        # shared vertex cache can't be used (the offset differs per entity), so
+        # vertices are transformed inline.
+        def emit_face_ofs(fi, ofx, ofy, ofz):
+            if face_frame[fi] == frame:
+                return
+            face_frame[fi] = frame
+            if backface:
+                nx, ny, nz, dist = face_plane[fi]
+                if (ox - ofx) * nx + (oy - ofy) * ny + (oz - ofz) * nz - dist <= BACKFACE_EPS:
+                    return
+            for ei in face_edges[fi]:
+                if edge_frame[ei] == frame:
                     continue
-                if caz < NEAR:
-                    t = (NEAR - caz) / (cbz - caz)
-                    cax += (cbx - cax) * t
-                    cay += (cby - cay) * t
-                    caz = NEAR
-                elif cbz < NEAR:
-                    t = (NEAR - cbz) / (caz - cbz)
-                    cbx += (cax - cbx) * t
-                    cby += (cay - cby) * t
-                    cbz = NEAR
-
-                x0 = hw + cax * focal / caz
-                y0 = hh - cay * focal / caz
-                x1 = hw + cbx * focal / cbz
-                y1 = hh - cby * focal / cbz
-
-                # cheap off-screen reject (both ends past one edge)
-                if (x0 < 0 and x1 < 0) or (x0 > W and x1 > W):
-                    continue
-                if (y0 < 0 and y1 < 0) or (y0 > H and y1 > H):
-                    continue
-
-                dxp = x1 - x0
-                dyp = y1 - y0
-                if dxp * dxp + dyp * dyp < MIN_SEG_PX2:
-                    continue                # sub-pixel: not worth a Tk line draw
-
-                segments.append((x0, y0, x1, y1))
+                edge_frame[ei] = frame
+                a, b = edges[ei]
+                ax, ay, az = vertexes[a]
+                bx, by, bz = vertexes[b]
+                dax, day, daz = ax + ofx - ox, ay + ofy - oy, az + ofz - oz
+                dbx, dby, dbz = bx + ofx - ox, by + ofy - oy, bz + ofz - oz
+                emit_seg(dax * rx + day * ry + daz * rz,
+                         dax * ux + day * uy + daz * uz,
+                         dax * fx + day * fy + daz * fz,
+                         dbx * rx + dby * ry + dbz * rz,
+                         dbx * ux + dby * uy + dbz * uz,
+                         dbx * fx + dby * fy + dbz * fz)
 
         # world (model 0): only the PVS-visible leaves' surfaces
         for li in visible_leaves:
@@ -329,20 +355,27 @@ class Renderer:
             for m in range(firstmark, firstmark + nummark):
                 emit_face(marks[m])
 
-        # brush submodels (doors, lifts, buttons, secret walls). These aren't in
-        # any leaf's marksurfaces, so the PVS walk never reaches them. They're few,
-        # so just feed them all through backface/off-screen culling.
+        # brush-model entities (doors, lifts, buttons), each translated by its
+        # current origin. When no entity list is given, fall back to drawing every
+        # submodel at rest (standalone / no QC server).
         if self.brushmodels:
-            for md in bsp.models[1:]:
-                if not self.box_in_pvs(md["mins"], md["maxs"], vis):
+            if brush_ents is None:
+                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                              for i in range(1, len(bsp.models))]
+            for mi, (ofx, ofy, ofz), _ang in brush_ents:
+                md = bsp.models[mi]
+                mn, mx = md["mins"], md["maxs"]
+                mins = (mn[0] + ofx, mn[1] + ofy, mn[2] + ofz)
+                maxs = (mx[0] + ofx, mx[1] + ofy, mx[2] + ofz)
+                if not self.box_in_pvs(mins, maxs, vis):
                     continue
                 ff = md["firstface"]
                 for fi in range(ff, ff + md["numfaces"]):
-                    emit_face(fi)
+                    emit_face_ofs(fi, ofx, ofy, ofz)
 
         return segments, leaf
 
-    def render_shaded(self, origin, yaw, pitch):
+    def render_shaded(self, origin, yaw, pitch, brush_ents=None):
         """Flat-shaded polygons, back-to-front (painter's algorithm via the BSP).
         Returns (polys, leaf) where each poly is (flat_xy_coords, fill_color)."""
         bsp = self.bsp
@@ -399,17 +432,9 @@ class Renderer:
 
         polys = []
 
-        def emit_face_poly(fi):
-            if face_frame[fi] == frame:
-                return
-            face_frame[fi] = frame
-            nx, ny, nz, dist = face_plane[fi]
-            if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
-                return                                  # backface
-
-            poly = [transform(vi) for vi in face_verts[fi]]
-
-            # Sutherland-Hodgman clip against near + the 4 frustum sides
+        def project_poly(poly, color):
+            # Sutherland-Hodgman clip against near + the 4 frustum sides, project,
+            # drop tiny far polys (Tk fill cost), append.
             for a, b, c, d in clip_planes:
                 out = []
                 A = poly[-1]
@@ -433,8 +458,7 @@ class Renderer:
                 flat.append(hw + cx * focal / cz)
                 flat.append(hh - cy * focal / cz)
 
-            # drop tiny far polygons: not worth a Tk fill (shoelace area)
-            area2 = 0.0
+            area2 = 0.0                                  # shoelace area
             px, py = flat[-2], flat[-1]
             for i in range(0, len(flat), 2):
                 qx, qy = flat[i], flat[i + 1]
@@ -442,40 +466,69 @@ class Renderer:
                 px, py = qx, qy
             if -MIN_POLY_PX2 < area2 < MIN_POLY_PX2:
                 return
+            polys.append((flat, color))
 
-            polys.append((flat, face_color[fi]))
+        def emit_face_poly(fi):
+            if face_frame[fi] == frame:
+                return
+            face_frame[fi] = frame
+            nx, ny, nz, dist = face_plane[fi]
+            if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
+                return                                  # backface
+            project_poly([transform(vi) for vi in face_verts[fi]], face_color[fi])
 
-        def emit_model(md):
+        # offset-aware face emit for a brush-model entity at (ofx, ofy, ofz)
+        def emit_face_ofs(fi, ofx, ofy, ofz):
+            if face_frame[fi] == frame:
+                return
+            face_frame[fi] = frame
+            nx, ny, nz, dist = face_plane[fi]
+            if (ox - ofx) * nx + (oy - ofy) * ny + (oz - ofz) * nz - dist <= BACKFACE_EPS:
+                return
+            pts = []
+            for vi in face_verts[fi]:
+                vx, vy, vz = vertexes[vi]
+                dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                pts.append((dx * rx + dy * ry + dz * rz,
+                            dx * ux + dy * uy + dz * uz,
+                            dx * fx + dy * fy + dz * fz))
+            project_poly(pts, face_color[fi])
+
+        def emit_model(item):
             # a brush model has its own BSP sub-tree; walk it far-child-first so
-            # its faces paint back-to-front (correct even when non-convex)
+            # its faces paint back-to-front (correct even when non-convex). The
+            # plane sides are tested in the model's own space (camera - offset).
+            ofx, ofy, ofz = item["ofs"]
+            cox, coy, coz = ox - ofx, oy - ofy, oz - ofz
+
             def rec(num):
                 if num < 0:
                     return
                 planenum, children, ff, nf = nodes[num]
                 (nx, ny, nz), dist, _ = planes[planenum]
-                if ox * nx + oy * ny + oz * nz - dist >= 0:
+                if cox * nx + coy * ny + coz * nz - dist >= 0:
                     rec(children[1])                    # far side first
                     for fi in range(ff, ff + nf):
-                        emit_face_poly(fi)
+                        emit_face_ofs(fi, ofx, ofy, ofz)
                     rec(children[0])                    # near side last
                 else:
                     rec(children[0])
                     for fi in range(ff, ff + nf):
-                        emit_face_poly(fi)
+                        emit_face_ofs(fi, ofx, ofy, ofz)
                     rec(children[1])
-            rec(md["headnodes"][0])
+            rec(item["headnode"])
 
         def emit_models(mlist):
             if len(mlist) > 1:              # several at one depth -> sort by centre
-                def keyf(md):
-                    mn, mx = md["mins"], md["maxs"]
+                def keyf(it):
+                    mn, mx = it["mins"], it["maxs"]
                     cx = (mn[0] + mx[0]) * 0.5
                     cy = (mn[1] + mx[1]) * 0.5
                     cz = (mn[2] + mx[2]) * 0.5
                     return -((cx - ox) * fx + (cy - oy) * fy + (cz - oz) * fz)
                 mlist = sorted(mlist, key=keyf)
-            for md in mlist:
-                emit_model(md)
+            for it in mlist:
+                emit_model(it)
 
         def box_side(mins, maxs, nx, ny, nz, dist):
             # +1 box fully in front of plane, -1 fully behind, 0 straddles
@@ -489,12 +542,23 @@ class Renderer:
                     nz * (maxs[2] if nz >= 0 else mins[2])) - dist
             return -1 if pmax <= 0 else 0
 
-        # collect the visible brush submodels (doors, lifts, buttons, platforms)
+        # collect the visible brush-model entities (doors, lifts, buttons), each
+        # carrying its current origin offset. No entity list -> every submodel at
+        # rest (standalone / no QC server).
         pending = []
         if self.brushmodels:
-            for md in bsp.models[1:]:
-                if self.box_in_pvs(md["mins"], md["maxs"], vis):
-                    pending.append(md)
+            if brush_ents is None:
+                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                              for i in range(1, len(bsp.models))]
+            for mi, ofs, _ang in brush_ents:
+                md = bsp.models[mi]
+                ofx, ofy, ofz = ofs
+                mn, mx = md["mins"], md["maxs"]
+                mins = (mn[0] + ofx, mn[1] + ofy, mn[2] + ofz)
+                maxs = (mx[0] + ofx, mx[1] + ofy, mx[2] + ofz)
+                if self.box_in_pvs(mins, maxs, vis):
+                    pending.append({"headnode": md["headnodes"][0],
+                                    "mins": mins, "maxs": maxs, "ofs": ofs})
 
         # PVS: mark every node on the path from each visible leaf up to the root
         node_visframe = self.node_visframe

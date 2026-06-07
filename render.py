@@ -12,6 +12,9 @@ Quake world space is Z-up, right-handed. Camera space: x=right, y=up, z=forward.
 """
 
 import math
+import sys
+
+sys.setrecursionlimit(20000)   # BSP back-to-front walk can recurse deep
 
 NEAR = 1.0
 BACKFACE_EPS = 0.01
@@ -44,16 +47,34 @@ class Renderer:
         nedges = len(bsp.edges)
         nverts = len(bsp.vertexes)
 
-        # precompute per-face: ordered abs edge indices + outward plane (n, dist)
+        # precompute per-face: ordered abs edge indices, ordered vertex indices
+        # (winding), and the outward plane (n, dist)
         self.face_edges = []
+        self.face_verts = []
         self.face_plane = []
         for planenum, side, firstedge, numedges in bsp.faces:
-            eidx = [abs(bsp.surfedges[firstedge + k]) for k in range(numedges)]
+            eidx = []
+            vidx = []
+            for k in range(numedges):
+                se = bsp.surfedges[firstedge + k]
+                eidx.append(abs(se))
+                vidx.append(bsp.edges[se][0] if se >= 0 else bsp.edges[-se][1])
             self.face_edges.append(eidx)
+            self.face_verts.append(vidx)
             (nx, ny, nz), dist, _ = bsp.planes[planenum]
             if side:
                 nx, ny, nz, dist = -nx, -ny, -nz, -dist
             self.face_plane.append((nx, ny, nz, dist))
+
+        # precompute a flat-shade fill colour per face (static directional light)
+        lx, ly, lz = 0.35, 0.25, 0.90
+        lm = math.sqrt(lx * lx + ly * ly + lz * lz)
+        lx, ly, lz = lx / lm, ly / lm, lz / lm
+        self.face_color = []
+        for nx, ny, nz, dist in self.face_plane:
+            inten = 0.30 + 0.70 * max(0.0, nx * lx + ny * ly + nz * lz)
+            v = min(255, int(25 + 230 * inten))
+            self.face_color.append(f"#{v:02x}{v:02x}{v:02x}")
 
         # per-frame staleness markers (avoid clearing big arrays every frame)
         self.frame = 0
@@ -264,3 +285,115 @@ class Renderer:
                     emit_face(fi)
 
         return segments, leaf
+
+    def render_shaded(self, origin, yaw, pitch):
+        """Flat-shaded polygons, back-to-front (painter's algorithm via the BSP).
+        Returns (polys, leaf) where each poly is (flat_xy_coords, fill_color)."""
+        bsp = self.bsp
+        self.frame += 1
+        frame = self.frame
+        forward, right, up = angle_vectors(yaw, pitch)
+        ox, oy, oz = origin
+        fx, fy, fz = forward
+        rx, ry, rz = right
+        ux, uy, uz = up
+
+        vertexes = bsp.vertexes
+        leafs = bsp.leafs
+        marks = bsp.marksurfaces
+        nodes = bsp.nodes
+        planes = bsp.planes
+        face_verts = self.face_verts
+        face_plane = self.face_plane
+        face_color = self.face_color
+        face_frame = self.face_frame
+        vert_frame = self.vert_frame
+        vcache = self.vcache
+        focal = self.focal
+        hw = self.width / 2
+        hh = self.height / 2
+        backface = self.backface
+
+        leaf = self.point_leaf(origin)
+        vis = self.decompress_vis(leafs[leaf][1])
+
+        def transform(vi):
+            if vert_frame[vi] == frame:
+                return vcache[vi]
+            vx, vy, vz = vertexes[vi]
+            dx, dy, dz = vx - ox, vy - oy, vz - oz
+            c = (dx * rx + dy * ry + dz * rz,
+                 dx * ux + dy * uy + dz * uz,
+                 dx * fx + dy * fy + dz * fz)
+            vcache[vi] = c
+            vert_frame[vi] = frame
+            return c
+
+        polys = []
+
+        def emit_face_poly(fi):
+            if face_frame[fi] == frame:
+                return
+            face_frame[fi] = frame
+            nx, ny, nz, dist = face_plane[fi]
+            if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
+                return                                  # backface
+
+            pts = [transform(vi) for vi in face_verts[fi]]
+
+            # Sutherland-Hodgman clip against the near plane (cz >= NEAR)
+            clipped = []
+            n = len(pts)
+            for i in range(n):
+                ax, ay, az = pts[i]
+                bx, by, bz = pts[(i + 1) % n]
+                ain = az >= NEAR
+                if ain:
+                    clipped.append(pts[i])
+                if ain != (bz >= NEAR):
+                    t = (NEAR - az) / (bz - az)
+                    clipped.append((ax + (bx - ax) * t,
+                                    ay + (by - ay) * t, NEAR))
+            if len(clipped) < 3:
+                return
+
+            flat = []
+            for cx, cy, cz in clipped:
+                flat.append(hw + cx * focal / cz)
+                flat.append(hh - cy * focal / cz)
+            polys.append((flat, face_color[fi]))
+
+        # walk the world BSP far-child-first -> leaves in back-to-front order
+        def walk(num):
+            if num < 0:
+                li = -num - 1
+                if li == 0:
+                    return
+                bit = li - 1
+                if not (vis[bit >> 3] & (1 << (bit & 7))):
+                    return
+                _, _, fm, nm = leafs[li]
+                for m in range(fm, fm + nm):
+                    emit_face_poly(marks[m])
+                return
+            planenum, children, _, _ = nodes[num]
+            (nx, ny, nz), dist, _ = planes[planenum]
+            if ox * nx + oy * ny + oz * nz - dist >= 0:
+                walk(children[1])           # far side first
+                walk(children[0])
+            else:
+                walk(children[0])
+                walk(children[1])
+
+        walk(self.headnode)
+
+        # brush submodels last (drawn on top; approximate vs world depth)
+        if self.brushmodels:
+            for md in bsp.models[1:]:
+                if not self.box_in_pvs(md["mins"], md["maxs"], vis):
+                    continue
+                ff = md["firstface"]
+                for fi in range(ff, ff + md["numfaces"]):
+                    emit_face_poly(fi)
+
+        return polys, leaf

@@ -6,7 +6,8 @@ A wireframe Quake level walker written in **pure Python standard library**, with
 It loads the genuine Quake shareware data, parses a real BSP level, and lets you fly
 through it as wireframe 3D — drawn with tkinter `Canvas` lines.
 
-![e1m1 start area](docs/e1m1.png)
+![e1m1 wireframe](docs/e1m1.png)
+![e1m1 flat-shaded](docs/e1m1_flat.png)
 
 ## Run
 
@@ -32,7 +33,7 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 |------|------|
 | `pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
 | `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing |
-| `render.py` | Per-frame pipeline: find camera leaf → decompress PVS → backface cull → near-plane clip → perspective project; world + brush submodels (doors/lifts) |
+| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). World + brush submodels, both PVS-culled. |
 | `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove` |
 | `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool |
 
@@ -53,6 +54,7 @@ Tk actually draws.)
 
 Loads, renders, and **walks** through all episode-1 shareware maps with real Quake
 collision: gravity, floor/wall sliding, stair stepping, and jumping. Press `N` for
-noclip flight. World geometry **and** brush submodels (doors, lifts, buttons,
-platforms) are drawn, both PVS-culled. No point entities/monsters (`.mdl` models)
-yet — that's the next milestone.
+noclip flight, `F` to toggle **flat shading** (Tk `create_polygon`, drawn
+back-to-front via the BSP — no z-buffer needed). World geometry **and** brush
+submodels (doors, lifts, buttons, platforms) are drawn, both PVS-culled. No point
+entities/monsters (`.mdl` models) yet — that's the next milestone.

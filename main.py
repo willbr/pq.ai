@@ -10,7 +10,7 @@ Controls:
     left / right    turn          up / down    forward / back
     Space           jump (walk) / up (noclip)  Shift   move faster
     N               toggle noclip flight        Tab    toggle mouselook
-    Esc             release mouse / quit
+    F               toggle flat shading         Esc    release mouse / quit
 """
 
 import math
@@ -30,6 +30,7 @@ YAW_SPEED = 140.0          # degrees / second (keyboard turning)
 
 LINE_COLOR = "#00ff66"
 PREGROW = 2048             # line items pre-created up front to avoid hitches
+PREGROW_POLY = 768         # polygon items pre-created for flat-shading mode
 
 
 class App:
@@ -62,6 +63,13 @@ class App:
         self.pool = [self.canvas.create_line(-10, -10, -10, -10, fill=LINE_COLOR)
                      for _ in range(PREGROW)]
         self.prev_n = 0
+        # filled-polygon pool for flat-shading mode (drawn back-to-front)
+        self.flat = False
+        self.polypool = [self.canvas.create_polygon(
+            -10, -10, -10, -10, -10, -10, outline="", fill="#000000")
+            for _ in range(PREGROW_POLY)]
+        self.polyfill = [None] * PREGROW_POLY
+        self.poly_prev = 0
         self.hud = self.canvas.create_text(
             8, 8, anchor="nw", fill="#00ff66", font=("Menlo", 11), text="")
 
@@ -98,6 +106,13 @@ class App:
         if k == "n":
             self.noclip = not self.noclip
             self.vel = [0.0, 0.0, 0.0]
+            return
+        if k == "f":
+            self.flat = not self.flat
+            if self.flat:
+                self._park(self.pool, self.prev_n, 4); self.prev_n = 0
+            else:
+                self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
             return
         self.keys.add(k)
 
@@ -190,18 +205,26 @@ class App:
 
         self._move(dt)
         eye = (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT)
-        segs, leaf = self.rend.render(eye, self.yaw, self.pitch)
-        self._draw(segs)
+        if self.flat:
+            polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch)
+            self._draw_polys(polys)
+            nprim = len(polys)
+        else:
+            segs, leaf = self.rend.render(eye, self.yaw, self.pitch)
+            self._draw(segs)
+            nprim = len(segs)
 
         spd = math.hypot(self.vel[0], self.vel[1])
         mode = "NOCLIP" if self.noclip else ("ground" if self.onground else "air")
         self.canvas.itemconfig(
             self.hud,
-            text=(f"{self.fps:5.1f} fps   segs {len(segs)}   leaf {leaf}   {mode}\n"
+            text=(f"{self.fps:5.1f} fps   "
+                  f"{'polys' if self.flat else 'segs'} {nprim}   "
+                  f"leaf {leaf}   {mode}\n"
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
                   f"{'MOUSELOOK' if self.mouselook else 'click to capture mouse'} "
-                  f"[N]oclip"))
+                  f"[N]oclip [F]lat"))
         self.canvas.tag_raise(self.hud)
         # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
         work_ms = (time.perf_counter() - now) * 1000
@@ -220,6 +243,35 @@ class App:
         for i in range(n, self.prev_n):      # park last frame's surplus off-screen
             coords(pool[i], -10, -10, -10, -10)
         self.prev_n = n
+
+    def _draw_polys(self, polys):
+        c = self.canvas
+        pool = self.polypool
+        fillc = self.polyfill
+        coords = c.coords
+        itemconfig = c.itemconfig
+        n = len(polys)
+        while len(pool) < n:
+            pool.append(c.create_polygon(-10, -10, -10, -10, -10, -10,
+                                         outline="", fill="#000000"))
+            fillc.append(None)
+        for i in range(n):
+            flat, col = polys[i]
+            coords(pool[i], *flat)
+            if fillc[i] != col:              # only re-set fill when it changes
+                itemconfig(pool[i], fill=col)
+                fillc[i] = col
+        for i in range(n, self.poly_prev):   # park surplus (degenerate triangle)
+            coords(pool[i], -10, -10, -10, -10, -10, -10)
+        self.poly_prev = n
+        c.tag_raise(self.hud)
+
+    def _park(self, pool, used, ncoords):
+        """Move the first `used` items of a pool off-screen (on mode switch)."""
+        coords = self.canvas.coords
+        off = (-10,) * ncoords
+        for i in range(used):
+            coords(pool[i], *off)
 
     def run(self):
         self.root.mainloop()

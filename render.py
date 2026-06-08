@@ -631,18 +631,6 @@ class Renderer:
             for it in mlist:
                 emit_model(it)
 
-        def box_side(mins, maxs, nx, ny, nz, dist):
-            # +1 box fully in front of plane, -1 fully behind, 0 straddles
-            pmin = (nx * (mins[0] if nx >= 0 else maxs[0]) +
-                    ny * (mins[1] if ny >= 0 else maxs[1]) +
-                    nz * (mins[2] if nz >= 0 else maxs[2])) - dist
-            if pmin >= 0:
-                return 1
-            pmax = (nx * (maxs[0] if nx >= 0 else mins[0]) +
-                    ny * (maxs[1] if ny >= 0 else mins[1]) +
-                    nz * (maxs[2] if nz >= 0 else mins[2])) - dist
-            return -1 if pmax <= 0 else 0
-
         # collect the visible brush-model entities (doors, lifts, buttons), each
         # carrying its current origin offset. No entity list -> every submodel at
         # rest (standalone / no QC server).
@@ -658,8 +646,12 @@ class Renderer:
                 mins = (mn[0] + ofx, mn[1] + ofy, mn[2] + ofz)
                 maxs = (mx[0] + ofx, mx[1] + ofy, mx[2] + ofz)
                 if self.box_in_pvs(mins, maxs, vis):
+                    cx = (mins[0] + maxs[0]) * 0.5
+                    cy = (mins[1] + maxs[1]) * 0.5
+                    cz = (mins[2] + maxs[2]) * 0.5
                     pending.append({"headnode": md["headnodes"][0],
-                                    "mins": mins, "maxs": maxs, "ofs": ofs})
+                                    "mins": mins, "maxs": maxs, "ofs": ofs,
+                                    "center": (cx, cy, cz)})
 
         # alias (.mdl) entities -- monsters, items. Woven into the same painter's
         # walk by a bounding cube (origin +/- the model radius), like brush models.
@@ -670,7 +662,8 @@ class Renderer:
                 maxs = (org[0] + r, org[1] + r, org[2] + r)
                 if self.box_in_pvs(mins, maxs, vis):
                     pending.append({"mdl": mdl, "verts": verts, "origin": org,
-                                    "angles": ang, "mins": mins, "maxs": maxs})
+                                    "angles": ang, "mins": mins, "maxs": maxs,
+                                    "center": org})
 
         # PVS: mark every node on the path from each visible leaf up to the root
         node_visframe = self.node_visframe
@@ -685,8 +678,18 @@ class Renderer:
 
         # node-based back-to-front walk. Each world face lies on exactly one node,
         # so it is drawn once at its true depth (correct painter's order, unlike
-        # leaf-marksurface drawing which mis-orders faces spanning leaves). Brush
-        # models are partitioned by each split plane and woven in at their depth.
+        # leaf-marksurface drawing which mis-orders faces spanning leaves).
+        #
+        # Entities (brush + alias models) are routed by a single reference point
+        # -- their centre -- down to the leaf they occupy, and drawn at that
+        # leaf's position in the back-to-front order. Classifying by the model's
+        # bounding box instead would send any box straddling a plane to that node
+        # to be drawn "on" it; since model boxes are large they straddle high in
+        # the tree, painting the model at an essentially arbitrary depth (behind
+        # or in front of the world depending on tree shape). The centre point has
+        # one well-defined side at every node, so the model lands at its true
+        # depth. (A model intersecting a wall can still mis-sort -- the standard
+        # painter's limit without a z-buffer -- but free-standing ones are right.)
         def walk(num, models):
             if num < 0 or node_visframe[num] != frame:
                 emit_models(models)                       # leaf or PVS-culled
@@ -694,23 +697,22 @@ class Renderer:
             planenum, children, ff, nf = nodes[num]
             (nx, ny, nz), dist, _ = planes[planenum]
             if models:
-                front, back, on = [], [], []
+                front, back = [], []
                 for md in models:
-                    s = box_side(md["mins"], md["maxs"], nx, ny, nz, dist)
-                    (front if s > 0 else back if s < 0 else on).append(md)
+                    cx, cy, cz = md["center"]
+                    (front if cx * nx + cy * ny + cz * nz - dist >= 0
+                     else back).append(md)
             else:
-                front = back = on = ()
+                front = back = ()
             if ox * nx + oy * ny + oz * nz - dist >= 0:   # camera in front
                 walk(children[1], back)                   # far = back side
                 for fi in range(ff, ff + nf):
                     emit_face_poly(fi)
-                emit_models(on)
                 walk(children[0], front)                  # near = front side
             else:
                 walk(children[0], front)                  # far = front side
                 for fi in range(ff, ff + nf):
                     emit_face_poly(fi)
-                emit_models(on)
                 walk(children[1], back)
 
         walk(self.headnode, pending)

@@ -30,7 +30,12 @@ from mdl import Mdl, EF_ROTATE
 import snd
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
-SV_TICK = 0.1              # server runs the QC at a fixed 10 Hz (like Quake)
+# Quake runs the server once per rendered frame with the real frametime (clamped
+# so a hitch can't break physics) -- NOT a fixed 10 Hz clock. Doors, lifts and
+# missiles are integrated by frametime each frame, so this is what keeps them
+# smooth; thinks (monster AI, etc.) stay gated by nextthink, firing at their own
+# ~10 Hz cadence regardless. host_frametime caps at 0.1 in WinQuake (Host_FilterTime).
+SV_MAXFRAME = 0.1          # clamp a single server frame to 100ms (hitch guard)
 NOCLIP_SPEED = 500.0       # units / second when flying
 LOOK_SENS = 0.15           # degrees / pixel
 YAW_SPEED = 140.0          # degrees / second (keyboard turning)
@@ -195,7 +200,6 @@ class App:
         self.sv = Server(Progs(self.progs_data), bsp=self.bsp, mapname=path,
                          skill=skill, physics=self.phys, pak=self.pak)
         self.sv.load_level()
-        self.sv_accum = 0.0
 
         # load the .mdl models the level precached, indexed to match modelindex
         self.models = [None] * len(self.sv.model_precache)
@@ -460,13 +464,8 @@ class App:
         # IntermissionThink load the next map on a fire press after the delay.
         if self.intermission or self.sv.intermission_active():
             self.intermission = True
-            self.sv_accum += dt
-            steps = 0
-            while self.sv_accum >= SV_TICK and steps < 5:
-                self.sv.run_frame(SV_TICK)
-                self.sv.run_intermission(self.attacking)
-                self.sv_accum -= SV_TICK
-                steps += 1
+            self.sv.run_frame(dt if dt < SV_MAXFRAME else SV_MAXFRAME)
+            self.sv.run_intermission(self.attacking)
         else:
             # Dead: PlayerDie turned the player into a MOVETYPE_TOSS corpse the
             # QC now owns. Stop driving it from input -- no movement, and don't
@@ -503,27 +502,24 @@ class App:
             # positions. The impulse is one-shot (a keypress switches once).
             self.sv.set_input(self.attacking, self.pending_impulse)
             self.pending_impulse = 0
-            self.sv_accum += dt
-            steps = 0
-            while self.sv_accum >= SV_TICK and steps < 5:
-                self.sv.run_frame(SV_TICK)
-                # ride lifts/doors: fold the pusher's carry into the camera
-                if not dead:
-                    cx, cy, cz = self.sv.player_carry
-                    if cx or cy or cz:
-                        self.pos[0] += cx
-                        self.pos[1] += cy
-                        self.pos[2] += cz
-                        self.onground = True       # still standing on the mover
-                self.sv_accum -= SV_TICK
-                steps += 1
+            # one server frame per rendered frame (Quake's model): movers and
+            # missiles step every frame so they read smooth, while nextthink keeps
+            # AI on its own cadence. Clamp the frametime so a hitch can't tunnel.
+            self.sv.run_frame(dt if dt < SV_MAXFRAME else SV_MAXFRAME)
             if dead:
                 # follow the falling/sliding body so the death cam stays on it
                 org = self.sv.player_origin()
                 if org is not None:
                     self.pos = [org[0], org[1], org[2]]
-            elif steps:
-                self._sync_from_player()      # adopt teleports / trigger moves
+            else:
+                # ride lifts/doors: fold the pusher's carry into the camera
+                cx, cy, cz = self.sv.player_carry
+                if cx or cy or cz:
+                    self.pos[0] += cx
+                    self.pos[1] += cy
+                    self.pos[2] += cz
+                    self.onground = True           # still standing on the mover
+                self._sync_from_player()           # adopt teleports / trigger moves
             # the exit may have started intermission during this frame's QC tick
             self.intermission = self.sv.intermission_active()
 

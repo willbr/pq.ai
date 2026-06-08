@@ -540,10 +540,13 @@ class Server:
             vm.fset_v(num, favel, (0.0, 0.0, 0.0))
 
     def _push_move(self, num, dt):
-        """SV_PushMove: advance a brush mover (door/plat/button) by velocity*dt,
-        keep its abs bounds current, and carry the player if they ride it. Unlike
-        a free projectile a pusher does not stop on contact -- blocking/crushing
-        is left to the QC, which the player riding it never triggers."""
+        """SV_PushMove (WinQuake sv_phys.c): advance a brush mover by velocity*dt,
+        then displace every solid entity that rides it or that it moves into. Each
+        contacted entity is moved by the same delta and block-tested -- if its new
+        spot is solid it's left where it can fit, and if it can't fit anywhere the
+        mover's .blocked fires and the already-moved entities are restored. This
+        is what carries the player on a lift/train without ramming them through a
+        wall, and what lets a door crush/reverse on something in the way."""
         vm, f = self.vm, self.f
         fvel, favel, forg, fang = (f["velocity"], f["avelocity"],
                                    f["origin"], f["angles"])
@@ -555,44 +558,116 @@ class Server:
         if not (vx or vy or vz):
             return
         move = (vx * dt, vy * dt, vz * dt)
-        ox, oy, oz = vm.fget_v(num, forg)
-        vm.fset_v(num, forg, (ox + move[0], oy + move[1], oz + move[2]))
+        pushorg = vm.fget_v(num, forg)
+        vm.fset_v(num, forg, (pushorg[0] + move[0], pushorg[1] + move[1],
+                              pushorg[2] + move[2]))
         self._link_abs(num)                   # bounds must track the moved origin
-        self._carry_player(num, move)
+        pmn = vm.fget_v(num, f["absmin"]); pmx = vm.fget_v(num, f["absmax"])
 
-    def _player_rides(self, pusher):
-        """True only if the player is standing ON TOP of the pusher -- their feet
-        rest near its top surface and they sit within its horizontal footprint.
-        That's the case a lift/platform must carry (up, down or sideways). A door
-        sliding past a player who merely stands next to it (boxes overlap, but
-        feet are far below the door top) must NOT drag them, or the door hauls
-        them through the wall and out of the level."""
-        vm, f = self.vm, self.f
-        p = self.player
+        fmt, fsol = f["movetype"], f["solid"]
         amn, amx = f["absmin"], f["absmax"]
-        pmn = vm.fget_v(p, amn); pmx = vm.fget_v(p, amx)
-        umn = vm.fget_v(pusher, amn); umx = vm.fget_v(pusher, amx)
-        E = 1.0
-        # horizontal footprint overlap
-        if (pmn[0] - E > umx[0] or pmx[0] + E < umn[0] or
-                pmn[1] - E > umx[1] or pmx[1] + E < umn[1]):
-            return False
-        # feet resting on the pusher's top (within a step's worth of slop)
-        return umx[2] - 4.0 <= pmn[2] <= umx[2] + STEPSIZE
-
-    def _carry_player(self, pusher, move):
-        """Move the player edict by a pusher's delta when they ride it, and record
-        the carry so the host can apply the same shift to the camera it owns."""
-        p = self.player
-        if not p or self.vm.free[p] or not self._player_rides(pusher):
+        moved = []                            # (edict, old_origin) restored if blocked
+        for e in range(1, vm.num_edicts):
+            if e == num or vm.free[e]:
+                continue
+            mt = int(vm.fget_f(e, fmt))
+            if mt in (MOVETYPE_PUSH, MOVETYPE_NONE, MOVETYPE_NOCLIP):
+                continue
+            if int(vm.fget_f(e, fsol)) == SOLID_NOT:
+                continue
+            # carried if standing on the mover; otherwise only if the mover's new
+            # position actually penetrates it (bbox overlap THEN a real hull test
+            # against the mover's brush), like SV_PushMove's two cases. The hull
+            # test is what stops a door sliding *past* a bystander from dragging
+            # them -- only something the door moves *into* gets shoved.
+            if not self._rides_pusher(e, num, pmn, pmx):
+                emn = vm.fget_v(e, amn); emx = vm.fget_v(e, amx)
+                if (emn[0] >= pmx[0] or emn[1] >= pmx[1] or emn[2] >= pmx[2] or
+                        emx[0] <= pmn[0] or emx[1] <= pmn[1] or emx[2] <= pmn[2]):
+                    continue
+                if not self._penetrates_pusher(e, num):
+                    continue
+            old = vm.fget_v(e, forg)
+            vm.fset_v(e, forg, (old[0] + move[0], old[1] + move[1], old[2] + move[2]))
+            self._link_abs(e)
+            if not self._test_position(e):
+                moved.append((e, old))        # pushed/carried fine
+                continue
+            # blocked there -- if it can stay where it was, leave it (no carry)
+            vm.fset_v(e, forg, old); self._link_abs(e)
+            if not self._test_position(e):
+                continue
+            # truly stuck: restore everyone moved so far and fire .blocked. The
+            # pusher stays put (WinQuake leaves it; the QC reverses next think).
+            # Nothing was added to player_carry yet (that happens only below, once
+            # the whole sweep succeeds), so there's nothing to undo there.
+            for me, mo in moved:
+                vm.fset_v(me, forg, mo); self._link_abs(me)
+            blk = self.pr.field_by_name.get("blocked")
+            bfn = vm.fget_i(num, blk[1]) if blk else 0
+            if bfn:
+                self.gset_f("time", self.time)
+                self.gset_i("self", num)
+                self.gset_i("other", e)
+                try:
+                    vm.execute(bfn)
+                except PR_RunError as ex:
+                    print(f"pusher {num} blocked() aborted: {ex}")
             return
+
+        # record how far the player was actually carried, for the camera
+        p = self.player
+        for e, old in moved:
+            if e == p:
+                no = vm.fget_v(p, forg)
+                self.player_carry[0] += no[0] - old[0]
+                self.player_carry[1] += no[1] - old[1]
+                self.player_carry[2] += no[2] - old[2]
+
+    def _rides_pusher(self, e, pusher, pmn, pmx):
+        """True if entity `e` is carried by the pusher: either standing on it
+        (its .groundentity, as monsters track) or resting on its top surface
+        within its footprint (the player, whose ground link the engine doesn't
+        keep). pmn/pmx are the pusher's post-move abs bounds."""
         vm, f = self.vm, self.f
-        ox, oy, oz = vm.fget_v(p, f["origin"])
-        vm.fset_v(p, f["origin"], (ox + move[0], oy + move[1], oz + move[2]))
-        self._link_abs(p)
-        self.player_carry[0] += move[0]
-        self.player_carry[1] += move[1]
-        self.player_carry[2] += move[2]
+        if (int(vm.fget_f(e, f["flags"])) & FL_ONGROUND
+                and vm.fget_i(e, f["groundentity"]) == pusher):
+            return True
+        emn = vm.fget_v(e, f["absmin"]); emx = vm.fget_v(e, f["absmax"])
+        E = 1.0
+        if (emn[0] - E > pmx[0] or emx[0] + E < pmn[0] or
+                emn[1] - E > pmx[1] or emx[1] + E < pmn[1]):
+            return False                      # outside the footprint
+        return pmx[2] - 4.0 <= emn[2] <= pmx[2] + STEPSIZE   # feet on top
+
+    def _test_position(self, e):
+        """SV_TestEntityPosition for edict `e`: is its box stuck in world solid?"""
+        if self.phys is None:
+            return False
+        vm, f = self.vm, self.f
+        org = vm.fget_v(e, f["origin"])
+        return self.phys.test_position(org, vm.fget_v(e, f["mins"]))
+
+    def _penetrates_pusher(self, e, pusher):
+        """True if entity `e`'s box overlaps the pusher's brush at its current
+        position -- the gate SV_PushMove uses before shoving a non-rider, so only
+        what the mover moves *into* is pushed. Traced against the pusher's hull 1
+        (exact for the player; close enough for monsters)."""
+        if self.phys is None or self.bsp is None:
+            return False
+        vm, f = self.vm, self.f
+        mp = self.model_precache
+        mi = vm.fget_i(pusher, f["modelindex"])
+        if not (0 < mi < len(mp)) or mp[mi][:1] != "*":
+            return False
+        sub = int(mp[mi][1:])
+        if sub >= len(self.bsp.models):
+            return False
+        headnode = self.bsp.models[sub]["headnodes"][1]
+        po = vm.fget_v(pusher, f["origin"])
+        eo = vm.fget_v(e, f["origin"])
+        ls = [eo[0] - po[0], eo[1] - po[1], eo[2] - po[2]]
+        return self.phys.trace_hull(headnode, list(ls), list(ls)).startsolid
 
     def touch_triggers(self, ent):
         """Fire the touch function of every SOLID_TRIGGER whose volume overlaps

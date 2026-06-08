@@ -158,6 +158,22 @@ class Physics:
         self._recurse(self.headnode, 0.0, 1.0, start, end, tr, self.headnode)
         return tr
 
+    def test_position(self, point, mins=None):
+        """SV_TestEntityPosition: True if a box with origin-relative `mins` sitting
+        at `point` is embedded in *world* solid. Brush movers carry their own
+        submodel hulls (a lift's brush isn't in the world hull), so this asks only
+        'would this spot trap the entity in the level geometry' -- which is what a
+        pusher needs to know before shoving an entity there (don't push into a
+        wall) without falsely reporting the rider stuck inside the lift itself."""
+        if mins is None:
+            ox = oy = oz = 0.0
+        else:
+            ox = HULL1_CLIP_MINS[0] - mins[0]
+            oy = HULL1_CLIP_MINS[1] - mins[1]
+            oz = HULL1_CLIP_MINS[2] - mins[2]
+        p = [point[0] - ox, point[1] - oy, point[2] - oz]
+        return self.trace(list(p), list(p)).startsolid
+
     def trace_hull(self, headnode, start, end):
         """Trace start->end through an arbitrary clip hull (a brush submodel)."""
         tr = Trace(end)

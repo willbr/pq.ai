@@ -30,6 +30,13 @@ VIEW_HEIGHT = 22.0      # eye above the player origin (view_ofs[2])
 PLAYER_MINS_Z = -24.0   # player bounding box bottom, origin-relative
 PLAYER_MAXS_Z = 32.0    # player bounding box top, origin-relative
 
+# hull 1's clip box (Quake SV_HullForEntity): the BSP compiler pre-expanded the
+# world's hull-1 clipnodes by exactly this box, so a point traced through hull 1
+# represents the origin of a box with these origin-relative bounds. The player
+# matches it exactly; other boxes (items rest with mins.z = 0) trace correctly
+# only after offsetting by clip_mins - their_mins.
+HULL1_CLIP_MINS = (-16.0, -16.0, -24.0)
+
 
 class Trace:
     __slots__ = ("allsolid", "startsolid", "fraction", "endpos", "plane_normal",
@@ -161,32 +168,48 @@ class Physics:
         """ents: list of (hull-1 headnode, origin) for solid brush models."""
         self.brush_entities = ents
 
-    def move(self, start, end, record=True):
+    def move(self, start, end, record=True, mins=None):
         """SV_Move: trace start->end (hull 1) against the world and every solid
         brush entity, returning the earliest impact. This is what makes
         func_walls, doors and gates block the player. `record` adds the bumped
         entities to self.touched (SV_Impact); monster moves pass record=False so
-        their probing traces don't fire touches meant for the player."""
-        tr = self.trace(list(start), list(end))
-        if not self.brush_entities:
-            return tr
-        for headnode, org, ent in self.brush_entities:
-            ls = [start[i] - org[i] for i in range(3)]
-            le = [end[i] - org[i] for i in range(3)]
-            t2 = self.trace_hull(headnode, ls, le)
-            if t2.startsolid:
-                tr.startsolid = True
-                if record:
-                    self.touched.add(ent)   # already overlapping it
-            if t2.allsolid:
-                tr.allsolid = True
-            if t2.fraction < tr.fraction:
-                tr.fraction = t2.fraction
-                tr.endpos = [t2.endpos[i] + org[i] for i in range(3)]
-                tr.plane_normal = t2.plane_normal
-                tr.ent = ent                # this entity blocked the move
-        if record and tr.ent is not None:
-            self.touched.add(tr.ent)        # SV_Impact: bumped while moving
+        their probing traces don't fire touches meant for the player.
+
+        `mins` is the moving box's origin-relative lower bound. The player (and
+        the default, mins=None) matches hull 1 exactly, so no offset; other boxes
+        -- items rest on the floor with mins.z = 0 -- must be shifted by Quake's
+        SV_HullForEntity offset (hull.clip_mins - mins), or the floor trace comes
+        back startsolid and droptofloor culls the item."""
+        if mins is None:
+            offx = offy = offz = 0.0
+        else:                               # offset = clip_mins - mins
+            offx = HULL1_CLIP_MINS[0] - mins[0]
+            offy = HULL1_CLIP_MINS[1] - mins[1]
+            offz = HULL1_CLIP_MINS[2] - mins[2]
+        # trace in offset (hull) space: start_l = start - offset
+        ls0 = [start[0] - offx, start[1] - offy, start[2] - offz]
+        le0 = [end[0] - offx, end[1] - offy, end[2] - offz]
+        tr = self.trace(list(ls0), list(le0))
+        if self.brush_entities:
+            for headnode, org, ent in self.brush_entities:
+                ls = [ls0[i] - org[i] for i in range(3)]
+                le = [le0[i] - org[i] for i in range(3)]
+                t2 = self.trace_hull(headnode, ls, le)
+                if t2.startsolid:
+                    tr.startsolid = True
+                    if record:
+                        self.touched.add(ent)   # already overlapping it
+                if t2.allsolid:
+                    tr.allsolid = True
+                if t2.fraction < tr.fraction:
+                    tr.fraction = t2.fraction
+                    tr.endpos = [t2.endpos[i] + org[i] for i in range(3)]
+                    tr.plane_normal = t2.plane_normal
+                    tr.ent = ent                # this entity blocked the move
+            if record and tr.ent is not None:
+                self.touched.add(tr.ent)        # SV_Impact: bumped while moving
+        # back out of hull space: endpos += offset
+        tr.endpos = [tr.endpos[0] + offx, tr.endpos[1] + offy, tr.endpos[2] + offz]
         return tr
 
     # ---- hull 0 (point) trace for hitscan ----

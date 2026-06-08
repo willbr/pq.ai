@@ -1516,9 +1516,12 @@ class Server:
 
     # ---- SV_Move helpers for walkmonsters (sv_move.c) ----
     def _box_move(self, ent, start, end):
-        """SV_Move for a walkmonster's bounding box (hull 1), clipped against the
-        world and solid brush models. Does not record player touches."""
-        return self.phys.move(list(start), list(end), record=False)
+        """SV_Move for an entity's bounding box (hull 1), clipped against the
+        world and solid brush models. Does not record player touches. Passes the
+        entity's origin-relative mins so the hull offset is applied -- items rest
+        with mins.z = 0, so without it their floor trace comes back allsolid."""
+        mins = self.vm.fget_v(ent, self.f["mins"])
+        return self.phys.move(list(start), list(end), record=False, mins=mins)
 
     def _sv_movestep(self, ent, move, relink):
         """SV_movestep: try to move `ent` by `move`, stepping up to STEPSIZE over

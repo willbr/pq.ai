@@ -347,6 +347,10 @@ class App:
         self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
                               (self.pitch, self.yaw, 0.0))
 
+        # SV_Impact: fire touch on the solid movers the move just bumped, so
+        # walking into a button presses it and into a key door opens it
+        self.sv.touch_impacts(self.phys.touched)
+
         # advance the QC server at a fixed tick (catch up real time, capped so a
         # hitch can't trigger a spiral of death), then read back entity positions
         self.sv_accum += dt

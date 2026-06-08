@@ -391,19 +391,12 @@ class Server:
         self.gset_f("time", self.time)
 
     def touch_triggers(self, ent):
-        """Fire the touch functions ent is in contact with (SV_TouchLinks /
-        SV_Impact, restricted to one mover -- the player):
-
-        * SOLID_TRIGGER volumes, by exact box overlap -- trigger_teleport /
-          trigger_changelevel / trigger_multiple and the rider-trigger plats spawn.
-        * SOLID_BSP movers carrying a touch (doors, buttons), by contact -- the
-          engine has no SV_Impact, so this is what makes walking into a door fire
-          door_touch and pressing a button fire button_touch. These movers block
-          the player, so the player box stops flush against them; pad it slightly
-          so 'pressed against' still counts as a touch.
-
-        Without this, the engine never called touch on solids and doors/buttons
-        did nothing."""
+        """Fire the touch function of every SOLID_TRIGGER whose volume overlaps
+        ent's bounding box (SV_TouchLinks, restricted to one mover -- the player).
+        This is what makes trigger_teleport / trigger_changelevel / trigger_multiple
+        and the rider-trigger plats spawn fire, plus the trigger field a normal door
+        spawns around itself. Walking into a button or a key/shootable door (which
+        has no trigger field) is handled separately by touch_impacts."""
         if not ent:
             return
         vm, f = self.vm, self.f
@@ -416,26 +409,18 @@ class Server:
         amn, amx, fsol = f["absmin"], f["absmax"], f["solid"]
         e0x, e0y, e0z = vm.fget_v(ent, amn)
         e1x, e1y, e1z = vm.fget_v(ent, amx)
-        PAD = 1.0                       # contact slop for solid movers
-        p0x, p0y, p0z = e0x - PAD, e0y - PAD, e0z - PAD
-        p1x, p1y, p1z = e1x + PAD, e1y + PAD, e1z + PAD
         for e in range(1, vm.num_edicts):
             if e == ent or vm.free[e]:
+                continue
+            if vm.fget_f(e, fsol) != SOLID_TRIGGER:
                 continue
             tf = vm.fget_i(e, toff)
             if not tf:
                 continue
-            sol = int(vm.fget_f(e, fsol))
-            if sol == SOLID_TRIGGER:
-                b0x, b0y, b0z, b1x, b1y, b1z = e0x, e0y, e0z, e1x, e1y, e1z
-            elif sol == SOLID_BSP:      # door/button brush (world/func_wall have no touch)
-                b0x, b0y, b0z, b1x, b1y, b1z = p0x, p0y, p0z, p1x, p1y, p1z
-            else:
-                continue
             tmn = vm.fget_v(e, amn)
             tmx = vm.fget_v(e, amx)
-            if (b0x > tmx[0] or b1x < tmn[0] or b0y > tmx[1] or b1y < tmn[1] or
-                    b0z > tmx[2] or b1z < tmn[2]):
+            if (e0x > tmx[0] or e1x < tmn[0] or e0y > tmx[1] or e1y < tmn[1] or
+                    e0z > tmx[2] or e1z < tmn[2]):
                 continue
             self.gset_i("self", e)
             self.gset_i("other", ent)
@@ -466,9 +451,11 @@ class Server:
 
     def solid_brush_models(self):
         """Solid brush-model entities (func_wall, doors, gates) as
-        (hull-1 headnode, origin), for clipping the player's movement. Skips the
-        world, non-solid brushes (open episode gates) and non-inline models. This
-        is what makes func_walls and closed doors block you."""
+        (hull-1 headnode, origin, edict), for clipping the player's movement. The
+        edict lets the host fire the entity's touch when the player bumps it
+        (SV_Impact -- see touch_impacts). Skips the world, non-solid brushes (open
+        episode gates) and non-inline models. This is what makes func_walls and
+        closed doors block you."""
         vm = self.vm
         if self.bsp is None:
             return []
@@ -484,8 +471,43 @@ class Server:
                 continue
             sub = int(mp[mi][1:])
             if sub < len(models):
-                out.append((models[sub]["headnodes"][1], vm.fget_v(num, forg)))
+                out.append((models[sub]["headnodes"][1], vm.fget_v(num, forg), num))
         return out
+
+    def touch_impacts(self, edicts):
+        """Fire the touch function of each solid brush mover the player bumped
+        this frame (physics.touched). The engine has no SV_Impact, so this is what
+        presses a button (button_touch) or opens a key/shootable door you walk into
+        (door_touch) -- buttons spawn no trigger field, so contact is the only way.
+        Movers are MOVETYPE_PUSH, so seed ltime like run_frame's prepass does, or
+        their SUB_CalcMove deadlines would land in the past."""
+        if not edicts:
+            return
+        vm, f = self.vm, self.f
+        if not self.player or vm.free[self.player]:
+            return
+        toff = self.pr.field_by_name.get("touch")
+        fltime = self.pr.field_by_name.get("ltime")
+        if toff is None:
+            return
+        toff = toff[1]
+        fltime = fltime[1] if fltime is not None else None
+        for e in sorted(edicts):
+            if vm.free[e]:
+                continue
+            tf = vm.fget_i(e, toff)
+            if not tf:
+                continue
+            if fltime is not None:
+                vm.fset_f(e, fltime, self.time)
+            self.gset_i("self", e)
+            self.gset_i("other", self.player)
+            self.gset_f("time", self.time)
+            try:
+                vm.execute(tf)
+            except PR_RunError as ex:
+                cn = self.pr.string(vm.fget_i(e, f["classname"]))
+                print(f"impact {cn} (edict {e}) aborted: {ex}")
 
     def alias_entities(self):
         """Live .mdl entities as (modelindex, origin, angles, frame), for the

@@ -28,7 +28,8 @@ VIEW_HEIGHT = 22.0      # eye above the player origin
 
 
 class Trace:
-    __slots__ = ("allsolid", "startsolid", "fraction", "endpos", "plane_normal")
+    __slots__ = ("allsolid", "startsolid", "fraction", "endpos", "plane_normal",
+                 "ent")
 
     def __init__(self, end):
         self.allsolid = True
@@ -36,6 +37,7 @@ class Trace:
         self.fraction = 1.0
         self.endpos = list(end)
         self.plane_normal = None
+        self.ent = None             # brush entity that produced the impact (SV_Impact)
 
 
 def _dot(a, b):
@@ -56,10 +58,13 @@ class Physics:
         self.leafs = bsp.leafs
         self.headnode0 = bsp.models[0]["headnode"]
         # solid brush-model entities (doors, func_walls, gates) to clip against,
-        # as (hull-1 headnode, origin). Refreshed each frame by the host; their
-        # submodel hulls were compiled at the closed position, so we trace in the
-        # entity's local space (start/end minus its current origin).
+        # as (hull-1 headnode, origin, edict). Refreshed each frame by the host;
+        # their submodel hulls were compiled at the closed position, so we trace in
+        # the entity's local space (start/end minus its current origin).
         self.brush_entities = []
+        # edicts the player's move bumped this step (SV_Impact). Drained by the
+        # host into the QC touch functions so walking into a button presses it.
+        self.touched = set()
 
     # ---- hull queries ----
     def hull_point_contents(self, num, p):
@@ -159,18 +164,22 @@ class Physics:
         tr = self.trace(list(start), list(end))
         if not self.brush_entities:
             return tr
-        for headnode, org in self.brush_entities:
+        for headnode, org, ent in self.brush_entities:
             ls = [start[i] - org[i] for i in range(3)]
             le = [end[i] - org[i] for i in range(3)]
             t2 = self.trace_hull(headnode, ls, le)
             if t2.startsolid:
                 tr.startsolid = True
+                self.touched.add(ent)       # already overlapping it
             if t2.allsolid:
                 tr.allsolid = True
             if t2.fraction < tr.fraction:
                 tr.fraction = t2.fraction
                 tr.endpos = [t2.endpos[i] + org[i] for i in range(3)]
                 tr.plane_normal = t2.plane_normal
+                tr.ent = ent                # this entity blocked the move
+        if tr.ent is not None:
+            self.touched.add(tr.ent)        # SV_Impact: bumped while moving
         return tr
 
     # ---- hull 0 (point) trace for hitscan ----
@@ -385,6 +394,7 @@ class Physics:
 
     def player_move(self, origin, vel, wishdir, wishspeed, onground, want_jump, dt):
         """One step of walking physics. Mutates origin and vel; returns onground."""
+        self.touched.clear()
         if onground:
             self.friction(vel, dt)
             self.accelerate(vel, wishdir, wishspeed, dt)

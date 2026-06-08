@@ -561,18 +561,24 @@ class Server:
         self._carry_player(num, move)
 
     def _player_rides(self, pusher):
-        """True if the player's box overlaps the pusher's (post-move) box, so a
-        rising lift carries them up instead of clipping through their feet. The
-        1-unit slop makes simply resting on top count as contact."""
+        """True only if the player is standing ON TOP of the pusher -- their feet
+        rest near its top surface and they sit within its horizontal footprint.
+        That's the case a lift/platform must carry (up, down or sideways). A door
+        sliding past a player who merely stands next to it (boxes overlap, but
+        feet are far below the door top) must NOT drag them, or the door hauls
+        them through the wall and out of the level."""
         vm, f = self.vm, self.f
         p = self.player
         amn, amx = f["absmin"], f["absmax"]
         pmn = vm.fget_v(p, amn); pmx = vm.fget_v(p, amx)
         umn = vm.fget_v(pusher, amn); umx = vm.fget_v(pusher, amx)
         E = 1.0
-        return not (pmn[0] - E > umx[0] or pmx[0] + E < umn[0] or
-                    pmn[1] - E > umx[1] or pmx[1] + E < umn[1] or
-                    pmn[2] - E > umx[2] or pmx[2] + E < umn[2])
+        # horizontal footprint overlap
+        if (pmn[0] - E > umx[0] or pmx[0] + E < umn[0] or
+                pmn[1] - E > umx[1] or pmx[1] + E < umn[1]):
+            return False
+        # feet resting on the pusher's top (within a step's worth of slop)
+        return umx[2] - 4.0 <= pmn[2] <= umx[2] + STEPSIZE
 
     def _carry_player(self, pusher, move):
         """Move the player edict by a pusher's delta when they ride it, and record

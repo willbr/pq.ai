@@ -26,6 +26,7 @@ from physics import Physics, VIEW_HEIGHT, MAXSPEED
 from progs import Progs
 from sv import Server, anglemod
 from mdl import Mdl, EF_ROTATE
+import snd
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
 SV_TICK = 0.1              # server runs the QC at a fixed 10 Hz (like Quake)
@@ -96,6 +97,7 @@ class App:
         self.palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2])
                         for i in range(256)]
         self._missing_warned = set()   # maps not in the pak we've already flagged
+        self.mixer = snd.Mixer()       # CoreAudio sound mixer (muted if unavailable)
 
         # window
         self.root = tk.Tk()
@@ -198,6 +200,21 @@ class App:
         # first-person weapon view models, loaded on demand (v_*.mdl are not all
         # precached); path -> Mdl, or None if the file is missing / failed
         self._vmodels = {}
+
+        # sound: decode every precached sample once, drop the old level's voices,
+        # then start the deferred looping ambients. sv.snd is wired last so the
+        # QC's spawn-time sound() calls during load_level stay silent (like the
+        # Quake signon), and only live gameplay sounds reach the mixer.
+        self.mixer.stop_all()
+        for name in self.sv.sound_precache:
+            # QC precaches bare names ("weapons/sgun1.wav"); the pak stores them
+            # under "sound/". Key the mixer by the bare name the QC will pass.
+            path = "sound/" + name
+            if name and path in self.pak.files:
+                self.mixer.precache(name, self.pak.read(path))
+        for name, pos, vol, atten in self.sv.ambients:
+            self.mixer.start_sound(0, 0, name, vol, atten, pos, loop=True)
+        self.sv.snd = self.mixer
 
         # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
         (sx, sy, sz), yaw = self.bsp.find_spawn()
@@ -412,6 +429,13 @@ class App:
             # func_walls, gates), at the positions last set by the QC tick
             self.phys.set_brush_entities(self.sv.solid_brush_models())
             self._move(dt)
+
+            # listener for 3D sound: ear at the eye, right-vector for the stereo
+            # pan. Set before the QC tick so sounds fired this frame spatialize
+            # against the current view.
+            _f, right, _u = angle_vectors(self.yaw, self.pitch)
+            self.mixer.set_listener(
+                (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT), right)
 
             # push the camera into the client edict so monsters target the
             # player and shots originate from the current view

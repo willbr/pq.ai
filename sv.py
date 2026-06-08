@@ -216,6 +216,8 @@ class Server:
         self.center_msg = None      # (text, time) from centerprint; host displays it
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
         self._te = None             # in-progress temp-entity message being parsed
+        self.snd = None             # sound mixer (set by host after precache); None -> muted
+        self.ambients = []          # deferred looping ambientsounds: (name, pos, vol, atten)
 
         self.time = 0.0
         self.frametime = 0.1
@@ -267,6 +269,7 @@ class Server:
     def load_level(self):
         vm = self.vm
         # model precache: 0 empty, 1 worldmodel, then inline brush models *1.. *N
+        self.ambients = []          # rebuilt below as ambient entities spawn
         self.model_precache = ["", self.mapname]
         if self.bsp is not None:
             for i in range(1, len(self.bsp.models)):
@@ -1004,12 +1007,31 @@ class Server:
             self.skill = max(0, min(3, int(val)))
             self.gset_f("skill", float(self.skill))
 
-    # --- misc no-ops with side data ---
+    # --- sound ---
     def _pf_sound(self):
-        pass
+        # sound(entity e, float chan, string sample, float vol, float atten)
+        if self.snd is None:
+            return
+        ent = self.vm.parm_i(0)
+        chan = int(self.vm.parm_f(1))
+        sample = self.vm.parm_str(2)
+        vol = self.vm.parm_f(3)
+        atten = self.vm.parm_f(4)
+        # Quake SV_StartSound emits from the entity's bbox center
+        ox, oy, oz = self.vm.fget_v(ent, self.f["origin"])
+        nx, ny, nz = self.vm.fget_v(ent, self.f["mins"])
+        xx, xy, xz = self.vm.fget_v(ent, self.f["maxs"])
+        origin = (ox + 0.5 * (nx + xx), oy + 0.5 * (ny + xy), oz + 0.5 * (nz + xz))
+        self.snd.start_sound(ent, chan, sample, vol, atten, origin)
 
     def _pf_ambientsound(self):
-        pass
+        # ambientsound(vector pos, string sample, float vol, float atten):
+        # defer -- the sound isn't precached until the host loads the level
+        pos = self.vm.parm_v(0)
+        sample = self.vm.parm_str(1)
+        vol = self.vm.parm_f(2)
+        atten = self.vm.parm_f(3)
+        self.ambients.append((sample, pos, vol, atten))
 
     def _pf_lightstyle(self):
         self.lightstyles[int(self.vm.parm_f(0))] = self.vm.parm_str(1)

@@ -739,6 +739,7 @@ class App:
         coords = c.coords
         itemconfig = c.itemconfig
         project = self.rend.project_point
+        trace_point = self.phys.trace_point
         focal_r = self.rend.focal * PARTICLE_RADIUS
         pal = self.palette
         W = self.canvas.winfo_width()
@@ -750,6 +751,12 @@ class App:
                 continue
             x, y, cz = sp
             if x < 0 or y < 0 or x > W or y > H:
+                continue
+            # occlude against the world: the sprites are a flat overlay with no
+            # depth test, so without this they'd show through walls. A clear
+            # line of sight from the eye means trace_point reaches the particle
+            # (fraction 1.0); anything less means a wall is in front of it.
+            if trace_point(eye, (p[0], p[1], p[2])).fraction < 1.0:
                 continue
             half = focal_r / cz                      # sprite half-size in pixels
             if half < PARTICLE_MIN_HALF:

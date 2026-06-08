@@ -24,8 +24,8 @@ from bsp import Bsp
 from render import Renderer, PickupModel, angle_vectors
 from physics import Physics, VIEW_HEIGHT, MAXSPEED
 from progs import Progs
-from sv import Server
-from mdl import Mdl
+from sv import Server, anglemod
+from mdl import Mdl, EF_ROTATE
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
 SV_TICK = 0.1              # server runs the QC at a fixed 10 Hz (like Quake)
@@ -42,6 +42,15 @@ CENTER_MSG_TIME = 4.0      # seconds a centerprint message stays on screen
 CL_BOB = 0.02
 CL_BOBCYCLE = 0.6
 CL_BOBUP = 0.5
+
+
+def spin_yaw(flags, angles, t):
+    """Bonus items (EF_ROTATE models -- weapons, keys, powerups) spin in place:
+    the client overrides their yaw each frame with anglemod(100*time), ignoring
+    the spawn angle (WinQuake cl_main.c). Non-rotating models keep their angles."""
+    if not (flags & EF_ROTATE):
+        return angles
+    return (angles[0], anglemod(100.0 * t), angles[2])
 
 
 def _make_cursor_reassociator():
@@ -504,6 +513,7 @@ class App:
             m = models[mi] if mi < nmodels else None
             if m is None:
                 continue
+            ang = spin_yaw(m.flags, ang, now)
             out.append((m, m.frame_verts(frame, now), org, ang))
         return out
 

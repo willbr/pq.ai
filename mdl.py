@@ -26,6 +26,7 @@ import struct
 
 ALIAS_VERSION = 6
 IDPO = b"IDPO"
+EF_ROTATE = 8           # model flag: bonus item, spun client-side (cl_main.c)
 
 # mdl_t: ident, version, scale[3], origin[3], radius, eye[3], 8 ints, size
 _HEADER = struct.Struct("<ii 3f 3f f 3f iiiiiiii f")
@@ -48,6 +49,7 @@ class Mdl:
         self.numverts = h[15]
         self.numtris = h[16]
         self.numframes = h[17]
+        self.flags = h[19]                       # synctype=h[18], flags=h[19]
 
         sw, sh, nv, nt, nf = (self.skinwidth, self.skinheight,
                               self.numverts, self.numtris, self.numframes)

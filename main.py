@@ -430,6 +430,7 @@ class App:
         self.last_t = now
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+        dead = False                 # set below once health hits 0 (death cam)
         # Intermission: the QC has frozen the player at the end-of-level camera
         # spot. Don't move or camera-drive them -- just advance the QC and let
         # IntermissionThink load the next map on a fire press after the delay.
@@ -443,12 +444,19 @@ class App:
                 self.sv_accum -= SV_TICK
                 steps += 1
         else:
+            # Dead: PlayerDie turned the player into a MOVETYPE_TOSS corpse the
+            # QC now owns. Stop driving it from input -- no movement, and don't
+            # push the camera into the edict (that would fight the body's fall).
+            # We just feed the fire button through and follow the corpse, while
+            # PlayerDeathThink runs the respawn FSM server-side.
+            dead = self.sv.player_health() <= 0
             self.bobtime += dt          # phase for the weapon bob
 
-            # refresh the brush models the player collides with (doors,
-            # func_walls, gates), at the positions last set by the QC tick
-            self.phys.set_brush_entities(self.sv.solid_brush_models())
-            self._move(dt)
+            if not dead:
+                # refresh the brush models the player collides with (doors,
+                # func_walls, gates), at the positions last set by the QC tick
+                self.phys.set_brush_entities(self.sv.solid_brush_models())
+                self._move(dt)
 
             # listener for 3D sound: ear at the eye, right-vector for the stereo
             # pan. Set before the QC tick so sounds fired this frame spatialize
@@ -457,14 +465,14 @@ class App:
             self.mixer.set_listener(
                 (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT), right)
 
-            # push the camera into the client edict so monsters target the
-            # player and shots originate from the current view
-            self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
-                                  (self.pitch, self.yaw, 0.0))
-
-            # SV_Impact: fire touch on the solid movers the move just bumped, so
-            # walking into a button presses it and into a key door opens it
-            self.sv.touch_impacts(self.phys.touched)
+            if not dead:
+                # push the camera into the client edict so monsters target the
+                # player and shots originate from the current view
+                self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
+                                      (self.pitch, self.yaw, 0.0))
+                # SV_Impact: fire touch on the solid movers the move just bumped,
+                # so walking into a button presses it / into a key door opens it
+                self.sv.touch_impacts(self.phys.touched)
 
             # advance the QC server at a fixed tick (catch up real time, capped
             # so a hitch can't trigger a spiral of death), then read back entity
@@ -476,15 +484,21 @@ class App:
             while self.sv_accum >= SV_TICK and steps < 5:
                 self.sv.run_frame(SV_TICK)
                 # ride lifts/doors: fold the pusher's carry into the camera
-                cx, cy, cz = self.sv.player_carry
-                if cx or cy or cz:
-                    self.pos[0] += cx
-                    self.pos[1] += cy
-                    self.pos[2] += cz
-                    self.onground = True       # still standing on the mover
+                if not dead:
+                    cx, cy, cz = self.sv.player_carry
+                    if cx or cy or cz:
+                        self.pos[0] += cx
+                        self.pos[1] += cy
+                        self.pos[2] += cz
+                        self.onground = True       # still standing on the mover
                 self.sv_accum -= SV_TICK
                 steps += 1
-            if steps:
+            if dead:
+                # follow the falling/sliding body so the death cam stays on it
+                org = self.sv.player_origin()
+                if org is not None:
+                    self.pos = [org[0], org[1], org[2]]
+            elif steps:
                 self._sync_from_player()      # adopt teleports / trigger moves
             # the exit may have started intermission during this frame's QC tick
             self.intermission = self.sv.intermission_active()
@@ -511,6 +525,13 @@ class App:
                 self.pitch = max(-89.0, min(89.0, ang[0]))
                 self.yaw = ang[1]
             eye = (self.pos[0], self.pos[1], self.pos[2])
+            view_model = None
+        elif dead:
+            # death cam: the eye sinks to the corpse on the floor (PlayerDie set
+            # view_ofs z = -8), with no head-bob and no weapon model.
+            vofs = self.sv.player_view_ofs()
+            vz = vofs[2] if vofs else -8.0
+            eye = (self.pos[0], self.pos[1], self.pos[2] + vz)
             view_model = None
         else:
             # head-bob: shift both the view origin and the gun by it, as Quake

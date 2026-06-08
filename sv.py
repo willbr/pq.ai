@@ -71,7 +71,8 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "weapon", "weaponmodel", "weaponframe", "items", "impulse",
            "attack_finished", "currentammo", "ammo_shells", "ammo_nails",
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
-           "button0", "deadflag", "enemy", "owner", "touch", "goalentity")
+           "button0", "deadflag", "enemy", "owner", "touch", "goalentity",
+           "th_die")
 
 FL_CLIENT = 8
 SOLID_NOT = 0
@@ -79,6 +80,13 @@ SOLID_TRIGGER = 1
 SOLID_SLIDEBOX = 3
 MOVETYPE_WALK = 3
 DAMAGE_AIM = 2
+
+# deadflag values (defs.qc): the player's death state machine, advanced by
+# PlayerDeathThink once PlayerDie has dropped the corpse.
+DEAD_NO = 0
+DEAD_DYING = 1
+DEAD_DEAD = 2
+DEAD_RESPAWNABLE = 3
 
 # item / weapon flags (defs.qc). The player's .items is a bitfield of these;
 # .weapon holds the single active weapon flag.
@@ -446,6 +454,7 @@ class Server:
                     cn = self.pr.string(vm.fget_i(num, self.f["classname"]))
                     print(f"think {cn} (edict {num}) aborted: {ex}")
         self.run_weapon_frame()                 # PlayerPostThink: drive the weapons
+        self.run_player_death_think()           # PlayerPreThink's dead->respawn FSM
         self.touch_triggers(self.player)        # fire teleports/triggers we touch
         self._advance_particles(dt)
         self.gset_f("time", self.time)
@@ -756,7 +765,7 @@ class Server:
             self._pf_droptofloor, self._pf_lightstyle, self._pf_rint,
             self._pf_floor, self._pf_ceil, fixme, self._pf_checkbottom,        # 39,40
             self._pf_pointcontents, fixme, self._pf_fabs, self._pf_aim,        # 42..
-            self._pf_cvar, self._pf_noop, self._pf_nextent, self._pf_particle,  # localcmd, particle
+            self._pf_cvar, self._pf_localcmd, self._pf_nextent, self._pf_particle,  # localcmd, particle
             self._pf_changeyaw, fixme, self._pf_vectoangles,                   # 49,50,51
             self._pf_writebyte, self._pf_noop2, self._pf_noop2, self._pf_noop2,  # WriteByte/Char/Short/Long
             self._pf_writecoord, self._pf_noop2, self._pf_noop2, self._pf_noop2,  # WriteCoord/Angle/String/Entity
@@ -1042,6 +1051,20 @@ class Server:
     def _pf_changelevel(self):
         self.changelevel = self.vm.parm_str(0)
 
+    def _pf_localcmd(self):
+        """localcmd(string): the QC pushes a console command. The only one we
+        care about is single-player respawn(): it issues "restart" to reload the
+        current level fresh. Route it through the host's changelevel path, which
+        takes a bare map name (the same form the changelevel builtin uses)."""
+        cmd = self.vm.parm_str(0).strip()
+        if cmd == "restart":
+            name = self.mapname
+            if name.startswith("maps/"):
+                name = name[len("maps/"):]
+            if name.endswith(".bsp"):
+                name = name[:-len(".bsp")]
+            self.changelevel = name
+
     def _pf_centerprint(self):
         # centerprint(client, string): keep only the player's message; the host
         # draws it centred on screen for a few seconds.
@@ -1211,6 +1234,12 @@ class Server:
         vm.fset_f(e, f["solid"], float(SOLID_SLIDEBOX))
         vm.fset_f(e, f["movetype"], float(MOVETYPE_WALK))
         vm.fset_f(e, f["flags"], float(int(vm.fget_f(e, f["flags"])) | FL_CLIENT))
+        # PutClientInServer normally wires th_die = PlayerDie; we hand-build the
+        # client edict instead, so set it ourselves -- without it combat.qc's
+        # Killed() calls a null .th_die and the player never actually dies.
+        die = self.pr.find_function("PlayerDie")
+        if die is not None:
+            vm.fset_i(e, f["th_die"], die)
         # Quake's default loadout (client.qc SetNewParms): just the Axe and
         # Shotgun with 25 shells. W_SetCurrentAmmo below ORs in the IT_SHELLS
         # active-ammo bit and sets currentammo from the shell count.
@@ -1251,6 +1280,11 @@ class Server:
 
     def player_velocity(self):
         return self.vm.fget_v(self.player, self.f["velocity"]) if self.player else None
+
+    def player_view_ofs(self):
+        """Eye offset above the edict origin. 22 alive; PlayerDie drops it to -8
+        so the death cam sinks to the corpse on the floor."""
+        return self.vm.fget_v(self.player, self.f["view_ofs"]) if self.player else None
 
     def weapon_status(self):
         """(weapon name, current ammo) for the HUD, or None. Reads the active
@@ -1372,6 +1406,32 @@ class Server:
             vm.execute(func)
         except PR_RunError as ex:
             print(f"weapon frame aborted: {ex}")
+
+    def run_player_death_think(self):
+        """Once PlayerDie has run the corpse to DEAD_DEAD, this is the part of
+        PlayerPreThink that matters: PlayerDeathThink decelerates the body, waits
+        for all buttons up, then for fire to be pressed again, and calls respawn()
+        -- which in single player restarts the level. We feed it the fire button
+        (set_input) and run it server-side, since the engine drives the live
+        player from the camera and never runs the rest of PlayerPreThink."""
+        if not self.player:
+            return
+        vm, f, e = self.vm, self.f, self.player
+        # only after the death animation has settled to DEAD_DEAD; running it
+        # mid-DEAD_DYING would hit the 'fire pressed -> respawn' path early.
+        if vm.fget_f(e, f["deadflag"]) < DEAD_DEAD:
+            return
+        func = self.pr.find_function("PlayerDeathThink")
+        if func is None:
+            return
+        vm.fset_f(e, f["button0"], 1.0 if self.button0 else 0.0)
+        self.gset_f("time", self.time)
+        self.gset_i("self", e)
+        self.gset_i("other", 0)
+        try:
+            vm.execute(func)
+        except PR_RunError as ex:
+            print(f"PlayerDeathThink aborted: {ex}")
 
     def _pf_pointcontents(self):
         self.vm.ret_f(CONTENTS_EMPTY)

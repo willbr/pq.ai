@@ -169,6 +169,21 @@ class Renderer:
         self.width, self.height = w, h
         self._update_focal()
 
+    def project_point(self, origin, yaw, pitch, p):
+        """World point -> (screen_x, screen_y), or None if behind the near
+        plane / off the depth axis. Used for point sprites (particles)."""
+        forward, right, up = angle_vectors(yaw, pitch)
+        dx = p[0] - origin[0]
+        dy = p[1] - origin[1]
+        dz = p[2] - origin[2]
+        cz = dx * forward[0] + dy * forward[1] + dz * forward[2]   # depth
+        if cz < NEAR:
+            return None
+        cx = dx * right[0] + dy * right[1] + dz * right[2]
+        cy = dx * up[0] + dy * up[1] + dz * up[2]
+        return (self.width / 2 + self.focal * cx / cz,
+                self.height / 2 - self.focal * cy / cz)
+
     # ---- BSP queries ----
     def point_leaf(self, p):
         node = self.headnode

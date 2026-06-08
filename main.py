@@ -36,6 +36,8 @@ YAW_SPEED = 140.0          # degrees / second (keyboard turning)
 LINE_COLOR = "#00ff66"
 PREGROW = 2048             # line items pre-created up front to avoid hitches
 PREGROW_POLY = 768         # polygon items pre-created for flat-shading mode
+PREGROW_PART = 256         # point-sprite items for particles
+CENTER_MSG_TIME = 4.0      # seconds a centerprint message stays on screen
 
 
 def _make_cursor_reassociator():
@@ -87,10 +89,19 @@ class App:
             for _ in range(PREGROW_POLY)]
         self.polyfill = [None] * PREGROW_POLY
         self.poly_prev = 0
+        # point-sprite pool for particles (teleport fog, fireball trails)
+        self.partpool = [self.canvas.create_rectangle(
+            -10, -10, -8, -8, outline="", fill="#ffffff")
+            for _ in range(PREGROW_PART)]
+        self.partfill = [None] * PREGROW_PART
+        self.part_prev = 0
         self.hud = self.canvas.create_text(
             8, 8, anchor="nw", fill="#00ff66", font=("Menlo", 11), text="")
         self.crosshair = self.canvas.create_text(
             0, 0, fill="#00ff66", font=("Menlo", 18), text="+")
+        self.center_text = self.canvas.create_text(
+            0, 0, fill="#ffff00", font=("Menlo", 16, "bold"), text="",
+            justify="center")
 
         # input state
         self.keys = set()
@@ -365,12 +376,21 @@ class App:
             self._draw(segs)
             nprim = len(segs)
 
+        self._draw_particles(eye)
+
         spd = math.hypot(self.vel[0], self.vel[1])
         mode = "NOCLIP" if self.noclip else ("ground" if self.onground else "air")
         hp = self.sv.player_health()
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         self.canvas.coords(self.crosshair, w // 2, h // 2)
+        # centred message (centerprint): skill choice, the registered notice, ...
+        cm = self.sv.center_msg
+        if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
+            self.canvas.coords(self.center_text, w // 2, h // 3)
+            self.canvas.itemconfig(self.center_text, text=cm[0])
+        else:
+            self.canvas.itemconfig(self.center_text, text="")
         self.canvas.itemconfig(
             self.hud,
             text=(f"{self.fps:5.1f} fps   "
@@ -382,6 +402,7 @@ class App:
                   f"[N]oclip [F]lat"))
         self.canvas.tag_raise(self.hud)
         self.canvas.tag_raise(self.crosshair)
+        self.canvas.tag_raise(self.center_text)
         # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
         work_ms = (time.perf_counter() - now) * 1000
         self.root.after(max(1, int(16 - work_ms)), self.tick)
@@ -431,6 +452,41 @@ class App:
         for i in range(n, self.prev_n):      # park last frame's surplus off-screen
             coords(pool[i], -10, -10, -10, -10)
         self.prev_n = n
+
+    def _draw_particles(self, eye):
+        """Project the live particles to screen and draw them as 2px sprites,
+        coloured from the Quake palette (teleport fog, fireball sparks)."""
+        c = self.canvas
+        pool = self.partpool
+        fillc = self.partfill
+        coords = c.coords
+        itemconfig = c.itemconfig
+        project = self.rend.project_point
+        pal = self.palette
+        W = self.canvas.winfo_width()
+        H = self.canvas.winfo_height()
+        n = 0
+        for p in self.sv.particles:
+            sp = project(eye, self.yaw, self.pitch, (p[0], p[1], p[2]))
+            if sp is None:
+                continue
+            x, y = sp
+            if x < 0 or y < 0 or x > W or y > H:
+                continue
+            if n >= len(pool):
+                pool.append(c.create_rectangle(-10, -10, -8, -8,
+                                               outline="", fill="#ffffff"))
+                fillc.append(None)
+            coords(pool[n], x, y, x + 2, y + 2)
+            r, g, b = pal[p[6] & 255]
+            col = f"#{r:02x}{g:02x}{b:02x}"
+            if fillc[n] != col:
+                itemconfig(pool[n], fill=col)
+                fillc[n] = col
+            n += 1
+        for i in range(n, self.part_prev):       # park last frame's surplus
+            coords(pool[i], -10, -10, -8, -8)
+        self.part_prev = n
 
     def _draw_polys(self, polys):
         c = self.canvas

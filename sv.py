@@ -24,15 +24,36 @@ SPAWNFLAG_NOT_DEATHMATCH = 2048
 FL_ONGROUND = 512
 SOLID_BSP = 4
 MOVETYPE_NONE = 0
+MOVETYPE_FLY = 5
+MOVETYPE_TOSS = 6
 MOVETYPE_PUSH = 7
 MOVETYPE_NOCLIP = 8
+MOVETYPE_FLYMISSILE = 9
+MOVETYPE_BOUNCE = 10
+SV_GRAVITY = 800.0          # sv_gravity default, scaled per-entity by .gravity
 CONTENTS_EMPTY = -1
+
+SVC_TEMPENTITY = 23         # broadcast effect message (gunshots, teleport fog, ...)
+# temp-entity type -> (palette colour, particle count). Point effects only; beam
+# types (lightning) just spark once at their start point, which is harmless.
+_TE_EFFECT = {
+    0: (0, 6), 1: (0, 8), 2: (0, 6),        # spike, superspike, gunshot (grey)
+    3: (75, 24), 4: (75, 24),               # explosion, tarexplosion (orange)
+    7: (60, 10), 8: (0, 8),                 # wizspike (green), knightspike
+    10: (244, 32), 11: (244, 30),           # lavasplash, teleport (white fog)
+}
+
+# movetypes the engine integrates each frame (origin += velocity*dt)
+_MOVE_INTEGRATE = frozenset((MOVETYPE_PUSH, MOVETYPE_NOCLIP, MOVETYPE_FLY,
+                             MOVETYPE_TOSS, MOVETYPE_FLYMISSILE, MOVETYPE_BOUNCE))
+# of those, the ones that fall under gravity (tossed projectiles: fireballs, gibs)
+_MOVE_GRAVITY = frozenset((MOVETYPE_TOSS, MOVETYPE_BOUNCE))
 
 # entity fields we touch from the engine side
 _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs",
            "size", "nextthink", "think", "frame", "flags", "solid", "movetype",
            "velocity", "avelocity", "groundentity", "ideal_yaw", "yaw_speed",
-           "chain", "spawnflags", "view_ofs",
+           "chain", "spawnflags", "view_ofs", "gravity",
            # player / combat
            "absmin", "absmax", "health", "max_health", "takedamage", "v_angle",
            "weapon", "currentammo", "ammo_shells", "button0", "deadflag", "enemy")
@@ -151,6 +172,9 @@ class Server:
         self.phys = physics         # for traceline / hitscan; None -> clear path
         self.player = 0             # player edict number (0 until spawn_player)
         self.changelevel = None     # set by the changelevel builtin; host reads it
+        self.center_msg = None      # (text, time) from centerprint; host displays it
+        self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
+        self._te = None             # in-progress temp-entity message being parsed
 
         self.time = 0.0
         self.frametime = 0.1
@@ -310,16 +334,21 @@ class Server:
 
         ntf, thf, mtf = self.f["nextthink"], self.f["think"], self.f["movetype"]
         forg, fang = self.f["origin"], self.f["angles"]
-        fvel, favel = self.f["velocity"], self.f["avelocity"]
+        fvel, favel, fgrav = self.f["velocity"], self.f["avelocity"], self.f["gravity"]
         for num in range(1, vm.num_edicts):
             if vm.free[num]:
                 continue
-            # brush movers (doors/plats/buttons) + simple movers: integrate the
-            # linear move, then run think. Full SV_Physics (riders, blocking,
-            # gravity) comes with player/collision integration later.
+            # movers: integrate the linear move, then run think. Brush movers
+            # (doors/plats, MOVETYPE_PUSH) move at constant velocity; tossed
+            # projectiles (fireballs, MOVETYPE_TOSS) also fall under gravity.
+            # Full SV_Physics riders/blocking still comes later.
             mt = int(vm.fget_f(num, mtf))
-            if mt == MOVETYPE_PUSH or mt == MOVETYPE_NOCLIP:
+            if mt in _MOVE_INTEGRATE:
                 vx, vy, vz = vm.fget_v(num, fvel)
+                if mt in _MOVE_GRAVITY:
+                    gs = (fgrav is not None and vm.fget_f(num, fgrav)) or 1.0
+                    vz -= SV_GRAVITY * gs * dt
+                    vm.fset_v(num, fvel, (vx, vy, vz))
                 if vx or vy or vz:
                     ox, oy, oz = vm.fget_v(num, forg)
                     vm.fset_v(num, forg, (ox + vx * dt, oy + vy * dt, oz + vz * dt))
@@ -345,6 +374,7 @@ class Server:
                     cn = self.pr.string(vm.fget_i(num, self.f["classname"]))
                     print(f"think {cn} (edict {num}) aborted: {ex}")
         self.touch_triggers(self.player)        # fire teleports/triggers we touch
+        self._advance_particles(dt)
         self.gset_f("time", self.time)
 
     def touch_triggers(self, ent):
@@ -464,13 +494,13 @@ class Server:
             self._pf_droptofloor, self._pf_lightstyle, self._pf_rint,
             self._pf_floor, self._pf_ceil, fixme, self._pf_checkbottom,        # 39,40
             self._pf_pointcontents, fixme, self._pf_fabs, self._pf_aim,        # 42..
-            self._pf_cvar, self._pf_noop, self._pf_nextent, self._pf_noop,     # localcmd, particle
+            self._pf_cvar, self._pf_noop, self._pf_nextent, self._pf_particle,  # localcmd, particle
             self._pf_changeyaw, fixme, self._pf_vectoangles,                   # 49,50,51
-            self._pf_noop2, self._pf_noop2, self._pf_noop2, self._pf_noop2,    # WriteByte/Char/Short/Long
-            self._pf_noop2, self._pf_noop2, self._pf_noop2, self._pf_noop2,    # WriteCoord/Angle/String/Entity
+            self._pf_writebyte, self._pf_noop2, self._pf_noop2, self._pf_noop2,  # WriteByte/Char/Short/Long
+            self._pf_writecoord, self._pf_noop2, self._pf_noop2, self._pf_noop2,  # WriteCoord/Angle/String/Entity
             fixme, fixme, fixme, fixme, fixme, fixme, fixme,                   # 60..66
             self._pf_movetogoal, self._pf_precache_file, self._pf_makestatic,  # 67,68,69
-            self._pf_changelevel, fixme, self._pf_cvar_set, self._pf_noop2,    # 70..73 (centerprint)
+            self._pf_changelevel, fixme, self._pf_cvar_set, self._pf_centerprint,  # 70..73
             self._pf_ambientsound, self._pf_precache_model, self._pf_precache_sound,
             self._pf_precache_file, self._pf_setspawnparms,                    # 78
         ]
@@ -721,6 +751,70 @@ class Server:
 
     def _pf_changelevel(self):
         self.changelevel = self.vm.parm_str(0)
+
+    def _pf_centerprint(self):
+        # centerprint(client, string): keep only the player's message; the host
+        # draws it centred on screen for a few seconds.
+        if self.vm.parm_i(0) == self.player:
+            msg = self.vm.parm_str(1)
+            if msg:
+                self.center_msg = (msg, self.time)
+
+    def _burst(self, org, vel, color, count):
+        """Spawn `count` point sprites at org with a velocity + random spread."""
+        count = max(1, min(count, 24))
+        die = self.time + 0.6
+        for i in range(count):
+            self.particles.append([
+                org[0], org[1], org[2],
+                vel[0] + (random.random() - 0.5) * 40,
+                vel[1] + (random.random() - 0.5) * 40,
+                vel[2] + (random.random() - 0.5) * 40,
+                (color + i) & 255, die])
+        if len(self.particles) > 400:                # bound the list
+            del self.particles[:len(self.particles) - 400]
+
+    def _pf_particle(self):
+        # particle(origin, dir, color, count): spawn point sprites the host draws
+        vm = self.vm
+        self._burst(vm.parm_v(0), vm.parm_v(1), int(vm.parm_f(2)),
+                    int(vm.parm_f(3)))
+
+    def _pf_writebyte(self):
+        # decode broadcast temp-entity messages (gunshots, teleport fog, ...) into
+        # particle bursts: WriteByte(SVC_TEMPENTITY); WriteByte(type); 3x WriteCoord
+        v = int(self.vm.parm_f(1))
+        if self._te is None:
+            if v == SVC_TEMPENTITY:
+                self._te = [None, []]            # [type, collected coords]
+        elif self._te[0] is None:
+            self._te[0] = v                      # the temp-entity type
+        # any further bytes (counts/colours) are ignored; coords come via WriteCoord
+
+    def _pf_writecoord(self):
+        if self._te is None or self._te[0] is None:
+            return
+        coords = self._te[1]
+        coords.append(self.vm.parm_f(1))
+        if len(coords) == 3:                     # have a full position -> spark it
+            color, count = _TE_EFFECT.get(self._te[0], (0, 6))
+            self._burst(coords, (0.0, 0.0, 0.0), color, count)
+            self._te = None
+
+    def _advance_particles(self, dt):
+        if not self.particles:
+            return
+        t = self.time
+        live = []
+        for p in self.particles:
+            if p[7] <= t:
+                continue
+            p[0] += p[3] * dt
+            p[1] += p[4] * dt
+            p[2] += p[5] * dt
+            p[5] -= SV_GRAVITY * 0.05 * dt           # gentle droop
+            live.append(p)
+        self.particles = live
 
     def _pf_setspawnparms(self):
         pass

@@ -196,6 +196,30 @@ class Renderer:
             self.face_color.append(f"#{r:02x}{g:02x}{b:02x}")
             self.face_color_rgb.append((r, g, b))
 
+        # full-resolution textures decoded to packed RGB bytes (once), for the
+        # textured z-buffer rasteriser. Aligned to bsp.textures; None where the
+        # miptex has no level-0 pixels or no palette was supplied.
+        self.tex_rgb = self._decode_textures()
+
+        # per-face texture record for the rasteriser: (w, h, rgb_bytes, s_vec,
+        # t_vec) or None to fall back to flat colour. Plus a per-face integer
+        # shade (0..256, 8-bit fixed point) from the same directional light, so
+        # textured surfaces still read their facing -- textures are full-bright
+        # palette colours, so no 2.2 gain here (that only rescued dark averages).
+        self.face_tex = []
+        self.face_shade = []
+        for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
+            self.face_shade.append(int((0.55 + 0.45 * max(0.0,
+                                   nx * lx + ny * ly + nz * lz)) * 256))
+            rec = None
+            ti = bsp.faces[fi][4]
+            if 0 <= ti < len(texinfo):
+                mt = texinfo[ti][0]
+                if 0 <= mt < len(self.tex_rgb) and self.tex_rgb[mt] is not None:
+                    w, h, rgb = self.tex_rgb[mt]
+                    rec = (w, h, rgb, texinfo[ti][2], texinfo[ti][3])
+            self.face_tex.append(rec)
+
         # per-frame staleness markers (avoid clearing big arrays every frame)
         self.frame = 0
         self.face_frame = [0] * nfaces
@@ -239,6 +263,29 @@ class Renderer:
                 b += pb * c
                 tot += c
             out.append((r / tot, g / tot, b / tot) if tot else None)
+        return out
+
+    def _decode_textures(self):
+        """Decode each miptex's level-0 palette indices to packed RGB bytes,
+        once. Returns a list aligned to bsp.textures: (w, h, rgb_bytearray) or
+        None where unusable. The rasteriser samples these directly."""
+        pal = self.palette
+        out = []
+        for t in self.bsp.textures:
+            if t is None or t[3] is None or pal is None:
+                out.append(None)
+                continue
+            name, w, h, idx = t
+            if w <= 0 or h <= 0 or len(idx) < w * h:
+                out.append(None)
+                continue
+            rgb = bytearray(w * h * 3)
+            o = 0
+            for px in idx:
+                pr, pg, pb = pal[px]
+                rgb[o] = pr; rgb[o + 1] = pg; rgb[o + 2] = pb
+                o += 3
+            out.append((w, h, rgb))
         return out
 
     def _update_focal(self):
@@ -912,12 +959,13 @@ class Renderer:
         return polys, leaf
 
     def render_zbuffer(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
-                       view_model=None, bsp_ents=None):
-        """True per-pixel z-buffered software rasteriser. Fills flat-shaded
-        triangles into an RGB framebuffer at 1/ZBUF_SCALE resolution, resolving
-        occlusion with a 1/z depth buffer (no painter's ordering, so intersecting
-        geometry no longer mis-sorts). Returns ((framebuffer, w, h), leaf); the
-        buffer is raw RGB bytes the UI wraps in a PPM image and scales up."""
+                       view_model=None, bsp_ents=None, textured=True):
+        """True per-pixel z-buffered software rasteriser. World/brush faces are
+        perspective-correct texture-mapped (textured=True) or flat-shaded; both
+        resolve occlusion with a 1/z depth buffer (no painter's ordering, so
+        intersecting geometry no longer mis-sorts). Alias models and pickups stay
+        flat-shaded. Returns ((framebuffer, w, h), leaf); the buffer is raw RGB
+        bytes the UI wraps in a PPM image and scales up."""
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -933,6 +981,8 @@ class Renderer:
         face_verts = self.face_verts
         face_plane = self.face_plane
         face_color_rgb = self.face_color_rgb
+        face_tex = self.face_tex
+        face_shade = self.face_shade
         face_frame = self.face_frame
         vert_frame = self.vert_frame
         vcache = self.vcache
@@ -1049,6 +1099,103 @@ class Renderer:
                 raster_tri(sx[0], sy[0], sz[0], sx[k], sy[k], sz[k],
                            sx[k + 1], sy[k + 1], sz[k + 1], r, g, b)
 
+        def raster_tri_tex(ax, ay, az, au, av, bx, by, bz, bu, bv,
+                           cx, cy, cz, cu, cv, tw, th, tex, sh):
+            # textured z-buffered triangle. Vertices carry (x, y, invz, u*invz,
+            # v*invz); invz/u*invz/v*invz interpolate linearly in screen space,
+            # so per pixel u,v = (interp)/invz recovers perspective-correct texels.
+            x0 = ax if ax < bx else bx
+            if cx < x0: x0 = cx
+            x1 = ax if ax > bx else bx
+            if cx > x1: x1 = cx
+            y0 = ay if ay < by else by
+            if cy < y0: y0 = cy
+            y1 = ay if ay > by else by
+            if cy > y1: y1 = cy
+            x0 = int(x0)
+            if x0 < 0: x0 = 0
+            x1 = int(x1) + 1
+            if x1 > iw: x1 = iw
+            y0 = int(y0)
+            if y0 < 0: y0 = 0
+            y1 = int(y1) + 1
+            if y1 > ih: y1 = ih
+            if x0 >= x1 or y0 >= y1:
+                return
+            area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if area == 0.0:
+                return
+            A0 = by - cy; B0 = cx - bx
+            A1 = cy - ay; B1 = ax - cx
+            A2 = ay - by; B2 = bx - ax
+            px = x0 + 0.5; py = y0 + 0.5
+            w0r = (cx - bx) * (py - by) - (cy - by) * (px - bx)
+            w1r = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
+            w2r = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+            if area < 0.0:
+                A0 = -A0; A1 = -A1; A2 = -A2
+                B0 = -B0; B1 = -B1; B2 = -B2
+                w0r = -w0r; w1r = -w1r; w2r = -w2r
+                area = -area
+            inv = 1.0 / area
+            za = az * inv; zbb = bz * inv; zc = cz * inv
+            ua = au * inv; ub = bu * inv; uc = cu * inv
+            va = av * inv; vb = bv * inv; vc = cv * inv
+            for y in range(y0, y1):
+                w0 = w0r; w1 = w1r; w2 = w2r
+                row = y * iw
+                for x in range(x0, x1):
+                    if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
+                        iz = w0 * za + w1 * zbb + w2 * zc
+                        idx = row + x
+                        if iz > zb[idx]:
+                            z = 1.0 / iz
+                            tx = int((w0 * ua + w1 * ub + w2 * uc) * z) % tw
+                            ty = int((w0 * va + w1 * vb + w2 * vc) * z) % th
+                            o = (ty * tw + tx) * 3
+                            zb[idx] = iz
+                            fo = idx * 3
+                            fb[fo] = (tex[o] * sh) >> 8
+                            fb[fo + 1] = (tex[o + 1] * sh) >> 8
+                            fb[fo + 2] = (tex[o + 2] * sh) >> 8
+                    w0 += A0; w1 += A1; w2 += A2
+                w0r += B0; w1r += B1; w2r += B2
+
+        def raster_poly_tex(cam, rec, sh):
+            # cam: list of (cx, cy, cz, u, v). Near-clip (z >= NEAR) interpolating
+            # u,v too, project, fan-triangulate into textured triangles.
+            tw, th, tex = rec[0], rec[1], rec[2]
+            out = []
+            A = cam[-1]; da = A[2] - NEAR
+            for B in cam:
+                db = B[2] - NEAR
+                if da >= 0.0:
+                    out.append(A)
+                if (da >= 0.0) != (db >= 0.0):
+                    t = da / (da - db)
+                    out.append((A[0] + (B[0] - A[0]) * t,
+                                A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t,
+                                A[3] + (B[3] - A[3]) * t,
+                                A[4] + (B[4] - A[4]) * t))
+                A, da = B, db
+            n = len(out)
+            if n < 3:
+                return
+            sx = []; sy = []; sz = []; su = []; sv = []
+            for cx, cy, cz, u, v in out:
+                iz = 1.0 / cz
+                sx.append(hw + cx * focal * iz)
+                sy.append(hh - cy * focal * iz)
+                sz.append(iz)
+                su.append(u * iz)              # u/z, linear in screen space
+                sv.append(v * iz)
+            for k in range(1, n - 1):
+                raster_tri_tex(sx[0], sy[0], sz[0], su[0], sv[0],
+                               sx[k], sy[k], sz[k], su[k], sv[k],
+                               sx[k + 1], sy[k + 1], sz[k + 1], su[k + 1], sv[k + 1],
+                               tw, th, tex, sh)
+
         def raster_alias(mdl, verts, org, ang):
             # rotate model verts into world, transform to camera, flat-shade each
             # triangle by its world normal (matches render_shaded's emit_alias).
@@ -1096,8 +1243,21 @@ class Renderer:
                 nx, ny, nz, dist = face_plane[fi]
                 if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
                     continue
-                r, g, b = face_color_rgb[fi]
-                raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
+                rec = face_tex[fi] if textured else None
+                if rec is not None:
+                    (s0, s1, s2, s3) = rec[3]
+                    (t0, t1, t2, t3) = rec[4]
+                    cam = []
+                    for vi in face_verts[fi]:
+                        c = transform(vi)
+                        vx, vy, vz = vertexes[vi]
+                        cam.append((c[0], c[1], c[2],
+                                    vx * s0 + vy * s1 + vz * s2 + s3,
+                                    vx * t0 + vy * t1 + vz * t2 + t3))
+                    raster_poly_tex(cam, rec, face_shade[fi])
+                else:
+                    r, g, b = face_color_rgb[fi]
+                    raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
 
         # brush-model entities (doors, lifts, buttons), each offset to its origin
         if self.brushmodels:
@@ -1119,15 +1279,31 @@ class Renderer:
                     nx, ny, nz, dist = face_plane[fi]
                     if (ox - ofx) * nx + (oy - ofy) * ny + (oz - ofz) * nz - dist <= BACKFACE_EPS:
                         continue
-                    pts = []
-                    for vi in face_verts[fi]:
-                        vx, vy, vz = vertexes[vi]
-                        dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
-                        pts.append((dx * rx + dy * ry + dz * rz,
-                                    dx * ux + dy * uy + dz * uz,
-                                    dx * fx + dy * fy + dz * fz))
-                    r, g, b = face_color_rgb[fi]
-                    raster_poly(pts, r, g, b)
+                    rec = face_tex[fi] if textured else None
+                    if rec is not None:
+                        (s0, s1, s2, s3) = rec[3]
+                        (t0, t1, t2, t3) = rec[4]
+                        pts = []
+                        for vi in face_verts[fi]:
+                            vx, vy, vz = vertexes[vi]
+                            dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                            # UVs use the model-local vertex (texture rides the brush)
+                            pts.append((dx * rx + dy * ry + dz * rz,
+                                        dx * ux + dy * uy + dz * uz,
+                                        dx * fx + dy * fy + dz * fz,
+                                        vx * s0 + vy * s1 + vz * s2 + s3,
+                                        vx * t0 + vy * t1 + vz * t2 + t3))
+                        raster_poly_tex(pts, rec, face_shade[fi])
+                    else:
+                        pts = []
+                        for vi in face_verts[fi]:
+                            vx, vy, vz = vertexes[vi]
+                            dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                            pts.append((dx * rx + dy * ry + dz * rz,
+                                        dx * ux + dy * uy + dz * uz,
+                                        dx * fx + dy * fy + dz * fz))
+                        r, g, b = face_color_rgb[fi]
+                        raster_poly(pts, r, g, b)
 
         # alias (.mdl) entities -- monsters, items
         if alias_ents:

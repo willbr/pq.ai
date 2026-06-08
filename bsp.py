@@ -50,8 +50,10 @@ class Bsp:
         self.faces = [(f[0], f[1], f[2], f[3], f[4])
                       for f in _S_FACE.iter_unpack(lump(FACES))]
 
-        # texinfo: keep (miptex index, flags); the s/t vectors aren't needed here
-        self.texinfo = [(t[8], t[9])
+        # texinfo: (miptex index, flags, s_vec[4], t_vec[4]). The s/t vectors map
+        # a world vertex to texel coords: u = dot(v, s.xyz) + s.w (same for t).
+        self.texinfo = [(t[8], t[9],
+                         (t[0], t[1], t[2], t[3]), (t[4], t[5], t[6], t[7]))
                         for t in _S_TEXINFO.iter_unpack(lump(TEXINFO))]
 
         # textures: decode each embedded miptex to (name, w, h, mip0 index bytes).

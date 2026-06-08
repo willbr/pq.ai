@@ -109,6 +109,7 @@ class App:
         # sits at the bottom of the stack (lines/polys/particles/HUD draw above);
         # hidden until the mode is on. self.fb_photo holds the live PhotoImage.
         self.zbuf = False
+        self.textured = True            # texture-map world faces in z-buffer mode
         self.fb_photo = None
         self.fb_item = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
         # reusable line-item pool; unused items are parked off-screen with a
@@ -305,6 +306,9 @@ class App:
                 self.canvas.itemconfig(self.fb_item, state="normal")
             else:                                # hide fb; flat/wire redraws next
                 self.canvas.itemconfig(self.fb_item, state="hidden")
+            return
+        if k == "t":                             # texturing on/off (z-buffer mode)
+            self.textured = not self.textured
             return
         if len(k) == 1 and "1" <= k <= "8":   # select a weapon (Quake impulse 1-8)
             self.pending_impulse = int(k)
@@ -517,7 +521,8 @@ class App:
         if self.zbuf:
             fbdata, leaf = self.rend.render_zbuffer(eye, self.yaw, self.pitch,
                                                     brush_ents, alias_ents,
-                                                    view_model, bsp_ents)
+                                                    view_model, bsp_ents,
+                                                    textured=self.textured)
             self._draw_fb(fbdata)
             nprim = fbdata[1] * fbdata[2]
         elif self.flat:
@@ -558,7 +563,7 @@ class App:
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
                   f"{'MOUSELOOK — hold to fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
-                  f"[N]oclip [F]lat [Z]buffer"))
+                  f"[N]oclip [F]lat [Z]buffer [T]exture"))
         # bottom status bar: health / armor / current-weapon ammo, plus the four
         # ammo pools. Health reddens when low so it reads at a glance.
         st = self.sv.hud_status()

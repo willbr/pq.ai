@@ -21,7 +21,7 @@ import tkinter as tk
 
 from pak import Pak
 from bsp import Bsp
-from render import Renderer, PickupModel, angle_vectors
+from render import Renderer, PickupModel, angle_vectors, ZBUF_SCALE
 from physics import Physics, VIEW_HEIGHT, MAXSPEED
 from progs import Progs
 from sv import Server, anglemod
@@ -105,6 +105,12 @@ class App:
         self.root.geometry("800x600")
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+        # z-buffer mode blits a software framebuffer here. Created first so it
+        # sits at the bottom of the stack (lines/polys/particles/HUD draw above);
+        # hidden until the mode is on. self.fb_photo holds the live PhotoImage.
+        self.zbuf = False
+        self.fb_photo = None
+        self.fb_item = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
         # reusable line-item pool; unused items are parked off-screen with a
         # cheap coords() call (no itemconfig state churn, no extra item count)
         self.pool = [self.canvas.create_line(-10, -10, -10, -10, fill=LINE_COLOR)
@@ -290,6 +296,15 @@ class App:
                 self._park(self.pool, self.prev_n, 4); self.prev_n = 0
             else:
                 self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
+            return
+        if k == "z":
+            self.zbuf = not self.zbuf
+            if self.zbuf:                        # park both vector pools, show fb
+                self._park(self.pool, self.prev_n, 4); self.prev_n = 0
+                self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
+                self.canvas.itemconfig(self.fb_item, state="normal")
+            else:                                # hide fb; flat/wire redraws next
+                self.canvas.itemconfig(self.fb_item, state="hidden")
             return
         if len(k) == 1 and "1" <= k <= "8":   # select a weapon (Quake impulse 1-8)
             self.pending_impulse = int(k)
@@ -499,7 +514,13 @@ class App:
             fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
             eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
             view_model = self._view_model(gun_org)
-        if self.flat:
+        if self.zbuf:
+            fbdata, leaf = self.rend.render_zbuffer(eye, self.yaw, self.pitch,
+                                                    brush_ents, alias_ents,
+                                                    view_model, bsp_ents)
+            self._draw_fb(fbdata)
+            nprim = fbdata[1] * fbdata[2]
+        elif self.flat:
             polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
                                                   brush_ents, alias_ents, view_model,
                                                   bsp_ents)
@@ -532,12 +553,12 @@ class App:
         self.canvas.itemconfig(
             self.hud,
             text=(f"{self.fps:5.1f} fps   "
-                  f"{'polys' if self.flat else 'segs'} {nprim}   "
+                  f"{'pixels' if self.zbuf else 'polys' if self.flat else 'segs'} {nprim}   "
                   f"leaf {leaf}   {mode}   health {hp:.0f}\n"
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
                   f"{'MOUSELOOK — hold to fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
-                  f"[N]oclip [F]lat"))
+                  f"[N]oclip [F]lat [Z]buffer"))
         # bottom status bar: health / armor / current-weapon ammo, plus the four
         # ammo pools. Health reddens when low so it reads at a glance.
         st = self.sv.hud_status()
@@ -707,6 +728,20 @@ class App:
             coords(pool[i], -10, -10, -10, -10, -10, -10)
         self.poly_prev = n
         c.tag_raise(self.hud)
+
+    def _draw_fb(self, fbdata):
+        """Wrap the renderer's raw RGB framebuffer in a PPM PhotoImage, scale it
+        up to fill the window (chunky pixels), and show it on the canvas image
+        item. A fresh PhotoImage per frame -- cheap; the costly part is the
+        per-pixel fill the renderer already did."""
+        fb, w, h = fbdata
+        ppm = b"P6 %d %d 255 " % (w, h) + bytes(fb)
+        photo = tk.PhotoImage(data=ppm, format="ppm")
+        if ZBUF_SCALE > 1:
+            photo = photo.zoom(ZBUF_SCALE)
+        self.canvas.itemconfig(self.fb_item, image=photo)
+        self.fb_photo = photo            # keep a ref so Tk doesn't GC the pixels
+        self.canvas.tag_lower(self.fb_item)
 
     def _park(self, pool, used, ncoords):
         """Move the first `used` items of a pool off-screen (on mode switch)."""

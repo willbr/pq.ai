@@ -13,6 +13,7 @@ Quake world space is Z-up, right-handed. Camera space: x=right, y=up, z=forward.
 
 import math
 import sys
+from array import array
 
 sys.setrecursionlimit(20000)   # BSP back-to-front walk can recurse deep
 
@@ -20,6 +21,12 @@ NEAR = 1.0
 BACKFACE_EPS = 0.01
 MIN_SEG_PX2 = 9.0          # drop segments shorter than 3px (Tk cost, no detail)
 MIN_POLY_PX2 = 16.0        # drop polygons smaller than this area (Tk fill cost)
+
+# z-buffer mode renders a real software framebuffer (per-pixel depth test) at
+# 1/ZBUF_SCALE of the window, then the UI scales it up. Pure-Python per-pixel
+# fill is slow, so a low internal resolution keeps it interactive.
+ZBUF_SCALE = 4
+ZBUF_BG = (40, 40, 56)     # flat colour where nothing is drawn (no sky render)
 
 
 def angle_vectors(yaw_deg, pitch_deg):
@@ -116,7 +123,8 @@ class PickupModel:
             r = min(255, int(base[0] * inten))
             g = min(255, int(base[1] * inten))
             b = min(255, int(base[2] * inten))
-            self.faces.append((verts, (nx, ny, nz, dist), f"#{r:02x}{g:02x}{b:02x}"))
+            self.faces.append((verts, (nx, ny, nz, dist),
+                               f"#{r:02x}{g:02x}{b:02x}", (r, g, b)))
             for k in range(numedges):
                 self.edges.append((verts[k], verts[(k + 1) % numedges]))
 
@@ -132,6 +140,7 @@ class Renderer:
         self.backface = True
         self.brushmodels = True     # draw doors/lifts/buttons (submodels 1..N)
         self._update_focal()
+        self._setup_zbuf()
 
         nfaces = len(bsp.faces)
         nedges = len(bsp.edges)
@@ -170,6 +179,7 @@ class Renderer:
         gain = 2.2
         texinfo = bsp.texinfo
         self.face_color = []
+        self.face_color_rgb = []        # (r,g,b) ints, for the z-buffer rasteriser
         for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
             inten = (0.50 + 0.50 * max(0.0, nx * lx + ny * ly + nz * lz)) * gain
             base = None
@@ -184,6 +194,7 @@ class Renderer:
             g = min(255, int(base[1] * inten))
             b = min(255, int(base[2] * inten))
             self.face_color.append(f"#{r:02x}{g:02x}{b:02x}")
+            self.face_color_rgb.append((r, g, b))
 
         # per-frame staleness markers (avoid clearing big arrays every frame)
         self.frame = 0
@@ -233,9 +244,20 @@ class Renderer:
     def _update_focal(self):
         self.focal = (self.width / 2) / math.tan(math.radians(self.fov) / 2)
 
+    def _setup_zbuf(self):
+        """(Re)allocate the z-buffer mode's framebuffer + depth templates for the
+        current window size. _bg_frame is a pre-coloured background to copy each
+        frame; _zb_zero seeds the depth buffer to 0 (= infinitely far, since we
+        store 1/z and keep the larger value)."""
+        self.zw = max(1, self.width // ZBUF_SCALE)
+        self.zh = max(1, self.height // ZBUF_SCALE)
+        self._bg_frame = bytes(ZBUF_BG) * (self.zw * self.zh)
+        self._zb_zero = bytes(4 * self.zw * self.zh)
+
     def resize(self, w, h):
         self.width, self.height = w, h
         self._update_focal()
+        self._setup_zbuf()
 
     def project_point(self, origin, yaw, pitch, p):
         """World point -> (screen_x, screen_y), or None if behind the near
@@ -727,7 +749,7 @@ class Renderer:
             pm = item["pickup"]
             ofx, ofy, ofz = item["origin"]
             clx, cly, clz = ox - ofx, oy - ofy, oz - ofz
-            for verts, (nx, ny, nz, dist), color in pm.faces:
+            for verts, (nx, ny, nz, dist), color, _rgb in pm.faces:
                 if clx * nx + cly * ny + clz * nz - dist <= BACKFACE_EPS:
                     continue
                 pts = []
@@ -888,3 +910,258 @@ class Renderer:
             emit_alias({"mdl": mdl, "verts": verts, "origin": org, "angles": ang})
 
         return polys, leaf
+
+    def render_zbuffer(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
+                       view_model=None, bsp_ents=None):
+        """True per-pixel z-buffered software rasteriser. Fills flat-shaded
+        triangles into an RGB framebuffer at 1/ZBUF_SCALE resolution, resolving
+        occlusion with a 1/z depth buffer (no painter's ordering, so intersecting
+        geometry no longer mis-sorts). Returns ((framebuffer, w, h), leaf); the
+        buffer is raw RGB bytes the UI wraps in a PPM image and scales up."""
+        bsp = self.bsp
+        self.frame += 1
+        frame = self.frame
+        forward, right, up = angle_vectors(yaw, pitch)
+        ox, oy, oz = origin
+        fx, fy, fz = forward
+        rx, ry, rz = right
+        ux, uy, uz = up
+
+        vertexes = bsp.vertexes
+        leafs = bsp.leafs
+        marks = bsp.marksurfaces
+        face_verts = self.face_verts
+        face_plane = self.face_plane
+        face_color_rgb = self.face_color_rgb
+        face_frame = self.face_frame
+        vert_frame = self.vert_frame
+        vcache = self.vcache
+
+        iw, ih = self.zw, self.zh
+        focal = self.focal * iw / self.width          # focal scaled to the small fb
+        hw = iw * 0.5
+        hh = ih * 0.5
+        fb = bytearray(self._bg_frame)                # fresh background to draw over
+        zb = array('f', self._zb_zero)                # depth = 1/z, 0 == far away
+
+        leaf = self.point_leaf(origin)
+        if leafs[leaf][0] == -2 or leafs[leaf][1] < 0:
+            vis = b"\xff" * self.vis_row
+        else:
+            vis = self.decompress_vis(leafs[leaf][1])
+
+        visible_leaves = []
+        for i in range(len(leafs) - 1):
+            if vis[i >> 3] & (1 << (i & 7)):
+                visible_leaves.append(i + 1)
+
+        def transform(vi):
+            if vert_frame[vi] == frame:
+                return vcache[vi]
+            vx, vy, vz = vertexes[vi]
+            dx, dy, dz = vx - ox, vy - oy, vz - oz
+            c = (dx * rx + dy * ry + dz * rz,
+                 dx * ux + dy * uy + dz * uz,
+                 dx * fx + dy * fy + dz * fz)
+            vcache[vi] = c
+            vert_frame[vi] = frame
+            return c
+
+        def raster_tri(ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b):
+            # a,b,c are screen-space (x, y, invz). Edge-function fill over the
+            # triangle's pixel bounding box, clamped to the framebuffer; depth is
+            # the perspective-correct 1/z interpolated from the vertices.
+            x0 = ax if ax < bx else bx
+            if cx < x0: x0 = cx
+            x1 = ax if ax > bx else bx
+            if cx > x1: x1 = cx
+            y0 = ay if ay < by else by
+            if cy < y0: y0 = cy
+            y1 = ay if ay > by else by
+            if cy > y1: y1 = cy
+            x0 = int(x0)
+            if x0 < 0: x0 = 0
+            x1 = int(x1) + 1
+            if x1 > iw: x1 = iw
+            y0 = int(y0)
+            if y0 < 0: y0 = 0
+            y1 = int(y1) + 1
+            if y1 > ih: y1 = ih
+            if x0 >= x1 or y0 >= y1:
+                return
+            area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if area == 0.0:
+                return
+            # barycentric edge weights (orient2d): w_i / area is vertex i's weight,
+            # stepping A in +x and B in +y. Sign convention must match `area`.
+            A0 = by - cy; B0 = cx - bx          # weight for vertex a (edge b->c)
+            A1 = cy - ay; B1 = ax - cx          # weight for vertex b (edge c->a)
+            A2 = ay - by; B2 = bx - ax          # weight for vertex c (edge a->b)
+            px = x0 + 0.5; py = y0 + 0.5
+            w0r = (cx - bx) * (py - by) - (cy - by) * (px - bx)
+            w1r = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
+            w2r = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+            if area < 0.0:                       # normalise winding -> test w >= 0
+                A0 = -A0; A1 = -A1; A2 = -A2
+                B0 = -B0; B1 = -B1; B2 = -B2
+                w0r = -w0r; w1r = -w1r; w2r = -w2r
+                area = -area
+            inv = 1.0 / area                     # fold into depths: izp = sum(w*z)
+            za = az * inv; zbb = bz * inv; zc = cz * inv
+            for y in range(y0, y1):
+                w0 = w0r; w1 = w1r; w2 = w2r
+                row = y * iw
+                for x in range(x0, x1):
+                    if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
+                        iz = w0 * za + w1 * zbb + w2 * zc
+                        idx = row + x
+                        if iz > zb[idx]:
+                            zb[idx] = iz
+                            o = idx * 3
+                            fb[o] = r; fb[o + 1] = g; fb[o + 2] = b
+                    w0 += A0; w1 += A1; w2 += A2
+                w0r += B0; w1r += B1; w2r += B2
+
+        def raster_poly(cam, r, g, b):
+            # near-plane clip (z >= NEAR), project to the small fb, fan-triangulate
+            out = []
+            A = cam[-1]; da = A[2] - NEAR
+            for B in cam:
+                db = B[2] - NEAR
+                if da >= 0.0:
+                    out.append(A)
+                if (da >= 0.0) != (db >= 0.0):
+                    t = da / (da - db)
+                    out.append((A[0] + (B[0] - A[0]) * t,
+                                A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t))
+                A, da = B, db
+            n = len(out)
+            if n < 3:
+                return
+            sx = []; sy = []; sz = []
+            for vx, vy, vz in out:
+                iz = 1.0 / vz
+                sx.append(hw + vx * focal * iz)
+                sy.append(hh - vy * focal * iz)
+                sz.append(iz)
+            for k in range(1, n - 1):
+                raster_tri(sx[0], sy[0], sz[0], sx[k], sy[k], sz[k],
+                           sx[k + 1], sy[k + 1], sz[k + 1], r, g, b)
+
+        def raster_alias(mdl, verts, org, ang):
+            # rotate model verts into world, transform to camera, flat-shade each
+            # triangle by its world normal (matches render_shaded's emit_alias).
+            ox_e, oy_e, oz_e = org
+            afwd, arr, aup = model_axes(ang)
+            afx, afy, afz = afwd
+            arx, ary, arz = arr
+            aux, auy, auz = aup
+            cam = []; wpos = []
+            for vx, vy, vz in verts:
+                wx = ox_e + vx * afx - vy * arx + vz * aux
+                wy = oy_e + vx * afy - vy * ary + vz * auy
+                wz = oz_e + vx * afz - vy * arz + vz * auz
+                dx, dy, dz = wx - ox, wy - oy, wz - oz
+                cam.append((dx * rx + dy * ry + dz * rz,
+                            dx * ux + dy * uy + dz * uz,
+                            dx * fx + dy * fy + dz * fz))
+                wpos.append((wx, wy, wz))
+            base = mdl.skin_color or (150.0, 150.0, 150.0)
+            br, bg, bb = base
+            lx, ly, lz = ALIAS_LIGHT
+            for a, b, c in mdl.tris:
+                ax, ay, az = wpos[a]
+                ux1, uy1, uz1 = wpos[b][0] - ax, wpos[b][1] - ay, wpos[b][2] - az
+                vx1, vy1, vz1 = wpos[c][0] - ax, wpos[c][1] - ay, wpos[c][2] - az
+                nx = uy1 * vz1 - uz1 * vy1
+                ny = uz1 * vx1 - ux1 * vz1
+                nz = ux1 * vy1 - uy1 * vx1
+                nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+                inten = (0.5 + 0.5 * abs((nx * lx + ny * ly + nz * lz) / nl)) * ALIAS_GAIN \
+                    if nl else 0.6 * ALIAS_GAIN
+                r = min(255, int(br * inten))
+                g = min(255, int(bg * inten))
+                bl = min(255, int(bb * inten))
+                raster_poly([cam[a], cam[b], cam[c]], r, g, bl)
+
+        # world (model 0): PVS-visible leaves' faces, backface-culled
+        for li in visible_leaves:
+            _, _, firstmark, nummark = leafs[li]
+            for m in range(firstmark, firstmark + nummark):
+                fi = marks[m]
+                if face_frame[fi] == frame:
+                    continue
+                face_frame[fi] = frame
+                nx, ny, nz, dist = face_plane[fi]
+                if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
+                    continue
+                r, g, b = face_color_rgb[fi]
+                raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
+
+        # brush-model entities (doors, lifts, buttons), each offset to its origin
+        if self.brushmodels:
+            if brush_ents is None:
+                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                              for i in range(1, len(bsp.models))]
+            for mi, (ofx, ofy, ofz), _ang in brush_ents:
+                md = bsp.models[mi]
+                mn, mx = md["mins"], md["maxs"]
+                mins = (mn[0] + ofx, mn[1] + ofy, mn[2] + ofz)
+                maxs = (mx[0] + ofx, mx[1] + ofy, mx[2] + ofz)
+                if not self.box_in_pvs(mins, maxs, vis):
+                    continue
+                ff = md["firstface"]
+                for fi in range(ff, ff + md["numfaces"]):
+                    if face_frame[fi] == frame:
+                        continue
+                    face_frame[fi] = frame
+                    nx, ny, nz, dist = face_plane[fi]
+                    if (ox - ofx) * nx + (oy - ofy) * ny + (oz - ofz) * nz - dist <= BACKFACE_EPS:
+                        continue
+                    pts = []
+                    for vi in face_verts[fi]:
+                        vx, vy, vz = vertexes[vi]
+                        dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                        pts.append((dx * rx + dy * ry + dz * rz,
+                                    dx * ux + dy * uy + dz * uz,
+                                    dx * fx + dy * fy + dz * fz))
+                    r, g, b = face_color_rgb[fi]
+                    raster_poly(pts, r, g, b)
+
+        # alias (.mdl) entities -- monsters, items
+        if alias_ents:
+            for mdl, verts, org, ang in alias_ents:
+                r = mdl.boundingradius
+                if not self.box_in_pvs((org[0] - r, org[1] - r, org[2] - r),
+                                       (org[0] + r, org[1] + r, org[2] + r), vis):
+                    continue
+                raster_alias(mdl, verts, org, ang)
+
+        # external .bsp pickups (health/ammo boxes): convex, backface-cull faces
+        if bsp_ents:
+            for pm, org, ang in bsp_ents:
+                mn, mx = pm.mins, pm.maxs
+                ofx, ofy, ofz = org
+                if not self.box_in_pvs((ofx + mn[0], ofy + mn[1], ofz + mn[2]),
+                                       (ofx + mx[0], ofy + mx[1], ofz + mx[2]), vis):
+                    continue
+                clx, cly, clz = ox - ofx, oy - ofy, oz - ofz
+                for verts, (nx, ny, nz, dist), _color, (r, g, b) in pm.faces:
+                    if clx * nx + cly * ny + clz * nz - dist <= BACKFACE_EPS:
+                        continue
+                    pts = []
+                    for vx, vy, vz in verts:
+                        dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                        pts.append((dx * rx + dy * ry + dz * rz,
+                                    dx * ux + dy * uy + dz * uz,
+                                    dx * fx + dy * fy + dz * fz))
+                    raster_poly(pts, r, g, b)
+
+        # first-person weapon view model: drawn last; sits at the camera so its
+        # near depth wins the z-test and it reads as on top. No PVS cull.
+        if view_model:
+            mdl, verts, org, ang = view_model
+            raster_alias(mdl, verts, org, ang)
+
+        return (fb, iw, ih), leaf

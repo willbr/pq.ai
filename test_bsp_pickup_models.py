@@ -71,9 +71,10 @@ def test_pickup_model_loads_real_bsp():
     pm = PickupModel(Bsp(pak.read("maps/b_bh25.bsp")), _palette(pak))
     assert pm.faces, "pickup model should have faces"
     assert pm.maxs[0] > pm.mins[0], f"degenerate bounds {pm.mins}..{pm.maxs}"
-    for verts, plane, color in pm.faces:
+    for verts, plane, color, rgb in pm.faces:
         assert len(verts) >= 3
         assert color.startswith("#") and len(color) == 7
+        assert len(rgb) == 3 and all(0 <= c <= 255 for c in rgb)
 
 
 # --- 3. it actually renders -----------------------------------------------

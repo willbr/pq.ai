@@ -110,6 +110,28 @@ def _bsp_texture_colors(bsp, palette):
     return out
 
 
+def _bsp_texture_rgb(bsp, palette):
+    """Decode each miptex of `bsp` to (w, h, packed_rgb), or None where unusable.
+    Standalone twin of Renderer._decode_textures, for texturing pickup models."""
+    out = []
+    for t in bsp.textures:
+        if t is None or t[3] is None or palette is None:
+            out.append(None)
+            continue
+        _name, w, h, idx = t
+        if w <= 0 or h <= 0 or len(idx) < w * h:
+            out.append(None)
+            continue
+        rgb = bytearray(w * h * 3)
+        o = 0
+        for px in idx:
+            pr, pg, pb = palette[px]
+            rgb[o] = pr; rgb[o + 1] = pg; rgb[o + 2] = pb
+            o += 3
+        out.append((w, h, rgb))
+    return out
+
+
 class PickupModel:
     """An external .bsp brush model loaded as a pickup (health box, ammo box).
 
@@ -119,14 +141,17 @@ class PickupModel:
     so we precompute its faces in model-local space and draw it with backface
     culling alone -- no internal BSP walk or face sorting needed.
 
-    self.faces: list of (local_verts, (nx, ny, nz, dist), color_hex)
+    self.faces: list of (local_verts, (nx, ny, nz, dist), color_hex, (r,g,b),
+                         texrec, s_vec, t_vec) where texrec is (w,h,rgb) or None
+                         and s_vec/t_vec map a local vertex to texel coords.
     self.mins/self.maxs: model-space bounds, for PVS + painter routing.
     """
     def __init__(self, bsp, palette):
         m0 = bsp.models[0]
         self.mins = tuple(m0["mins"])
         self.maxs = tuple(m0["maxs"])
-        tex_rgb = _bsp_texture_colors(bsp, palette)
+        tex_rgb = _bsp_texture_colors(bsp, palette)     # average colour (flat mode)
+        tex_full = _bsp_texture_rgb(bsp, palette)       # full texels (textured mode)
         lx, ly, lz = ALIAS_LIGHT
         self.faces = []
         self.edges = []                 # (p0, p1) local-space, for wireframe mode
@@ -143,17 +168,23 @@ class PickupModel:
                 nx, ny, nz, dist = -nx, -ny, -nz, -dist
             inten = (0.50 + 0.50 * max(0.0, nx * lx + ny * ly + nz * lz)) * WORLD_GAIN
             base = None
+            texrec = svec = tvec = None
             if 0 <= ti < len(bsp.texinfo):
                 mt = bsp.texinfo[ti][0]
                 if 0 <= mt < len(tex_rgb):
                     base = tex_rgb[mt]
+                if 0 <= mt < len(tex_full) and tex_full[mt] is not None:
+                    texrec = tex_full[mt]
+                    svec = bsp.texinfo[ti][2]
+                    tvec = bsp.texinfo[ti][3]
             if base is None:
                 base = (140.0, 140.0, 140.0)
             r = min(255, int(base[0] * inten))
             g = min(255, int(base[1] * inten))
             b = min(255, int(base[2] * inten))
             self.faces.append((verts, (nx, ny, nz, dist),
-                               f"#{r:02x}{g:02x}{b:02x}", (r, g, b)))
+                               f"#{r:02x}{g:02x}{b:02x}", (r, g, b),
+                               texrec, svec, tvec))
             for k in range(numedges):
                 self.edges.append((verts[k], verts[(k + 1) % numedges]))
 
@@ -1074,7 +1105,7 @@ class Renderer:
             pm = item["pickup"]
             ofx, ofy, ofz = item["origin"]
             clx, cly, clz = ox - ofx, oy - ofy, oz - ofz
-            for verts, (nx, ny, nz, dist), color, _rgb in pm.faces:
+            for verts, (nx, ny, nz, dist), color, _rgb, _tr, _s, _t in pm.faces:
                 if clx * nx + cly * ny + clz * nz - dist <= BACKFACE_EPS:
                     continue
                 pts = []
@@ -1771,25 +1802,48 @@ class Renderer:
                 else:
                     raster_alias(mdl, verts, org, ang)
 
-        # external .bsp pickups (health/ammo boxes): convex, backface-cull faces
+        # external .bsp pickups (health/ammo/explosive boxes): convex, backface-
+        # cull faces. Texture-mapped (textured=True) like the world, otherwise
+        # flat-shaded -- both lit by the baked world light at the box origin so a
+        # box in a dark room reads dark, modulated per face by its facing.
         if bsp_ents:
+            alx, aly, alz = ALIAS_LIGHT
             for pm, org, ang in bsp_ents:
                 mn, mx = pm.mins, pm.maxs
                 ofx, ofy, ofz = org
                 if not self.box_in_pvs((ofx + mn[0], ofy + mn[1], ofz + mn[2]),
                                        (ofx + mx[0], ofy + mx[1], ofz + mx[2]), vis):
                     continue
+                wl = self.light_point(org) if textured else 0       # 0..255 ambient
                 clx, cly, clz = ox - ofx, oy - ofy, oz - ofz
-                for verts, (nx, ny, nz, dist), _color, (r, g, b) in pm.faces:
+                for verts, (nx, ny, nz, dist), _color, (r, g, b), texrec, svec, tvec in pm.faces:
                     if clx * nx + cly * ny + clz * nz - dist <= BACKFACE_EPS:
                         continue
-                    pts = []
-                    for vx, vy, vz in verts:
-                        dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
-                        pts.append((dx * rx + dy * ry + dz * rz,
-                                    dx * ux + dy * uy + dz * uz,
-                                    dx * fx + dy * fy + dz * fz))
-                    raster_poly(pts, r, g, b)
+                    if textured and texrec is not None:
+                        s0, s1, s2, s3 = svec
+                        t0, t1, t2, t3 = tvec
+                        pts = []
+                        for vx, vy, vz in verts:
+                            dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                            pts.append((dx * rx + dy * ry + dz * rz,
+                                        dx * ux + dy * uy + dz * uz,
+                                        dx * fx + dy * fy + dz * fz,
+                                        vx * s0 + vy * s1 + vz * s2 + s3,
+                                        vx * t0 + vy * t1 + vz * t2 + t3))
+                        shf = 0.6 + 0.4 * abs(nx * alx + ny * aly + nz * alz)
+                        shi = int(wl * shf)
+                        if shi > 255:
+                            shi = 255
+                        lm = (1, 1, 0.0, 0.0, bytes((shi,)))
+                        raster_poly_tex(pts, texrec, lm)
+                    else:
+                        pts = []
+                        for vx, vy, vz in verts:
+                            dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                            pts.append((dx * rx + dy * ry + dz * rz,
+                                        dx * ux + dy * uy + dz * uz,
+                                        dx * fx + dy * fy + dz * fz))
+                        raster_poly(pts, r, g, b)
 
         # first-person weapon view model: drawn last; sits at the camera so its
         # near depth wins the z-test and it reads as on top. No PVS cull.

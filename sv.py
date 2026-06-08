@@ -207,10 +207,12 @@ def parse_entities(text):
 
 class Server:
     def __init__(self, progs, bsp=None, mapname="", skill=1, max_edicts=600,
-                 physics=None):
+                 physics=None, pak=None):
         self.pr = progs
         self.vm = VM(progs, max_edicts=max_edicts)
         self.bsp = bsp
+        self.pak = pak             # to resolve external brush-model bounds (b_*.bsp)
+        self._ext_bounds = {}      # cache: external .bsp name -> (mins, maxs)
         self.mapname = mapname
         self.skill = skill
         self.phys = physics         # for traceline / hitscan; None -> clear path
@@ -886,8 +888,34 @@ class Server:
         if m.startswith("*") and self.bsp is not None:
             bm = self.bsp.models[int(m[1:])]
             self._set_minmax(e, bm["mins"], bm["maxs"])
+        elif m.endswith(".bsp") and m != self.mapname:
+            # external brush model (maps/b_explob.bsp etc.). Quake's setmodel
+            # sets the entity's box from the model's bounds; misc_explobox relies
+            # on this entirely (it never calls setsize), so without it the barrel
+            # gets a zero-size box and bullets pass straight through it.
+            bounds = self._external_model_bounds(m)
+            if bounds is not None:
+                self._set_minmax(e, bounds[0], bounds[1])
+            else:
+                self._set_minmax(e, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
         else:
             self._set_minmax(e, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+
+    def _external_model_bounds(self, name):
+        """(mins, maxs) of an external brush model's model 0, read from the pak
+        and cached. None if there's no pak or the file is missing/unreadable."""
+        if name in self._ext_bounds:
+            return self._ext_bounds[name]
+        bounds = None
+        if self.pak is not None and name in self.pak.files:
+            try:
+                from bsp import Bsp
+                bm = Bsp(self.pak.read(name)).models[0]
+                bounds = (tuple(bm["mins"]), tuple(bm["maxs"]))
+            except Exception as ex:
+                print(f"external model bounds for {name} failed: {ex}")
+        self._ext_bounds[name] = bounds
+        return bounds
 
     # --- edict alloc ---
     def _pf_spawn(self):

@@ -71,10 +71,17 @@ def test_pickup_model_loads_real_bsp():
     pm = PickupModel(Bsp(pak.read("maps/b_bh25.bsp")), _palette(pak))
     assert pm.faces, "pickup model should have faces"
     assert pm.maxs[0] > pm.mins[0], f"degenerate bounds {pm.mins}..{pm.maxs}"
-    for verts, plane, color, rgb in pm.faces:
+    textured = 0
+    for verts, plane, color, rgb, texrec, svec, tvec in pm.faces:
         assert len(verts) >= 3
         assert color.startswith("#") and len(color) == 7
         assert len(rgb) == 3 and all(0 <= c <= 255 for c in rgb)
+        if texrec is not None:
+            w, h, pix = texrec
+            assert w > 0 and h > 0 and len(pix) == w * h * 3
+            assert svec is not None and tvec is not None
+            textured += 1
+    assert textured, "pickup faces should carry decoded textures for textured mode"
 
 
 # --- 3. it actually renders -----------------------------------------------
@@ -102,8 +109,38 @@ def test_pickup_renders_in_front_of_camera():
         "the box should be visible in front of the spawn")
 
 
+def test_pickup_textured_in_zbuffer():
+    """In textured z-buffer mode the box must be drawn with its decoded texture,
+    not a flat colour -- so the textured framebuffer differs from the flat one."""
+    pak = Pak(PAK)
+    palette = _palette(pak)
+    world = Bsp(pak.read("maps/e1m1.bsp"))
+    rend = Renderer(world, palette)
+    pm = PickupModel(Bsp(pak.read("maps/b_bh25.bsp")), palette)
+
+    (sx, sy, sz), yaw = world.find_spawn()
+    eye = (sx, sy, sz + 22.0)
+    import math
+    yr = math.radians(yaw)
+    box = (sx + 56.0 * math.cos(yr) - 20.0, sy + 56.0 * math.sin(yr) + 20.0,
+           sz - 8.0)
+    ents = [(pm, box, (0.0, 0.0, 0.0))]
+
+    (fb_none, w, h), _ = rend.render_zbuffer(eye, yaw, 0.0, textured=True)
+    (fb_tex, _, _), _ = rend.render_zbuffer(eye, yaw, 0.0, bsp_ents=ents,
+                                            textured=True)
+    (fb_flat, _, _), _ = rend.render_zbuffer(eye, yaw, 0.0, bsp_ents=ents,
+                                             textured=False)
+    drawn = sum(1 for i in range(len(fb_tex)) if fb_tex[i] != fb_none[i])
+    assert drawn > 0, "pickup drew nothing in textured z-buffer mode"
+    # textured pixels must differ from the flat-colour fill of the same faces
+    diff = sum(1 for i in range(len(fb_tex)) if fb_tex[i] != fb_flat[i])
+    assert diff > 0, "textured pickup looks identical to flat -- not texture-mapped"
+
+
 if __name__ == "__main__":
     test_enumeration_picks_external_bsp_only()
     test_pickup_model_loads_real_bsp()
     test_pickup_renders_in_front_of_camera()
+    test_pickup_textured_in_zbuffer()
     print("OK")

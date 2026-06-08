@@ -188,7 +188,7 @@ class App:
         # buttons and lifts are entities; their brush models are drawn at the
         # origins the QC sets, and invisible triggers no longer render.
         self.sv = Server(Progs(self.progs_data), bsp=self.bsp, mapname=path,
-                         skill=skill, physics=self.phys)
+                         skill=skill, physics=self.phys, pak=self.pak)
         self.sv.load_level()
         self.sv_accum = 0.0
 

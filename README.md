@@ -1,10 +1,13 @@
 # pq.ai — Quake in pure Python
 
-A wireframe Quake level walker written in **pure Python standard library**, with
+A working slice of Quake written in **pure Python standard library**, with
 **tkinter as the only UI dependency**. No numpy, no pygame, no OpenGL, no C extensions.
 
-It loads the genuine Quake shareware data, parses a real BSP level, and lets you fly
-through it as wireframe 3D — drawn with tkinter `Canvas` lines.
+It loads the genuine Quake shareware data, parses a real BSP level, runs id's
+**actual compiled game code** (`progs.dat`) in a QuakeC virtual machine, and renders
+it three ways — wireframe, flat-shaded polygons, or a **textured software rasteriser
+with baked lightmaps**. You can fight the monsters, pick up items, ride the lifts,
+take the slipgates, die, and respawn.
 
 ![e1m1 wireframe](docs/e1m1.png)
 ![e1m1 flat-shaded](docs/e1m1_flat.png)
@@ -24,54 +27,69 @@ Then:
 python3 main.py e1m1        # also: e1m2 … e1m8, start
 ```
 
-**Controls:** click the window to capture the mouse, then `WASD` + mouse to fly.
-`Space`/`Ctrl` up/down, `Shift` faster, `Tab` toggle mouse-look, `Esc` release/quit.
+**Controls**
+
+- Click the window to capture the mouse, then `WASD` + mouse to move and look.
+- **Mouse or `Ctrl` to fire**; `1`–`8` select weapons (Quake's impulse binds).
+- `Space` / `C` swim/fly up/down, `Shift` faster.
+- `Tab` toggle mouse-look, `Esc` release / quit.
+- Render modes: `F` flat-shaded, `Z` textured z-buffer, `T` toggle texturing, `N` noclip.
 
 ## How it works
 
 | File | Role |
 |------|------|
 | `pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
-| `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing; texinfo + embedded miptex decode |
+| `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing; texinfo, embedded miptex decode, and the lightmap (`LIGHTING`) lump |
 | `mdl.py` | Alias model (`.mdl`) reader: header, skins, triangles, and per-frame vertex sets (single + time-animated groups), decoded to float positions |
 | `progs.py` | `progs.dat` (QuakeC v6) loader: statements, defs, functions, a growable string heap, and the globals block as one buffer with aliased float/int views (the `eval_t` union) |
 | `pr_exec.py` | The QuakeC bytecode interpreter — `PR_ExecuteProgram`'s opcode loop, call frames, and a flat integer-indexed edict store (all edict fields in one buffer, edict *N* at *N·edict_size*) |
-| `sv.py` | Server layer: the ~65 builtins (`pr_cmds.c`), entity spawning from the BSP string (`ED_LoadFromFile`), and the think/movetype frame loop. Runs id's **actual compiled game code** |
-| `render.py` | Two renderers — **wireframe** (PVS → backface cull → near-clip edges → project) and **flat-shaded** (BSP back-to-front painter's order → near-clip polygons → filled `create_polygon`). Faces are tinted by each texture's average colour (sampled from the embedded miptex + the Quake palette) and lit by a static directional light. Draws the world, brush-model **entities** (at the origins the QC sets), and **alias models** (monsters/items — rotated, animated, woven into the painter's walk by bounding box), all PVS-culled |
-| `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove` |
-| `main.py` | tkinter app: mouse-look, movement, game loop, reused Canvas line pool; ticks the QC server at a fixed 10 Hz |
+| `sv.py` | Server layer: the ~70 builtins (`pr_cmds.c`), entity spawning from the BSP string (`ED_LoadFromFile`), the think/movetype frame loop, the player edict, weapon firing, combat/damage, monster movement, and the death→respawn path. Runs id's **actual compiled game code** |
+| `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove`. Backs the collision builtins (`traceline`, `walkmove`, `movetogoal`, `droptofloor`) |
+| `render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (perspective-correct texels modulated by baked lightmaps, per-pixel 1/z depth). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
+| `snd.py` | Software sound mixer feeding macOS CoreAudio through ctypes — a port of `S_PaintChannels` / `SND_Spatialize`. One 16-bit stereo AudioQueue stream; distance attenuation + stereo pan re-panned every frame as you move |
+| `main.py` | tkinter app: mouse-look, movement, input → the player edict, the game loop, the reused Canvas line/poly pools and scaled framebuffer; ticks the QC server at a fixed 10 Hz |
 
-The trick that makes it fast enough: wireframe needs **no framebuffer**. We draw edges
-with `Canvas.create_line` (C-implemented), and PVS + backface culling cut a ~5,500-face
-level down to a few hundred visible edges per frame.
+**Three ways to draw, three sets of tradeoffs.** Wireframe needs **no framebuffer** —
+edges go straight to `Canvas.create_line` (C-implemented), and PVS + backface culling
+cut a ~5,500-face level to a few hundred visible edges per frame. Flat shading fills
+`create_polygon`s back-to-front via the BSP (no z-buffer needed). The textured mode is a
+real per-pixel software rasteriser: it owns a 1/z depth buffer (so intersecting geometry
+sorts correctly), samples each face's texture perspective-correctly, and modulates it by
+the baked lightmap luxel covering each pixel. Pure-Python per-pixel fill is slow, so it
+renders at **1/4 window resolution** into a packed-RGB buffer the UI scales up.
 
-**Where the time goes:** the Python render math is only ~2 ms/frame — the bottleneck is
-tkinter rasterizing the lines (`update()`). So the optimizations that matter all reduce
+**Where the time goes (wireframe):** the Python render math is only ~2 ms/frame — the
+bottleneck is tkinter rasterizing the lines. So the optimizations that matter all reduce
 work *for Tk*: a pre-grown line pool (no `create_line` hitches), parking unused lines
-off-screen with `coords()` instead of `itemconfig(state=...)` (no redraw churn), and
-dropping sub-pixel segments (far edges too small to see). Typical: ~520 fps on e1m1,
-~60 on e1m2, ~30 on the open `start` hub. (Frustum culling and depth-shading were
-tried and removed — measurement showed they added cost without reducing the line count
-Tk actually draws.)
+off-screen with `coords()` instead of `itemconfig(state=...)`, and dropping sub-pixel
+segments. Typical: ~520 fps on e1m1 wireframe, far less in textured mode (every lit pixel
+is a Python loop iteration).
 
 ## Status
 
-Loads, renders, and **walks** through all episode-1 shareware maps with real Quake
-collision: gravity, floor/wall sliding, stair stepping, and jumping. Press `N` for
-noclip flight, `F` to toggle **flat shading** (Tk `create_polygon`, drawn
-back-to-front via the BSP — no z-buffer needed).
+**Playable.** All episode-1 shareware maps load, render, and run the genuine game logic.
 
-A **QuakeC virtual machine** (`progs.py` + `pr_exec.py` + `sv.py`) runs the genuine
-`progs.dat` game logic: it spawns the whole entity list, runs each spawn function,
-and ticks every entity's think chain at 10 Hz. Doors, lifts and buttons are real
-entities — their brush models are drawn at the origins the QC sets — and invisible
-trigger volumes correctly stop rendering (the static renderer used to draw them as
-solid blocks). Monsters and items are drawn as **animated `.mdl` models**, their
-frames advancing through the real QuakeC animation chains (a grunt cycles its eight
-`army_stand` frames via the `STATE` opcode, etc.).
+- **Movement & collision** — gravity, floor/wall sliding, 18-unit stair stepping, jumping,
+  swimming, and `N` noclip flight, all against real Quake clip hulls.
+- **Game logic** — a **QuakeC virtual machine** spawns the whole entity list, runs each
+  spawn function, and ticks every think chain at 10 Hz. Doors, lifts, buttons and
+  triggers are real entities; their brush models draw at the origins the QC sets, and you
+  trigger them by walking into them (the player edict drives touch/trigger).
+- **Combat** — weapons fire through the game's own QuakeC (`W_WeaponFrame`: per-weapon
+  cadence, ammo, view-model animation). Hitscan and projectiles damage monsters; monsters
+  damage you. **Monster AI navigates** — the collision builtins are wired to `physics.py`,
+  so a grunt acquires the player by line-of-sight and walks toward them.
+- **Items, death, levels** — pickups (health/ammo/weapons) work and disappear when taken;
+  dying runs the real `PlayerDie`/`PlayerDeathThink` sequence and respawns the level on
+  fire; slipgates change level; the end-of-level **intermission** camera works.
+- **Lighting & surfaces** — baked **lightmaps** from the `LIGHTING` lump light the
+  textured world and the alias models, **light styles** animate flickering lights, and
+  **special surfaces animate**: scrolling sky, sine-warped water/lava/slime/teleporters
+  (drawn full-bright), and `+N` animated wall textures.
+- **Sound** — 3D positional audio via a software mixer feeding CoreAudio.
 
-**Still stubbed:** collision builtins (`traceline`, `walkmove`, `droptofloor`, …)
-return clear-path defaults, and there's no player entity in the simulation yet — so
-monsters stand and animate but don't navigate, and nothing *triggers* the doors as
-you walk through. Wiring the builtins to `physics.py` (and adding a player edict so
-touch/trigger works) is the next milestone.
+**Not there:** menus, save/load, networking (single-player against the compiled progs
+only), particles beyond the basic point sprites, and a true two-layer parallax sky (the
+sky is a single scrolling layer). Sound is **macOS-only** (CoreAudio via ctypes). The
+textured rasteriser runs at quarter resolution to stay interactive in pure Python.

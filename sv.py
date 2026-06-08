@@ -46,7 +46,7 @@ DAMAGE_AIM = 2
 IT_SHOTGUN = 1
 
 # system globals we read/write
-_GLOBALS = ("self", "other", "time", "frametime", "force_retouch",
+_GLOBALS = ("self", "other", "time", "frametime", "force_retouch", "skill",
             "v_forward", "v_right", "v_up", "msg_entity", "mapname",
             "trace_allsolid", "trace_startsolid", "trace_fraction", "trace_endpos",
             "trace_plane_normal", "trace_plane_dist", "trace_ent",
@@ -150,6 +150,7 @@ class Server:
         self.skill = skill
         self.phys = physics         # for traceline / hitscan; None -> clear path
         self.player = 0             # player edict number (0 until spawn_player)
+        self.changelevel = None     # set by the changelevel builtin; host reads it
 
         self.time = 0.0
         self.frametime = 0.1
@@ -212,6 +213,7 @@ class Server:
         self.vm.fset_f(0, self.f["movetype"], MOVETYPE_PUSH)
 
         self.gset_f("time", self.time)
+        self.gset_f("skill", float(self.skill))   # QC reads this for difficulty
         self.gset_i("mapname", self.pr.new_string(self.mapname))
 
         spawned = inhibited = noclass = 0
@@ -674,10 +676,12 @@ class Server:
         self.vm.ret_f(self.cvars.get(self.vm.parm_str(0), 0.0))
 
     def _pf_cvar_set(self):
-        try:
-            self.cvars[self.vm.parm_str(0)] = _atof(self.vm.parm_str(1))
-        except ValueError:
-            pass
+        name = self.vm.parm_str(0)
+        val = _atof(self.vm.parm_str(1))
+        self.cvars[name] = val
+        if name == "skill":            # trigger_setskill: carry into next level
+            self.skill = max(0, min(3, int(val)))
+            self.gset_f("skill", float(self.skill))
 
     # --- misc no-ops with side data ---
     def _pf_sound(self):

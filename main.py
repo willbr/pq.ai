@@ -62,46 +62,12 @@ _reassociate_cursor = _make_cursor_reassociator()
 
 class App:
     def __init__(self, mapname):
-        pak = Pak(PAK_PATH)
-        path = f"maps/{mapname}.bsp"
-        if path not in pak.files:
-            sys.exit(f"no such map: {path}")
-        self.bsp = Bsp(pak.read(path))
-        pal = pak.read("gfx/palette.lmp")
-        palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]) for i in range(256)]
-        self.rend = Renderer(self.bsp, palette)
-        self.phys = Physics(self.bsp)
-
-        # QuakeC server: spawn the level's entities and run their logic. Doors,
-        # buttons and lifts are entities now; their brush models are drawn at the
-        # origins the QC sets, and invisible triggers no longer render.
-        self.sv = Server(Progs(pak.read("progs.dat")), bsp=self.bsp, mapname=path,
-                         physics=self.phys)
-        self.sv.load_level()
-        self.sv_accum = 0.0
-
-        # load the .mdl models the level precached, indexed to match modelindex
-        self.models = [None] * len(self.sv.model_precache)
-        for idx, name in enumerate(self.sv.model_precache):
-            if name.endswith(".mdl") and name in pak.files:
-                try:
-                    self.models[idx] = Mdl(pak.read(name), palette)
-                except Exception as e:
-                    print(f"mdl load failed for {name}: {e}")
-
-        # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
-        (sx, sy, sz), yaw = self.bsp.find_spawn()
-        self.pos = [sx, sy, sz]
-        self.vel = [0.0, 0.0, 0.0]
-        self.onground = False
-        self.noclip = False
-        self.yaw = yaw
-        self.pitch = 0.0
-
-        # a client edict driven by the camera: gives monsters a target and gives
-        # fired shots an attacker (so QC's damage/death logic runs)
-        self.sv.spawn_player(tuple(self.pos), (self.pitch, self.yaw, 0.0))
-        self.last_fire = 0.0
+        self.pak = Pak(PAK_PATH)
+        self.progs_data = self.pak.read("progs.dat")
+        pal = self.pak.read("gfx/palette.lmp")
+        self.palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2])
+                        for i in range(256)]
+        self._missing_warned = set()   # maps not in the pak we've already flagged
 
         # window
         self.root = tk.Tk()
@@ -132,10 +98,78 @@ class App:
         self._last_mouse = None
         self.last_t = time.perf_counter()
         self.fps = 0.0
+        self.last_fire = 0.0
+
+        if not self._load_map(mapname):
+            sys.exit(f"no such map: maps/{mapname}.bsp")
 
         self._bind()
         self.canvas.focus_set()
         self.root.after(16, self.tick)
+
+    # ---- level loading ----
+    def _load_map(self, mapname, skill=1):
+        """Build everything tied to a specific level: BSP, renderer, physics,
+        the QuakeC server (entities spawned + logic running), precached models
+        and the player spawn. Reused for the initial map and for changelevel.
+        Returns False (leaving current state intact) if the map isn't in the
+        pak -- e.g. the registered-episode slipgates in shareware start.bsp."""
+        path = f"maps/{mapname}.bsp"
+        if path not in self.pak.files:
+            if mapname not in self._missing_warned:
+                print(f"changelevel to {mapname}: not in this pak "
+                      f"(registered content) -- staying put")
+                self._missing_warned.add(mapname)
+            return False
+
+        self.root.title(f"pq.ai — {mapname}")
+        self.bsp = Bsp(self.pak.read(path))
+        self.rend = Renderer(self.bsp, self.palette)
+        self.phys = Physics(self.bsp)
+
+        # QuakeC server: spawn the level's entities and run their logic. Doors,
+        # buttons and lifts are entities; their brush models are drawn at the
+        # origins the QC sets, and invisible triggers no longer render.
+        self.sv = Server(Progs(self.progs_data), bsp=self.bsp, mapname=path,
+                         skill=skill, physics=self.phys)
+        self.sv.load_level()
+        self.sv_accum = 0.0
+
+        # load the .mdl models the level precached, indexed to match modelindex
+        self.models = [None] * len(self.sv.model_precache)
+        for idx, name in enumerate(self.sv.model_precache):
+            if name.endswith(".mdl") and name in self.pak.files:
+                try:
+                    self.models[idx] = Mdl(self.pak.read(name), self.palette)
+                except Exception as e:
+                    print(f"mdl load failed for {name}: {e}")
+
+        # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
+        (sx, sy, sz), yaw = self.bsp.find_spawn()
+        self.pos = [sx, sy, sz]
+        self.vel = [0.0, 0.0, 0.0]
+        self.onground = False
+        self.noclip = False
+        self.yaw = yaw
+        self.pitch = 0.0
+
+        # a client edict driven by the camera: gives monsters a target and gives
+        # fired shots an attacker (so QC's damage/death logic runs)
+        self.sv.spawn_player(tuple(self.pos), (self.pitch, self.yaw, 0.0))
+
+        # a changelevel doesn't re-fire a <Configure>, so match the new renderer
+        # to the current canvas size ourselves (skip before first layout)
+        w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if w > 1 and h > 1:
+            self.rend.resize(w, h)
+        return True
+
+    def _change_level(self, target):
+        """Consume a pending changelevel: load the next map, carrying the skill
+        the player chose at the start-map setskill triggers."""
+        skill = int(self.sv.cvars.get("skill", self.sv.skill))
+        if not self._load_map(target, skill=skill):
+            self.sv.changelevel = None      # missing map: don't retry every frame
 
     # ---- input ----
     def _bind(self):
@@ -309,6 +343,10 @@ class App:
             steps += 1
         if steps:
             self._sync_from_player()      # adopt teleports / trigger-moved origin
+        if self.sv.changelevel:           # walked into a slipgate -> load next map
+            self._change_level(self.sv.changelevel)
+            self.root.after(16, self.tick)
+            return                        # sv/bsp just swapped; render next frame
         brush_ents = self.sv.brush_models()
         alias_ents = self._alias_ents()
 

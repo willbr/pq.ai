@@ -374,6 +374,13 @@ class Server:
             if nt <= 0 or nt > self.time:
                 continue
             vm.fset_f(num, ntf, 0.0)
+            # SV_Physics_Pusher only runs a pusher think scheduled within the last
+            # frame (oldltime < nextthink <= ltime); one scheduled in the past is
+            # dropped, never run. This is how a wait -1 door locks open: door_hit_top
+            # sets door_go_down at ltime + (-1), in the past, so it must not fire.
+            # A legitimately-due pusher think always lands in (time-dt, time].
+            if mt == MOVETYPE_PUSH and nt < self.time - dt:
+                continue
             self.gset_f("time", nt)
             self.gset_i("self", num)
             self.gset_i("other", 0)

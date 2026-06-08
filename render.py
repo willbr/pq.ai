@@ -1232,6 +1232,47 @@ class Renderer:
                 bl = min(255, int(bb * inten))
                 raster_poly([cam[a], cam[b], cam[c]], r, g, bl)
 
+        def raster_alias_tex(mdl, verts, org, ang):
+            # textured alias model: same transform/shade as raster_alias, but each
+            # triangle is texture-mapped from the skin via its per-corner texcoords
+            # (mdl.tri_st) instead of filled with the average skin colour.
+            rec = mdl.skin_rgb                       # (skinw, skinh, rgb_bytes)
+            ox_e, oy_e, oz_e = org
+            afwd, arr, aup = model_axes(ang)
+            afx, afy, afz = afwd
+            arx, ary, arz = arr
+            aux, auy, auz = aup
+            cam = []; wpos = []
+            for vx, vy, vz in verts:
+                wx = ox_e + vx * afx - vy * arx + vz * aux
+                wy = oy_e + vx * afy - vy * ary + vz * auy
+                wz = oz_e + vx * afz - vy * arz + vz * auz
+                dx, dy, dz = wx - ox, wy - oy, wz - oz
+                cam.append((dx * rx + dy * ry + dz * rz,
+                            dx * ux + dy * uy + dz * uz,
+                            dx * fx + dy * fy + dz * fz))
+                wpos.append((wx, wy, wz))
+            lx, ly, lz = ALIAS_LIGHT
+            tris = mdl.tris; tri_st = mdl.tri_st
+            for ti in range(len(tris)):
+                a, b, c = tris[ti]
+                (s0, t0), (s1, t1), (s2, t2) = tri_st[ti]
+                ax, ay, az = wpos[a]
+                ux1, uy1, uz1 = wpos[b][0] - ax, wpos[b][1] - ay, wpos[b][2] - az
+                vx1, vy1, vz1 = wpos[c][0] - ax, wpos[c][1] - ay, wpos[c][2] - az
+                nx = uy1 * vz1 - uz1 * vy1
+                ny = uz1 * vx1 - ux1 * vz1
+                nz = ux1 * vy1 - uy1 * vx1
+                nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+                shf = 0.55 + 0.45 * abs((nx * lx + ny * ly + nz * lz) / nl) if nl else 0.7
+                shi = int(shf * 256)
+                if shi > 256:
+                    shi = 256
+                ca, cb, cc = cam[a], cam[b], cam[c]
+                raster_poly_tex([(ca[0], ca[1], ca[2], s0, t0),
+                                 (cb[0], cb[1], cb[2], s1, t1),
+                                 (cc[0], cc[1], cc[2], s2, t2)], rec, shi)
+
         # world (model 0): PVS-visible leaves' faces, backface-culled
         for li in visible_leaves:
             _, _, firstmark, nummark = leafs[li]
@@ -1312,7 +1353,10 @@ class Renderer:
                 if not self.box_in_pvs((org[0] - r, org[1] - r, org[2] - r),
                                        (org[0] + r, org[1] + r, org[2] + r), vis):
                     continue
-                raster_alias(mdl, verts, org, ang)
+                if textured and mdl.skin_rgb is not None:
+                    raster_alias_tex(mdl, verts, org, ang)
+                else:
+                    raster_alias(mdl, verts, org, ang)
 
         # external .bsp pickups (health/ammo boxes): convex, backface-cull faces
         if bsp_ents:
@@ -1338,6 +1382,9 @@ class Renderer:
         # near depth wins the z-test and it reads as on top. No PVS cull.
         if view_model:
             mdl, verts, org, ang = view_model
-            raster_alias(mdl, verts, org, ang)
+            if textured and mdl.skin_rgb is not None:
+                raster_alias_tex(mdl, verts, org, ang)
+            else:
+                raster_alias(mdl, verts, org, ang)
 
         return (fb, iw, ih), leaf

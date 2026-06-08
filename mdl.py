@@ -9,7 +9,7 @@ sequential after the 84-byte header:
                   numverts, numtris, numframes, synctype, flags, size
   skins   per skin: int type (0 single / 1 group); single = w*h palette bytes,
                      group = int n, n float intervals, n*(w*h) byte images
-  stverts numverts * (onseam, s, t)            -- texcoords (skipped: flat-shaded)
+  stverts numverts * (onseam, s, t)            -- texcoords
   tris    numtris  * (facesfront, vertindex[3])
   frames  per frame: int type (0 single / 1 group). A single frame is
                      {bbox(8) name[16]} then numverts trivertx (byte v[3] +
@@ -70,15 +70,29 @@ class Mdl:
             if first_skin is None:
                 first_skin = img
         self.skin_color = _avg_color(first_skin, palette)
+        # full skin decoded to packed RGB once, for the textured z-buffer path
+        self.skin_rgb = _decode_skin(first_skin, sw, sh, palette)
 
-        # --- stverts (texcoords): skipped, just advance ---
+        # --- stverts: (onseam, s, t) texel coords per vertex ---
+        stverts = [struct.unpack_from("<3i", data, o + i * 12) for i in range(nv)]
         o += nv * 12
 
-        # --- triangles: keep only the vertex indices (flat shading) ---
+        # --- triangles: vertex indices (self.tris) + per-corner texcoords
+        # (self.tri_st). Quake's seam rule: a back-facing triangle using an
+        # on-seam vertex samples the right half of the skin (s += skinwidth/2). ---
+        half = sw // 2
         self.tris = []
+        self.tri_st = []
         for _ in range(nt):
-            _ff, a, b, c = struct.unpack_from("<4i", data, o); o += 16
+            ff, a, b, c = struct.unpack_from("<4i", data, o); o += 16
             self.tris.append((a, b, c))
+            st = []
+            for vi in (a, b, c):
+                onseam, s, t = stverts[vi]
+                if not ff and onseam:
+                    s += half
+                st.append((s, t))
+            self.tri_st.append((st[0], st[1], st[2]))
 
         # --- frames: decode each to float verts; group = animated sub-frames ---
         sx, sy, sz = self.scale
@@ -124,6 +138,19 @@ class Mdl:
             if tt < end:
                 return subs[i]
         return subs[-1]
+
+
+def _decode_skin(img, w, h, palette):
+    """Skin's 8-bit palette indices -> packed RGB bytearray, or None if unusable."""
+    if not img or palette is None or w <= 0 or h <= 0 or len(img) < w * h:
+        return None
+    rgb = bytearray(w * h * 3)
+    o = 0
+    for px in img:
+        pr, pg, pb = palette[px]
+        rgb[o] = pr; rgb[o + 1] = pg; rgb[o + 2] = pb
+        o += 3
+    return (w, h, rgb)
 
 
 def _avg_color(img, palette):

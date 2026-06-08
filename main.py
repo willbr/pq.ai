@@ -386,6 +386,13 @@ class App:
         steps = 0
         while self.sv_accum >= SV_TICK and steps < 5:
             self.sv.run_frame(SV_TICK)
+            # ride lifts/doors: fold the pusher's carry into the camera position
+            cx, cy, cz = self.sv.player_carry
+            if cx or cy or cz:
+                self.pos[0] += cx
+                self.pos[1] += cy
+                self.pos[2] += cz
+                self.onground = True       # still standing on the mover
             self.sv_accum -= SV_TICK
             steps += 1
         if steps:

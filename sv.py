@@ -206,6 +206,9 @@ class Server:
         self.player = 0             # player edict number (0 until spawn_player)
         self.button0 = False        # attack held (host sets it each frame)
         self.pending_impulse = 0    # queued weapon-select impulse (consumed once)
+        # how far pushers (lifts/doors) carried the player this frame, so the host
+        # can fold it into the camera position it owns (SV_PushMove riders)
+        self.player_carry = [0.0, 0.0, 0.0]
         self.changelevel = None     # set by the changelevel builtin; host reads it
         self.center_msg = None      # (text, time) from centerprint; host displays it
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
@@ -367,6 +370,7 @@ class Server:
         vm = self.vm
         self.frametime = dt
         self.time += dt
+        self.player_carry = [0.0, 0.0, 0.0]   # reset rider carry for this frame
         self.gset_f("frametime", dt)
         self.gset_f("time", self.time)
 
@@ -390,11 +394,13 @@ class Server:
             if vm.free[num]:
                 continue
             # movers: integrate the linear move, then run think. Brush movers
-            # (doors/plats, MOVETYPE_PUSH) move at constant velocity and never
-            # collide here. Projectiles (rockets/grenades/nails/fireballs/gibs)
-            # trace their move and fire touch on impact (SV_Physics_Toss).
+            # (doors/plats, MOVETYPE_PUSH) move at constant velocity and carry any
+            # rider standing on them (SV_PushMove). Projectiles (rockets/grenades/
+            # nails/fireballs/gibs) trace their move and fire touch on impact.
             mt = int(vm.fget_f(num, mtf))
-            if mt in _MOVE_PROJECTILE:
+            if mt == MOVETYPE_PUSH:
+                self._push_move(num, dt)
+            elif mt in _MOVE_PROJECTILE:
                 self._physics_toss(num, mt, dt)
             elif mt in _MOVE_INTEGRATE:
                 vx, vy, vz = vm.fget_v(num, fvel)
@@ -506,6 +512,55 @@ class Server:
             vm.fset_i(num, f["groundentity"], hit)
             vm.fset_v(num, fvel, (0.0, 0.0, 0.0))
             vm.fset_v(num, favel, (0.0, 0.0, 0.0))
+
+    def _push_move(self, num, dt):
+        """SV_PushMove: advance a brush mover (door/plat/button) by velocity*dt,
+        keep its abs bounds current, and carry the player if they ride it. Unlike
+        a free projectile a pusher does not stop on contact -- blocking/crushing
+        is left to the QC, which the player riding it never triggers."""
+        vm, f = self.vm, self.f
+        fvel, favel, forg, fang = (f["velocity"], f["avelocity"],
+                                   f["origin"], f["angles"])
+        vx, vy, vz = vm.fget_v(num, fvel)
+        ax, ay, az = vm.fget_v(num, favel)
+        if ax or ay or az:
+            cx, cy, cz = vm.fget_v(num, fang)
+            vm.fset_v(num, fang, (cx + ax * dt, cy + ay * dt, cz + az * dt))
+        if not (vx or vy or vz):
+            return
+        move = (vx * dt, vy * dt, vz * dt)
+        ox, oy, oz = vm.fget_v(num, forg)
+        vm.fset_v(num, forg, (ox + move[0], oy + move[1], oz + move[2]))
+        self._link_abs(num)                   # bounds must track the moved origin
+        self._carry_player(num, move)
+
+    def _player_rides(self, pusher):
+        """True if the player's box overlaps the pusher's (post-move) box, so a
+        rising lift carries them up instead of clipping through their feet. The
+        1-unit slop makes simply resting on top count as contact."""
+        vm, f = self.vm, self.f
+        p = self.player
+        amn, amx = f["absmin"], f["absmax"]
+        pmn = vm.fget_v(p, amn); pmx = vm.fget_v(p, amx)
+        umn = vm.fget_v(pusher, amn); umx = vm.fget_v(pusher, amx)
+        E = 1.0
+        return not (pmn[0] - E > umx[0] or pmx[0] + E < umn[0] or
+                    pmn[1] - E > umx[1] or pmx[1] + E < umn[1] or
+                    pmn[2] - E > umx[2] or pmx[2] + E < umn[2])
+
+    def _carry_player(self, pusher, move):
+        """Move the player edict by a pusher's delta when they ride it, and record
+        the carry so the host can apply the same shift to the camera it owns."""
+        p = self.player
+        if not p or self.vm.free[p] or not self._player_rides(pusher):
+            return
+        vm, f = self.vm, self.f
+        ox, oy, oz = vm.fget_v(p, f["origin"])
+        vm.fset_v(p, f["origin"], (ox + move[0], oy + move[1], oz + move[2]))
+        self._link_abs(p)
+        self.player_carry[0] += move[0]
+        self.player_carry[1] += move[1]
+        self.player_carry[2] += move[2]
 
     def touch_triggers(self, ent):
         """Fire the touch function of every SOLID_TRIGGER whose volume overlaps

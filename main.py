@@ -39,6 +39,11 @@ LINE_COLOR = "#00ff66"
 PREGROW = 2048             # line items pre-created up front to avoid hitches
 PREGROW_POLY = 768         # polygon items pre-created for flat-shading mode
 PREGROW_PART = 256         # point-sprite items for particles
+# particle sprites are sized by distance: half-size px = focal * RADIUS / depth,
+# clamped so near puffs read as chunky and far ones never vanish to a single dot
+PARTICLE_RADIUS = 2.0      # world half-extent of a particle puff
+PARTICLE_MIN_HALF = 2.0    # never smaller than a 4px square
+PARTICLE_MAX_HALF = 14.0   # cap so a point-blank puff doesn't fill the screen
 CENTER_MSG_TIME = 4.0      # seconds a centerprint message stays on screen
 # weapon view-model bob (Quake's V_CalcBob: cl_bob / cl_bobcycle / cl_bobup)
 CL_BOB = 0.02
@@ -723,14 +728,18 @@ class App:
         self.prev_n = n
 
     def _draw_particles(self, eye):
-        """Project the live particles to screen and draw them as 2px sprites,
-        coloured from the Quake palette (teleport fog, fireball sparks)."""
+        """Project the live particles to screen and draw them as palette-coloured
+        sprites (teleport fog, rocket/blood trails). Each sprite is sized by its
+        distance -- focal * radius / depth -- so near particles read as chunky
+        puffs instead of near-invisible 2px dots, with a floor so far ones stay
+        visible."""
         c = self.canvas
         pool = self.partpool
         fillc = self.partfill
         coords = c.coords
         itemconfig = c.itemconfig
         project = self.rend.project_point
+        focal_r = self.rend.focal * PARTICLE_RADIUS
         pal = self.palette
         W = self.canvas.winfo_width()
         H = self.canvas.winfo_height()
@@ -739,14 +748,19 @@ class App:
             sp = project(eye, self.yaw, self.pitch, (p[0], p[1], p[2]))
             if sp is None:
                 continue
-            x, y = sp
+            x, y, cz = sp
             if x < 0 or y < 0 or x > W or y > H:
                 continue
+            half = focal_r / cz                      # sprite half-size in pixels
+            if half < PARTICLE_MIN_HALF:
+                half = PARTICLE_MIN_HALF
+            elif half > PARTICLE_MAX_HALF:
+                half = PARTICLE_MAX_HALF
             if n >= len(pool):
                 pool.append(c.create_rectangle(-10, -10, -8, -8,
                                                outline="", fill="#ffffff"))
                 fillc.append(None)
-            coords(pool[n], x, y, x + 2, y + 2)
+            coords(pool[n], x - half, y - half, x + half, y + half)
             r, g, b = pal[p[6] & 255]
             col = f"#{r:02x}{g:02x}{b:02x}"
             if fillc[n] != col:

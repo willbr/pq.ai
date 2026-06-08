@@ -591,8 +591,9 @@ class Renderer:
         self._setup_zbuf()
 
     def project_point(self, origin, yaw, pitch, p):
-        """World point -> (screen_x, screen_y), or None if behind the near
-        plane / off the depth axis. Used for point sprites (particles)."""
+        """World point -> (screen_x, screen_y, depth), or None if behind the near
+        plane / off the depth axis. Used for point sprites (particles); the depth
+        lets the caller size the sprite with distance (focal * radius / depth)."""
         forward, right, up = angle_vectors(yaw, pitch)
         dx = p[0] - origin[0]
         dy = p[1] - origin[1]
@@ -603,7 +604,7 @@ class Renderer:
         cx = dx * right[0] + dy * right[1] + dz * right[2]
         cy = dx * up[0] + dy * up[1] + dz * up[2]
         return (self.width / 2 + self.focal * cx / cz,
-                self.height / 2 - self.focal * cy / cz)
+                self.height / 2 - self.focal * cy / cz, cz)
 
     # ---- BSP queries ----
     def point_leaf(self, p):

@@ -39,6 +39,7 @@ SV_MAXFRAME = 0.1          # clamp a single server frame to 100ms (hitch guard)
 NOCLIP_SPEED = 500.0       # units / second when flying
 LOOK_SENS = 0.15           # degrees / pixel
 YAW_SPEED = 140.0          # degrees / second (keyboard turning)
+MOUSE_MARGIN = 100         # px from a window edge that triggers a recenter warp
 
 # HUD/crosshair font: a fixed-width face that exists on each OS (Menlo ships on
 # macOS, Consolas on Windows; Tk falls back to a default monospace elsewhere).
@@ -59,6 +60,27 @@ CENTER_MSG_TIME = 4.0      # seconds a centerprint message stays on screen
 CL_BOB = 0.02
 CL_BOBCYCLE = 0.6
 CL_BOBUP = 0.5
+
+
+def look_delta(last, x, y, w, h, margin):
+    """Per-event mouselook delta with a recenter-warp guard. `last` is the previous
+    cursor (x, y) or None; returns (newlast, dx, dy) -- the pixel deltas to apply to
+    yaw/pitch, or 0 when the event must not move the view.
+
+    Mouselook recenters the cursor (a warp) when it nears a window edge. On Windows
+    that warp's <Motion> arrives asynchronously and unsuppressed, so an event
+    straddling the teleport reports a delta of order the window half-size -- which,
+    applied, snaps the view to a random angle. A genuine move between events is
+    small, so any delta at least (half - margin) px (the smallest a recenter can
+    produce) is treated as a warp artifact and dropped, still re-seeding `last` so
+    the stream resynchronises. (macOS masked this with post-warp event suppression.)
+    """
+    if last is None:
+        return (x, y), 0, 0
+    dx, dy = x - last[0], y - last[1]
+    if abs(dx) >= w // 2 - margin or abs(dy) >= h // 2 - margin:
+        return (x, y), 0, 0          # cursor teleported by a recenter -- not input
+    return (x, y), dx, dy
 
 
 def view_origins(pos, view_height, forward, bob):
@@ -376,10 +398,11 @@ class App:
     def _warp_center(self):
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
-        # record the centre BEFORE generating the event: Tk delivers the warp's
-        # <Motion> synchronously, re-entering _motion, so _last_mouse must
-        # already be the centre or that event computes a movement-cancelling
-        # delta (the view snaps back toward where it started).
+        # Seed _last_mouse to the centre before generating the event. On macOS the
+        # warp's <Motion> is delivered synchronously (re-entering _motion), so this
+        # makes it a zero-delta no-op. On Windows the warp event arrives async and
+        # the cursor teleports under us; look_delta's jump guard is what actually
+        # absorbs the straddle there -- this seed just keeps the macOS path clean.
         self._last_mouse = (w // 2, h // 2)
         self.canvas.event_generate("<Motion>", warp=True,
                                    x=w // 2, y=h // 2)
@@ -390,26 +413,20 @@ class App:
     def _motion(self, e):
         if not self.mouselook:
             return
-        # accumulate deltas from the previous cursor position rather than from
-        # the centre. macOS suppresses mouse-motion events for ~250ms after a
-        # programmatic warp, so warping every frame eats most of the movement;
-        # instead we only recenter near the window edge (rarely), keeping motion
-        # smooth in between.
-        if self._last_mouse is None:
-            self._last_mouse = (e.x, e.y)
-            return
-        lx, ly = self._last_mouse
-        dx, dy = e.x - lx, e.y - ly
-        self._last_mouse = (e.x, e.y)
-        if dx == 0 and dy == 0:
-            return
-        self.yaw -= dx * LOOK_SENS
-        self.pitch += dy * LOOK_SENS
-        self.pitch = max(-89.0, min(89.0, self.pitch))
+        # Accumulate deltas from the previous cursor position rather than from the
+        # centre: we only recenter near a window edge (rarely), so motion stays
+        # smooth in between. look_delta drops the window-scale delta a recenter
+        # warp injects (async + unsuppressed on Windows) so the view can't snap.
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
-        margin = 100
-        if e.x < margin or e.x > w - margin or e.y < margin or e.y > h - margin:
+        self._last_mouse, dx, dy = look_delta(self._last_mouse, e.x, e.y, w, h,
+                                              MOUSE_MARGIN)
+        if dx or dy:
+            self.yaw -= dx * LOOK_SENS
+            self.pitch += dy * LOOK_SENS
+            self.pitch = max(-89.0, min(89.0, self.pitch))
+        if (e.x < MOUSE_MARGIN or e.x > w - MOUSE_MARGIN or
+                e.y < MOUSE_MARGIN or e.y > h - MOUSE_MARGIN):
             self._warp_center()
 
     def _resize(self, e):

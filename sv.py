@@ -48,6 +48,11 @@ _MOVE_INTEGRATE = frozenset((MOVETYPE_PUSH, MOVETYPE_NOCLIP, MOVETYPE_FLY,
                              MOVETYPE_TOSS, MOVETYPE_FLYMISSILE, MOVETYPE_BOUNCE))
 # of those, the ones that fall under gravity (tossed projectiles: fireballs, gibs)
 _MOVE_GRAVITY = frozenset((MOVETYPE_TOSS, MOVETYPE_BOUNCE))
+# movetypes that collide with the world and other entities (SV_Physics_Toss):
+# rockets/spikes (FLYMISSILE), grenades/gibs (BOUNCE), fireballs (TOSS), FLY.
+# These trace their move and fire touch on impact instead of phasing through.
+_MOVE_PROJECTILE = frozenset((MOVETYPE_TOSS, MOVETYPE_BOUNCE, MOVETYPE_FLY,
+                              MOVETYPE_FLYMISSILE))
 
 # entity fields we touch from the engine side
 _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs",
@@ -56,8 +61,10 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "chain", "spawnflags", "view_ofs", "gravity",
            # player / combat
            "absmin", "absmax", "health", "max_health", "takedamage", "v_angle",
-           "weapon", "weaponmodel", "weaponframe",
-           "currentammo", "ammo_shells", "button0", "deadflag", "enemy")
+           "weapon", "weaponmodel", "weaponframe", "items", "impulse",
+           "attack_finished", "currentammo", "ammo_shells", "ammo_nails",
+           "ammo_rockets", "ammo_cells", "button0", "deadflag", "enemy",
+           "owner", "touch")
 
 FL_CLIENT = 8
 SOLID_NOT = 0
@@ -65,7 +72,32 @@ SOLID_TRIGGER = 1
 SOLID_SLIDEBOX = 3
 MOVETYPE_WALK = 3
 DAMAGE_AIM = 2
+
+# item / weapon flags (defs.qc). The player's .items is a bitfield of these;
+# .weapon holds the single active weapon flag.
 IT_SHOTGUN = 1
+IT_SUPER_SHOTGUN = 2
+IT_NAILGUN = 4
+IT_SUPER_NAILGUN = 8
+IT_GRENADE_LAUNCHER = 16
+IT_ROCKET_LAUNCHER = 32
+IT_LIGHTNING = 64
+IT_SHELLS = 256
+IT_NAILS = 512
+IT_ROCKETS = 1024
+IT_CELLS = 2048
+IT_AXE = 4096
+# every weapon + every ammo-type bit: a full single-player arsenal
+IT_ALL_WEAPONS = (IT_AXE | IT_SHOTGUN | IT_SUPER_SHOTGUN | IT_NAILGUN |
+                  IT_SUPER_NAILGUN | IT_GRENADE_LAUNCHER | IT_ROCKET_LAUNCHER |
+                  IT_LIGHTNING)
+IT_ALL_AMMO = IT_SHELLS | IT_NAILS | IT_ROCKETS | IT_CELLS
+_WEAPON_NAMES = {
+    IT_AXE: "Axe", IT_SHOTGUN: "Shotgun", IT_SUPER_SHOTGUN: "Super Shotgun",
+    IT_NAILGUN: "Nailgun", IT_SUPER_NAILGUN: "Super Nailgun",
+    IT_GRENADE_LAUNCHER: "Grenade Launcher", IT_ROCKET_LAUNCHER: "Rocket Launcher",
+    IT_LIGHTNING: "Lightning Gun",
+}
 
 # system globals we read/write
 _GLOBALS = ("self", "other", "time", "frametime", "force_retouch", "skill",
@@ -172,6 +204,8 @@ class Server:
         self.skill = skill
         self.phys = physics         # for traceline / hitscan; None -> clear path
         self.player = 0             # player edict number (0 until spawn_player)
+        self.button0 = False        # attack held (host sets it each frame)
+        self.pending_impulse = 0    # queued weapon-select impulse (consumed once)
         self.changelevel = None     # set by the changelevel builtin; host reads it
         self.center_msg = None      # (text, time) from centerprint; host displays it
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
@@ -213,6 +247,9 @@ class Server:
     def gget_v(self, name):
         o = self.g[name]
         return (self.vm.gf[o], self.vm.gf[o + 1], self.vm.gf[o + 2])
+
+    def gget_i(self, name):
+        return self.vm.gi[self.g[name]]
 
     # ================================================================
     # level load: build edicts from the entity string and spawn them
@@ -353,16 +390,14 @@ class Server:
             if vm.free[num]:
                 continue
             # movers: integrate the linear move, then run think. Brush movers
-            # (doors/plats, MOVETYPE_PUSH) move at constant velocity; tossed
-            # projectiles (fireballs, MOVETYPE_TOSS) also fall under gravity.
-            # Full SV_Physics riders/blocking still comes later.
+            # (doors/plats, MOVETYPE_PUSH) move at constant velocity and never
+            # collide here. Projectiles (rockets/grenades/nails/fireballs/gibs)
+            # trace their move and fire touch on impact (SV_Physics_Toss).
             mt = int(vm.fget_f(num, mtf))
-            if mt in _MOVE_INTEGRATE:
+            if mt in _MOVE_PROJECTILE:
+                self._physics_toss(num, mt, dt)
+            elif mt in _MOVE_INTEGRATE:
                 vx, vy, vz = vm.fget_v(num, fvel)
-                if mt in _MOVE_GRAVITY:
-                    gs = (fgrav is not None and vm.fget_f(num, fgrav)) or 1.0
-                    vz -= SV_GRAVITY * gs * dt
-                    vm.fset_v(num, fvel, (vx, vy, vz))
                 if vx or vy or vz:
                     ox, oy, oz = vm.fget_v(num, forg)
                     vm.fset_v(num, forg, (ox + vx * dt, oy + vy * dt, oz + vz * dt))
@@ -394,9 +429,83 @@ class Server:
                 except PR_RunError as ex:
                     cn = self.pr.string(vm.fget_i(num, self.f["classname"]))
                     print(f"think {cn} (edict {num}) aborted: {ex}")
+        self.run_weapon_frame()                 # PlayerPostThink: drive the weapons
         self.touch_triggers(self.player)        # fire teleports/triggers we touch
         self._advance_particles(dt)
         self.gset_f("time", self.time)
+
+    def _sv_impact(self, e1, e2):
+        """SV_Impact: two entities collided -- run each one's touch function with
+        self/other set appropriately. e2 may be 0 (the world), which has no touch.
+        This is what makes a rocket explode and a nail wound a monster on contact."""
+        vm, f = self.vm, self.f
+        toff, fsol = f["touch"], f["solid"]
+        old_self, old_other = self.gget_i("self"), self.gget_i("other")
+        self.gset_f("time", self.time)
+        for a, b in ((e1, e2), (e2, e1)):
+            if not a or vm.free[a]:
+                continue
+            t = vm.fget_i(a, toff)
+            if not t or vm.fget_f(a, fsol) == SOLID_NOT:
+                continue
+            self.gset_i("self", a)
+            self.gset_i("other", b)
+            try:
+                vm.execute(t)
+            except PR_RunError as ex:
+                cn = self.pr.string(vm.fget_i(a, f["classname"]))
+                print(f"touch {cn} (edict {a}) aborted: {ex}")
+        self.gset_i("self", old_self)
+        self.gset_i("other", old_other)
+
+    def _physics_toss(self, num, mt, dt):
+        """SV_Physics_Toss: move a free-flying entity (projectile, gib, fireball)
+        by tracing its velocity through the world + solid entities, firing touch on
+        impact. Gravity for TOSS/BOUNCE; BOUNCE rebounds (restitution 1.5) while
+        the rest stop dead and rest on the floor."""
+        vm, f = self.vm, self.f
+        fvel, favel, forg, fang, fgrav = (f["velocity"], f["avelocity"],
+                                          f["origin"], f["angles"], f["gravity"])
+        if int(vm.fget_f(num, f["flags"])) & FL_ONGROUND:
+            return                              # already at rest
+
+        vx, vy, vz = vm.fget_v(num, fvel)
+        if mt in _MOVE_GRAVITY:
+            gs = (fgrav is not None and vm.fget_f(num, fgrav)) or 1.0
+            vz -= SV_GRAVITY * gs * dt
+            vm.fset_v(num, fvel, (vx, vy, vz))
+
+        # angular velocity spins the model regardless of translation
+        ax, ay, az = vm.fget_v(num, favel)
+        if ax or ay or az:
+            cx, cy, cz = vm.fget_v(num, fang)
+            vm.fset_v(num, fang, (cx + ax * dt, cy + ay * dt, cz + az * dt))
+
+        if not (vx or vy or vz):
+            return
+        ox, oy, oz = vm.fget_v(num, forg)
+        end = (ox + vx * dt, oy + vy * dt, oz + vz * dt)
+        frac, endpos, pnorm, _allsolid, _startsolid, hit = \
+            self._move_trace((ox, oy, oz), end, 0, num)
+        vm.fset_v(num, forg, endpos)
+        self._link_abs(num)
+        if frac >= 1.0:
+            return                              # flew the whole way, no contact
+
+        self._sv_impact(num, hit)               # explode / wound on impact
+        if vm.free[num]:
+            return                              # removed by its own touch
+
+        # bounce off (grenades/gibs) or stop dead (rockets already gone; fireballs)
+        backoff = 1.5 if mt == MOVETYPE_BOUNCE else 1.0
+        nv = self.phys.clip_velocity((vx, vy, vz), pnorm, backoff)
+        vm.fset_v(num, fvel, nv)
+        if pnorm[2] > 0.7 and (nv[2] < 60.0 or mt != MOVETYPE_BOUNCE):
+            flags = int(vm.fget_f(num, f["flags"])) | FL_ONGROUND
+            vm.fset_f(num, f["flags"], float(flags))
+            vm.fset_i(num, f["groundentity"], hit)
+            vm.fset_v(num, fvel, (0.0, 0.0, 0.0))
+            vm.fset_v(num, favel, (0.0, 0.0, 0.0))
 
     def touch_triggers(self, ent):
         """Fire the touch function of every SOLID_TRIGGER whose volume overlaps
@@ -923,8 +1032,14 @@ class Server:
         if not nomonsters:
             vm = self.vm
             fsol, famn, famx = self.f["solid"], self.f["absmin"], self.f["absmax"]
+            fown = self.f["owner"]
+            # a moving missile never clips against its owner or its owner's other
+            # missiles (so a rocket doesn't blow up on the player who fired it)
+            ig_owner = vm.fget_i(ignore, fown) if ignore else 0
             for e in range(1, vm.num_edicts):
-                if e == ignore or vm.free[e]:
+                if e == ignore or e == ig_owner or vm.free[e]:
+                    continue
+                if ignore and vm.fget_i(e, fown) == ignore:
                     continue
                 sol = vm.fget_f(e, fsol)
                 if sol != SOLID_SLIDEBOX and sol != 2:   # SLIDEBOX or BBOX only
@@ -949,9 +1064,15 @@ class Server:
         vm.fset_f(e, f["solid"], float(SOLID_SLIDEBOX))
         vm.fset_f(e, f["movetype"], float(MOVETYPE_WALK))
         vm.fset_f(e, f["flags"], float(int(vm.fget_f(e, f["flags"])) | FL_CLIENT))
+        # full arsenal: every weapon owned with ammo, so all of them are usable
+        # and selectable (ImpulseCommands/W_ChangeWeapon gate on .items + ammo).
+        vm.fset_f(e, f["items"], float(IT_ALL_WEAPONS | IT_ALL_AMMO))
         vm.fset_f(e, f["weapon"], float(IT_SHOTGUN))
         vm.fset_f(e, f["currentammo"], 100.0)
         vm.fset_f(e, f["ammo_shells"], 100.0)
+        vm.fset_f(e, f["ammo_nails"], 200.0)
+        vm.fset_f(e, f["ammo_rockets"], 100.0)
+        vm.fset_f(e, f["ammo_cells"], 100.0)
         vm.fset_v(e, f["view_ofs"], (0.0, 0.0, 22.0))
         self._set_minmax(e, (-16.0, -16.0, -24.0), (16.0, 16.0, 32.0))
         # let the real QC pick the view model: W_SetCurrentAmmo sets .weaponmodel
@@ -983,6 +1104,15 @@ class Server:
     def player_velocity(self):
         return self.vm.fget_v(self.player, self.f["velocity"]) if self.player else None
 
+    def weapon_status(self):
+        """(weapon name, current ammo) for the HUD, or None. Reads the active
+        .weapon flag and .currentammo the QC keeps in sync."""
+        if not self.player:
+            return None
+        vm, f, e = self.vm, self.f, self.player
+        name = _WEAPON_NAMES.get(int(vm.fget_f(e, f["weapon"])), "?")
+        return name, int(vm.fget_f(e, f["currentammo"]))
+
     def view_weapon(self):
         """The first-person weapon model the QC has selected, as
         (path, frame) -- e.g. ("progs/v_shot.mdl", 0). None if there is no
@@ -1005,21 +1135,39 @@ class Server:
         vm.fset_v(e, f["v_angle"], angles)
         self._link_abs(e)
 
-    def fire(self):
-        """Fire the shotgun from the player's view (real QC FireBullets/T_Damage).
-        Returns True if the weapon code ran."""
+    def set_input(self, button0, impulse=0):
+        """Host -> server input for the player: attack-held state and a weapon
+        select impulse. The impulse is queued and consumed by the next weapon
+        frame so a single keypress switches once."""
+        self.button0 = bool(button0)
+        if impulse:
+            self.pending_impulse = int(impulse)
+
+    def run_weapon_frame(self):
+        """One tick of the real Quake weapon system (what PlayerPostThink runs):
+        W_WeaponFrame honours .attack_finished cadence, runs ImpulseCommands for
+        weapon switching, and calls W_Attack -> W_Fire* when .button0 is held.
+        This drives every weapon -- ammo, view-model animation and all -- from the
+        game's own QC, instead of the engine hardcoding a single weapon."""
         if not self.player or self.phys is None:
-            return False
+            return
         vm, f, e = self.vm, self.f, self.player
         if vm.fget_f(e, f["health"]) <= 0:
-            return False
-        func = self.pr.find_function("W_FireShotgun")
+            return
+        func = self.pr.find_function("W_WeaponFrame")
         if func is None:
-            return False
+            return
+        # latch this frame's inputs onto the player edict, then let the QC read them
+        vm.fset_f(e, f["button0"], 1.0 if self.button0 else 0.0)
+        if self.pending_impulse:
+            vm.fset_f(e, f["impulse"], float(self.pending_impulse))
+            self.pending_impulse = 0
         self.gset_f("time", self.time)
+        self.gset_f("frametime", self.frametime)
         self.gset_i("self", e)
         self.gset_i("other", 0)
-        # aim() (a stub) returns v_forward, so seed it from the view angles
+        # W_Attack calls makevectors(self.v_angle) itself; seed the vectors anyway
+        # so aim() (which returns v_forward) points where the player is looking.
         fwd, right, up = angle_vectors(vm.fget_v(e, f["v_angle"]))
         self.gset_v("v_forward", fwd)
         self.gset_v("v_right", right)
@@ -1027,9 +1175,7 @@ class Server:
         try:
             vm.execute(func)
         except PR_RunError as ex:
-            print(f"fire aborted: {ex}")
-            return False
-        return True
+            print(f"weapon frame aborted: {ex}")
 
     def _pf_pointcontents(self):
         self.vm.ret_f(CONTENTS_EMPTY)

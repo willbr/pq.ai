@@ -113,7 +113,8 @@ class App:
         self._last_mouse = None
         self.last_t = time.perf_counter()
         self.fps = 0.0
-        self.last_fire = 0.0
+        self.attacking = False       # mouse held -> button0 (QC handles cadence)
+        self.pending_impulse = 0     # weapon-select keypress, sent once to the QC
 
         if not self._load_map(mapname):
             sys.exit(f"no such map: maps/{mapname}.bsp")
@@ -198,24 +199,22 @@ class App:
         r.bind("<KeyRelease>", self._keyup)
         r.bind("<Motion>", self._motion)
         self.canvas.bind("<Button-1>", self._click)
+        self.canvas.bind("<ButtonRelease-1>", self._release)
         # bind on the canvas (not root) and use the event's own size: at startup
         # the canvas may not be laid out when the root's first <Configure> fires,
         # so winfo_width() would read 1 and the projection would collapse.
         self.canvas.bind("<Configure>", self._resize)
 
     def _click(self, e):
-        # first click captures the mouse; clicks while captured fire the shotgun
+        # first click captures the mouse; while captured, hold to fire (button0).
+        # The QC weapon frame handles per-weapon cadence, ammo and animation.
         if not self.mouselook:
             self._set_mouselook(True)
         else:
-            self._fire()
+            self.attacking = True
 
-    def _fire(self):
-        now = time.perf_counter()
-        if now - self.last_fire < 0.4:        # shotgun cadence
-            return
-        self.last_fire = now
-        self.sv.fire()
+    def _release(self, e):
+        self.attacking = False
 
     def _keydown(self, e):
         k = e.keysym.lower()
@@ -239,6 +238,9 @@ class App:
             else:
                 self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
             return
+        if len(k) == 1 and "1" <= k <= "8":   # select a weapon (Quake impulse 1-8)
+            self.pending_impulse = int(k)
+            return
         self.keys.add(k)
 
     def _keyup(self, e):
@@ -246,6 +248,8 @@ class App:
 
     def _set_mouselook(self, on):
         self.mouselook = on
+        if not on:
+            self.attacking = False        # releasing the mouse stops firing
         self.canvas.config(cursor="none" if on else "")
         if on:
             self._last_mouse = None
@@ -371,6 +375,10 @@ class App:
 
         # advance the QC server at a fixed tick (catch up real time, capped so a
         # hitch can't trigger a spiral of death), then read back entity positions
+        # hand this frame's weapon input to the server, then advance the QC.
+        # The impulse is one-shot (a single keypress switches once).
+        self.sv.set_input(self.attacking, self.pending_impulse)
+        self.pending_impulse = 0
         self.sv_accum += dt
         steps = 0
         while self.sv_accum >= SV_TICK and steps < 5:
@@ -406,6 +414,8 @@ class App:
                 "water" if self.waterlevel >= 2 else
                 "ground" if self.onground else "air")
         hp = self.sv.player_health()
+        wpn = self.sv.weapon_status()
+        wpn_txt = f"   {wpn[0]} {wpn[1]}" if wpn else ""
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         self.canvas.coords(self.crosshair, w // 2, h // 2)
@@ -420,10 +430,10 @@ class App:
             self.hud,
             text=(f"{self.fps:5.1f} fps   "
                   f"{'polys' if self.flat else 'segs'} {nprim}   "
-                  f"leaf {leaf}   {mode}   health {hp:.0f}\n"
+                  f"leaf {leaf}   {mode}   health {hp:.0f}{wpn_txt}\n"
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
-                  f"{'MOUSELOOK — click to fire' if self.mouselook else 'click to capture mouse'} "
+                  f"{'MOUSELOOK — hold to fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
                   f"[N]oclip [F]lat"))
         self.canvas.tag_raise(self.hud)
         self.canvas.tag_raise(self.crosshair)

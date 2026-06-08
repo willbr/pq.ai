@@ -28,9 +28,9 @@ whose `if __name__ == "__main__"` block calls its test functions and prints `OK`
 success (functions are named `test_*`, so a pytest run would also work if installed).
 
 Requires Python 3.13+ and the shareware data at `quake-shareware/id1/pak0.pak` (id
-copyright — gitignored, download separately). Sound currently has only a **macOS**
-backend (`mac.py`, CoreAudio via ctypes); on other platforms it runs muted until a
-Windows/Linux backend is added.
+copyright — gitignored, download separately). Sound has a **macOS** backend (`mac.py`,
+CoreAudio) and a **Windows** backend (`win.py`, winmm `waveOut`), both via ctypes;
+Linux runs muted until a backend is added.
 
 ## Architecture (data flow)
 
@@ -52,6 +52,7 @@ quake/physics.py    clip-hull tracing + player/monster movement; backs the colli
 quake/render.py     three renderers (wireframe, flat, textured z-buffer); lightmaps, light styles, animated surfaces
 quake/snd.py        platform-agnostic mixer: decode/spatialize/mix(nframes)→int16 stereo; no OS calls
 mac.py              macOS audio backend (outside pkg): CoreAudio AudioQueue pulling from the mixer
+win.py              Windows audio backend (outside pkg): winmm waveOut buffers, feeder thread pulling from the mixer
 main.py             tkinter app (outside pkg): input → player edict, game loop, framebuffer; picks audio backend by sys.platform
 ```
 

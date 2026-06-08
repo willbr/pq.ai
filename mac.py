@@ -2,8 +2,8 @@
 
 Lives OUTSIDE the `quake` engine package because it is platform-specific. The
 engine's quake.snd.Mixer produces samples with no OS dependency; this backend
-owns the actual output stream. Windows/Linux get sibling backend files, and
-main.py picks one by sys.platform.
+owns the actual output stream. win.py is the Windows sibling (winmm waveOut);
+Linux still pending. main.py picks one by sys.platform.
 
 One AudioQueue output stream (16-bit stereo, 11025 Hz) runs a callback on a
 CoreAudio thread; the callback pulls FRAMES_PER_BUF frames from the mixer and

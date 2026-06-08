@@ -53,7 +53,8 @@ only the output stream is platform code.
 | `quake/physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove`. Backs the collision builtins (`traceline`, `walkmove`, `movetogoal`, `droptofloor`) |
 | `quake/render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (perspective-correct texels modulated by baked lightmaps, per-pixel 1/z depth). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
 | `quake/snd.py` | Platform-agnostic software sound mixer — a port of `S_PaintChannels` / `SND_Spatialize`. Decodes/resamples once at precache; `mix(nframes)` sums active voices to 16-bit stereo with distance attenuation + stereo pan re-panned every frame. Touches no OS — a backend pulls from it |
-| `mac.py` | macOS audio backend (outside the package): one 16-bit stereo CoreAudio `AudioQueue` stream via ctypes, whose realtime callback pulls samples from the mixer. Windows/Linux get sibling backends; `main.py` picks one by `sys.platform` |
+| `mac.py` | macOS audio backend (outside the package): one 16-bit stereo CoreAudio `AudioQueue` stream via ctypes, whose realtime callback pulls samples from the mixer. `main.py` picks a backend by `sys.platform` |
+| `win.py` | Windows audio backend (outside the package): a pool of `winmm` `waveOut` buffers via ctypes; a feeder thread waits on the device's completion event and refills each finished buffer from the mixer. Linux still gets a sibling backend |
 | `main.py` | tkinter app (outside the package): mouse-look, movement, input → the player edict, the game loop, the reused Canvas line/poly pools and scaled framebuffer; runs the QC server once per rendered frame |
 
 **Three ways to draw, three sets of tradeoffs.** Wireframe needs **no framebuffer** —
@@ -93,9 +94,10 @@ is a Python loop iteration).
   textured world and the alias models, **light styles** animate flickering lights, and
   **special surfaces animate**: scrolling sky, sine-warped water/lava/slime/teleporters
   (drawn full-bright), and `+N` animated wall textures.
-- **Sound** — 3D positional audio via a software mixer feeding CoreAudio.
+- **Sound** — 3D positional audio via a software mixer feeding CoreAudio (macOS) or winmm `waveOut` (Windows).
 
 **Not there:** menus, save/load, networking (single-player against the compiled progs
 only), particles beyond the basic point sprites, and a true two-layer parallax sky (the
-sky is a single scrolling layer). Sound is **macOS-only** (CoreAudio via ctypes). The
+sky is a single scrolling layer). Sound runs on **macOS** (CoreAudio) and **Windows**
+(winmm `waveOut`), both via ctypes; Linux still runs muted. The
 textured rasteriser runs at quarter resolution to stay interactive in pure Python.

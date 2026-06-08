@@ -40,6 +40,11 @@ NOCLIP_SPEED = 500.0       # units / second when flying
 LOOK_SENS = 0.15           # degrees / pixel
 YAW_SPEED = 140.0          # degrees / second (keyboard turning)
 
+# HUD/crosshair font: a fixed-width face that exists on each OS (Menlo ships on
+# macOS, Consolas on Windows; Tk falls back to a default monospace elsewhere).
+HUD_FONT = ("Menlo" if sys.platform == "darwin" else
+            "Consolas" if sys.platform == "win32" else "TkFixedFont")
+
 LINE_COLOR = "#00ff66"
 PREGROW = 2048             # line items pre-created up front to avoid hitches
 PREGROW_POLY = 768         # polygon items pre-created for flat-shading mode
@@ -116,7 +121,10 @@ class App:
         if sys.platform == "darwin":
             import mac
             self.audio = mac.CoreAudioBackend(self.mixer)
-        # else: runs muted until a windows/linux backend is added
+        elif sys.platform == "win32":
+            import win
+            self.audio = win.WinmmBackend(self.mixer)
+        # else: runs muted until a linux backend is added
 
         # window
         self.root = tk.Tk()
@@ -150,15 +158,15 @@ class App:
         self.partfill = [None] * PREGROW_PART
         self.part_prev = 0
         self.hud = self.canvas.create_text(
-            8, 8, anchor="nw", fill="#00ff66", font=("Menlo", 11), text="")
+            8, 8, anchor="nw", fill="#00ff66", font=(HUD_FONT, 11), text="")
         self.crosshair = self.canvas.create_text(
-            0, 0, fill="#00ff66", font=("Menlo", 18), text="+")
+            0, 0, fill="#00ff66", font=(HUD_FONT, 18), text="+")
         self.center_text = self.canvas.create_text(
-            0, 0, fill="#ffff00", font=("Menlo", 16, "bold"), text="",
+            0, 0, fill="#ffff00", font=(HUD_FONT, 16, "bold"), text="",
             justify="center")
         # bottom status bar: health / armor / ammo (Quake-style readout)
         self.statusbar = self.canvas.create_text(
-            0, 0, anchor="sw", fill="#ffcc00", font=("Menlo", 16, "bold"), text="")
+            0, 0, anchor="sw", fill="#ffcc00", font=(HUD_FONT, 16, "bold"), text="")
 
         # input state
         self.keys = set()

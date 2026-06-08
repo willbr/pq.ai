@@ -56,7 +56,8 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "chain", "spawnflags", "view_ofs", "gravity",
            # player / combat
            "absmin", "absmax", "health", "max_health", "takedamage", "v_angle",
-           "weapon", "currentammo", "ammo_shells", "button0", "deadflag", "enemy")
+           "weapon", "weaponmodel", "weaponframe",
+           "currentammo", "ammo_shells", "button0", "deadflag", "enemy")
 
 FL_CLIENT = 8
 SOLID_NOT = 0
@@ -953,6 +954,18 @@ class Server:
         vm.fset_f(e, f["ammo_shells"], 100.0)
         vm.fset_v(e, f["view_ofs"], (0.0, 0.0, 22.0))
         self._set_minmax(e, (-16.0, -16.0, -24.0), (16.0, 16.0, 32.0))
+        # let the real QC pick the view model: W_SetCurrentAmmo sets .weaponmodel
+        # ("progs/v_shot.mdl") and .weaponframe from .weapon, exactly as the game
+        # does in PutClientInServer -- so the first-person weapon renders
+        func = self.pr.find_function("W_SetCurrentAmmo")
+        if func is not None:
+            self.gset_f("time", self.time)
+            self.gset_i("self", e)
+            self.gset_i("other", 0)
+            try:
+                vm.execute(func)
+            except PR_RunError as ex:
+                print(f"W_SetCurrentAmmo aborted: {ex}")
         self.update_player(origin, angles)
         return e
 
@@ -969,6 +982,19 @@ class Server:
 
     def player_velocity(self):
         return self.vm.fget_v(self.player, self.f["velocity"]) if self.player else None
+
+    def view_weapon(self):
+        """The first-person weapon model the QC has selected, as
+        (path, frame) -- e.g. ("progs/v_shot.mdl", 0). None if there is no
+        player or no weapon model set (e.g. axe-less / dead). Mirrors what
+        R_DrawViewModel reads from the client: .weaponmodel and .weaponframe."""
+        if not self.player:
+            return None
+        vm, f, e = self.vm, self.f, self.player
+        path = self.pr.string(vm.fget_i(e, f["weaponmodel"]))
+        if not path:
+            return None
+        return path, int(vm.fget_f(e, f["weaponframe"]))
 
     def update_player(self, origin, angles):
         if not self.player:

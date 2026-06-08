@@ -256,7 +256,8 @@ class Renderer:
         return bytes(out)
 
     # ---- main entry ----
-    def render(self, origin, yaw, pitch, brush_ents=None, alias_ents=None):
+    def render(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
+               view_model=None):
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -435,9 +436,33 @@ class Renderer:
                     emit_seg(cb[0], cb[1], cb[2], cc[0], cc[1], cc[2])
                     emit_seg(cc[0], cc[1], cc[2], ca[0], ca[1], ca[2])
 
+        # first-person weapon view model: fixed to the camera, no PVS cull
+        if view_model:
+            mdl, verts, org, ang = view_model
+            ox_e, oy_e, oz_e = org
+            afwd, arr, aup = model_axes(ang)
+            afx, afy, afz = afwd
+            arx, ary, arz = arr
+            aux, auy, auz = aup
+            cam = []
+            for vx, vy, vz in verts:
+                wx = ox_e + vx * afx - vy * arx + vz * aux
+                wy = oy_e + vx * afy - vy * ary + vz * auy
+                wz = oz_e + vx * afz - vy * arz + vz * auz
+                dx, dy, dz = wx - ox, wy - oy, wz - oz
+                cam.append((dx * rx + dy * ry + dz * rz,
+                            dx * ux + dy * uy + dz * uz,
+                            dx * fx + dy * fy + dz * fz))
+            for a, b, c in mdl.tris:
+                ca, cb, cc = cam[a], cam[b], cam[c]
+                emit_seg(ca[0], ca[1], ca[2], cb[0], cb[1], cb[2])
+                emit_seg(cb[0], cb[1], cb[2], cc[0], cc[1], cc[2])
+                emit_seg(cc[0], cc[1], cc[2], ca[0], ca[1], ca[2])
+
         return segments, leaf
 
-    def render_shaded(self, origin, yaw, pitch, brush_ents=None, alias_ents=None):
+    def render_shaded(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
+                      view_model=None):
         """Flat-shaded polygons, back-to-front (painter's algorithm via the BSP).
         Returns (polys, leaf) where each poly is (flat_xy_coords, fill_color).
         alias_ents: (mdl, model_space_verts, origin, angles) for .mdl entities."""
@@ -731,4 +756,11 @@ class Renderer:
                 walk(children[1], back)
 
         walk(self.headnode, pending)
+
+        # first-person weapon view model: drawn last (no z-buffer -> draw order
+        # is occlusion), so it always paints on top of the world. No PVS cull.
+        if view_model:
+            mdl, verts, org, ang = view_model
+            emit_alias({"mdl": mdl, "verts": verts, "origin": org, "angles": ang})
+
         return polys, leaf

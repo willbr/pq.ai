@@ -38,6 +38,10 @@ PREGROW = 2048             # line items pre-created up front to avoid hitches
 PREGROW_POLY = 768         # polygon items pre-created for flat-shading mode
 PREGROW_PART = 256         # point-sprite items for particles
 CENTER_MSG_TIME = 4.0      # seconds a centerprint message stays on screen
+# weapon view-model bob (Quake's V_CalcBob: cl_bob / cl_bobcycle / cl_bobup)
+CL_BOB = 0.02
+CL_BOBCYCLE = 0.6
+CL_BOBUP = 0.5
 
 
 def _make_cursor_reassociator():
@@ -154,11 +158,15 @@ class App:
                     self.models[idx] = Mdl(self.pak.read(name), self.palette)
                 except Exception as e:
                     print(f"mdl load failed for {name}: {e}")
+        # first-person weapon view models, loaded on demand (v_*.mdl are not all
+        # precached); path -> Mdl, or None if the file is missing / failed
+        self._vmodels = {}
 
         # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
         (sx, sy, sz), yaw = self.bsp.find_spawn()
         self.pos = [sx, sy, sz]
         self.vel = [0.0, 0.0, 0.0]
+        self.bobtime = 0.0          # wall-clock phase for the weapon bob
         self.onground = False
         self.noclip = False
         self.yaw = yaw
@@ -336,6 +344,7 @@ class App:
         self.last_t = now
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+        self.bobtime += dt          # phase for the weapon bob
 
         # refresh the brush models the player collides with (doors, func_walls,
         # gates), at the positions last set by the QC tick, then move
@@ -369,14 +378,15 @@ class App:
         alias_ents = self._alias_ents()
 
         eye = (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT)
+        view_model = self._view_model(eye)
         if self.flat:
             polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
-                                                  brush_ents, alias_ents)
+                                                  brush_ents, alias_ents, view_model)
             self._draw_polys(polys)
             nprim = len(polys)
         else:
             segs, leaf = self.rend.render(eye, self.yaw, self.pitch,
-                                          brush_ents, alias_ents)
+                                          brush_ents, alias_ents, view_model)
             self._draw(segs)
             nprim = len(segs)
 
@@ -442,6 +452,45 @@ class App:
                 continue
             out.append((m, m.frame_verts(frame, now), org, ang))
         return out
+
+    def _calc_bob(self):
+        """Quake's V_CalcBob: weapon bob amplitude from horizontal speed and a
+        wall-clock phase. Returns units to shift the view model by."""
+        speed = math.hypot(self.vel[0], self.vel[1])
+        cycle = (self.bobtime % CL_BOBCYCLE) / CL_BOBCYCLE
+        if cycle < CL_BOBUP:
+            cycle = math.pi * cycle / CL_BOBUP
+        else:
+            cycle = math.pi + math.pi * (cycle - CL_BOBUP) / (1.0 - CL_BOBUP)
+        bob = speed * CL_BOB
+        bob = bob * 0.3 + bob * 0.7 * math.sin(cycle)
+        return max(-7.0, min(4.0, bob))
+
+    def _view_model(self, eye):
+        """The first-person weapon as (mdl, verts, origin, angles), or None.
+        Reads the QC's .weaponmodel/.weaponframe, bobs it with movement, and
+        fixes it to the camera. Negating pitch aligns model_axes with the view."""
+        vw = self.sv.view_weapon()
+        if not vw:
+            return None
+        path, frame = vw
+        if path not in self._vmodels:
+            try:
+                self._vmodels[path] = (Mdl(self.pak.read(path), self.palette)
+                                       if path in self.pak.files else None)
+            except Exception as e:
+                print(f"viewmodel load failed for {path}: {e}")
+                self._vmodels[path] = None
+        mdl = self._vmodels[path]
+        if mdl is None:
+            return None
+        bob = self._calc_bob()
+        fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
+        org = (eye[0] + fwd[0] * bob * 0.4,
+               eye[1] + fwd[1] * bob * 0.4,
+               eye[2] + fwd[2] * bob * 0.4 + bob)
+        ang = (-self.pitch, self.yaw, 0.0)
+        return (mdl, mdl.frame_verts(frame, self.sv.time), org, ang)
 
     def _draw(self, segs):
         c = self.canvas

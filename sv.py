@@ -63,8 +63,8 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "absmin", "absmax", "health", "max_health", "takedamage", "v_angle",
            "weapon", "weaponmodel", "weaponframe", "items", "impulse",
            "attack_finished", "currentammo", "ammo_shells", "ammo_nails",
-           "ammo_rockets", "ammo_cells", "button0", "deadflag", "enemy",
-           "owner", "touch")
+           "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
+           "button0", "deadflag", "enemy", "owner", "touch")
 
 FL_CLIENT = 8
 SOLID_NOT = 0
@@ -1112,6 +1112,25 @@ class Server:
         vm, f, e = self.vm, self.f, self.player
         name = _WEAPON_NAMES.get(int(vm.fget_f(e, f["weapon"])), "?")
         return name, int(vm.fget_f(e, f["currentammo"]))
+
+    def hud_status(self):
+        """Player status-bar values, or None if there's no player. Returns a dict
+        with health, armor, the current weapon + its ammo, and all four ammo
+        counts -- everything the QC keeps on the client edict."""
+        if not self.player:
+            return None
+        vm, f, e = self.vm, self.f, self.player
+        g = lambda n: int(vm.fget_f(e, f[n]))
+        return {
+            "health": g("health"),
+            "armor": g("armorvalue"),
+            "weapon": _WEAPON_NAMES.get(g("weapon"), "?"),
+            "ammo": g("currentammo"),
+            "shells": g("ammo_shells"),
+            "nails": g("ammo_nails"),
+            "rockets": g("ammo_rockets"),
+            "cells": g("ammo_cells"),
+        }
 
     def view_weapon(self):
         """The first-person weapon model the QC has selected, as

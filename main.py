@@ -106,6 +106,9 @@ class App:
         self.center_text = self.canvas.create_text(
             0, 0, fill="#ffff00", font=("Menlo", 16, "bold"), text="",
             justify="center")
+        # bottom status bar: health / armor / ammo (Quake-style readout)
+        self.statusbar = self.canvas.create_text(
+            0, 0, anchor="sw", fill="#ffcc00", font=("Menlo", 16, "bold"), text="")
 
         # input state
         self.keys = set()
@@ -414,8 +417,6 @@ class App:
                 "water" if self.waterlevel >= 2 else
                 "ground" if self.onground else "air")
         hp = self.sv.player_health()
-        wpn = self.sv.weapon_status()
-        wpn_txt = f"   {wpn[0]} {wpn[1]}" if wpn else ""
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         self.canvas.coords(self.crosshair, w // 2, h // 2)
@@ -430,14 +431,26 @@ class App:
             self.hud,
             text=(f"{self.fps:5.1f} fps   "
                   f"{'polys' if self.flat else 'segs'} {nprim}   "
-                  f"leaf {leaf}   {mode}   health {hp:.0f}{wpn_txt}\n"
+                  f"leaf {leaf}   {mode}   health {hp:.0f}\n"
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
                   f"{'MOUSELOOK — hold to fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
                   f"[N]oclip [F]lat"))
+        # bottom status bar: health / armor / current-weapon ammo, plus the four
+        # ammo pools. Health reddens when low so it reads at a glance.
+        st = self.sv.hud_status()
+        if st:
+            self.canvas.coords(self.statusbar, 10, h - 8)
+            self.canvas.itemconfig(
+                self.statusbar, fill="#ff4040" if st["health"] <= 25 else "#ffcc00",
+                text=(f"HEALTH {st['health']:3d}    ARMOR {st['armor']:3d}    "
+                      f"{st['weapon']}: {st['ammo']:3d}\n"
+                      f"shells {st['shells']:3d}  nails {st['nails']:3d}  "
+                      f"rockets {st['rockets']:3d}  cells {st['cells']:3d}"))
         self.canvas.tag_raise(self.hud)
         self.canvas.tag_raise(self.crosshair)
         self.canvas.tag_raise(self.center_text)
+        self.canvas.tag_raise(self.statusbar)
         # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
         work_ms = (time.perf_counter() - now) * 1000
         self.root.after(max(1, int(16 - work_ms)), self.tick)

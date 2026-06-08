@@ -698,6 +698,24 @@ class Server:
                             int(vm.fget_f(num, ffr))))
         return out
 
+    def bsp_model_entities(self):
+        """Live external-.bsp model entities (health/ammo pickups) as
+        (modelindex, origin, angles). These use standalone maps/b_*.bsp brush
+        models -- not inline '*N' submodels and not .mdl alias models -- so they
+        fall through both alias_entities and brush_models. Index 1 is the world
+        map itself, which is never an entity's pickup, so skip it."""
+        vm = self.vm
+        mp = self.model_precache
+        fmi, forg, fang = self.f["modelindex"], self.f["origin"], self.f["angles"]
+        out = []
+        for num in range(1, vm.num_edicts):
+            if vm.free[num]:
+                continue
+            mi = vm.fget_i(num, fmi)
+            if 1 < mi < len(mp) and mp[mi][:1] != "*" and mp[mi][-4:] == ".bsp":
+                out.append((mi, vm.fget_v(num, forg), vm.fget_v(num, fang)))
+        return out
+
     # ================================================================
     # builtins
     # ================================================================

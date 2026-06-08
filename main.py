@@ -21,7 +21,7 @@ import tkinter as tk
 
 from pak import Pak
 from bsp import Bsp
-from render import Renderer, angle_vectors
+from render import Renderer, PickupModel, angle_vectors
 from physics import Physics, VIEW_HEIGHT, MAXSPEED
 from progs import Progs
 from sv import Server
@@ -162,6 +162,16 @@ class App:
                     self.models[idx] = Mdl(self.pak.read(name), self.palette)
                 except Exception as e:
                     print(f"mdl load failed for {name}: {e}")
+        # load the external .bsp pickup models (health/ammo boxes -- maps/b_*.bsp),
+        # also indexed by modelindex. Skip index 1, the world map itself.
+        self.bmodels = [None] * len(self.sv.model_precache)
+        for idx, name in enumerate(self.sv.model_precache):
+            if idx > 1 and name.endswith(".bsp") and name in self.pak.files:
+                try:
+                    self.bmodels[idx] = PickupModel(Bsp(self.pak.read(name)),
+                                                    self.palette)
+                except Exception as e:
+                    print(f"bsp pickup load failed for {name}: {e}")
         # first-person weapon view models, loaded on demand (v_*.mdl are not all
         # precached); path -> Mdl, or None if the file is missing / failed
         self._vmodels = {}
@@ -403,17 +413,20 @@ class App:
             return                        # sv/bsp just swapped; render next frame
         brush_ents = self.sv.brush_models()
         alias_ents = self._alias_ents()
+        bsp_ents = self._bsp_ents()
 
         eye = (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT)
         view_model = self._view_model(eye)
         if self.flat:
             polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
-                                                  brush_ents, alias_ents, view_model)
+                                                  brush_ents, alias_ents, view_model,
+                                                  bsp_ents)
             self._draw_polys(polys)
             nprim = len(polys)
         else:
             segs, leaf = self.rend.render(eye, self.yaw, self.pitch,
-                                          brush_ents, alias_ents, view_model)
+                                          brush_ents, alias_ents, view_model,
+                                          bsp_ents)
             self._draw(segs)
             nprim = len(segs)
 
@@ -492,6 +505,19 @@ class App:
             if m is None:
                 continue
             out.append((m, m.frame_verts(frame, now), org, ang))
+        return out
+
+    def _bsp_ents(self):
+        """Resolve live external-.bsp pickup entities to (PickupModel, origin,
+        angles) for the renderer. Skips any whose model failed to load."""
+        out = []
+        bmodels = self.bmodels
+        nmodels = len(bmodels)
+        for mi, org, ang in self.sv.bsp_model_entities():
+            pm = bmodels[mi] if mi < nmodels else None
+            if pm is None:
+                continue
+            out.append((pm, org, ang))
         return out
 
     def _calc_bob(self):

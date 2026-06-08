@@ -51,6 +51,74 @@ _AL = (0.35, 0.25, 0.90)
 _ALM = math.sqrt(_AL[0] ** 2 + _AL[1] ** 2 + _AL[2] ** 2)
 ALIAS_LIGHT = (_AL[0] / _ALM, _AL[1] / _ALM, _AL[2] / _ALM)
 ALIAS_GAIN = 2.0           # Quake skin averages are dark; brighten to be visible
+WORLD_GAIN = 2.2           # matches Renderer's per-face brightening for the world
+
+
+def _bsp_texture_colors(bsp, palette):
+    """Average RGB per miptex of `bsp` via a palette histogram; None where
+    unusable. Standalone twin of Renderer._texture_colors, for pickup models."""
+    from collections import Counter
+    out = []
+    for t in bsp.textures:
+        if t is None or t[3] is None or palette is None:
+            out.append(None)
+            continue
+        r = g = b = tot = 0
+        for idx, c in Counter(t[3]).items():
+            pr, pg, pb = palette[idx]
+            r += pr * c
+            g += pg * c
+            b += pb * c
+            tot += c
+        out.append((r / tot, g / tot, b / tot) if tot else None)
+    return out
+
+
+class PickupModel:
+    """An external .bsp brush model loaded as a pickup (health box, ammo box).
+
+    These are standalone little Quake BSPs (maps/b_bh25.bsp, maps/b_shell0.bsp,
+    ...), not inline '*N' submodels of the world and not .mdl alias models, so
+    neither the brush-model nor the alias path drew them. Each is a convex box,
+    so we precompute its faces in model-local space and draw it with backface
+    culling alone -- no internal BSP walk or face sorting needed.
+
+    self.faces: list of (local_verts, (nx, ny, nz, dist), color_hex)
+    self.mins/self.maxs: model-space bounds, for PVS + painter routing.
+    """
+    def __init__(self, bsp, palette):
+        m0 = bsp.models[0]
+        self.mins = tuple(m0["mins"])
+        self.maxs = tuple(m0["maxs"])
+        tex_rgb = _bsp_texture_colors(bsp, palette)
+        lx, ly, lz = ALIAS_LIGHT
+        self.faces = []
+        self.edges = []                 # (p0, p1) local-space, for wireframe mode
+        ff, nf = m0["firstface"], m0["numfaces"]
+        for fi in range(ff, ff + nf):
+            planenum, side, firstedge, numedges, ti = bsp.faces[fi]
+            verts = []
+            for k in range(numedges):
+                se = bsp.surfedges[firstedge + k]
+                vi = bsp.edges[se][0] if se >= 0 else bsp.edges[-se][1]
+                verts.append(bsp.vertexes[vi])
+            (nx, ny, nz), dist, _ = bsp.planes[planenum]
+            if side:
+                nx, ny, nz, dist = -nx, -ny, -nz, -dist
+            inten = (0.50 + 0.50 * max(0.0, nx * lx + ny * ly + nz * lz)) * WORLD_GAIN
+            base = None
+            if 0 <= ti < len(bsp.texinfo):
+                mt = bsp.texinfo[ti][0]
+                if 0 <= mt < len(tex_rgb):
+                    base = tex_rgb[mt]
+            if base is None:
+                base = (140.0, 140.0, 140.0)
+            r = min(255, int(base[0] * inten))
+            g = min(255, int(base[1] * inten))
+            b = min(255, int(base[2] * inten))
+            self.faces.append((verts, (nx, ny, nz, dist), f"#{r:02x}{g:02x}{b:02x}"))
+            for k in range(numedges):
+                self.edges.append((verts[k], verts[(k + 1) % numedges]))
 
 
 class Renderer:
@@ -257,7 +325,7 @@ class Renderer:
 
     # ---- main entry ----
     def render(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
-               view_model=None):
+               view_model=None, bsp_ents=None):
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -436,6 +504,24 @@ class Renderer:
                     emit_seg(cb[0], cb[1], cb[2], cc[0], cc[1], cc[2])
                     emit_seg(cc[0], cc[1], cc[2], ca[0], ca[1], ca[2])
 
+        # external .bsp pickups (health/ammo boxes) as edge wireframe
+        if bsp_ents:
+            for pm, org, ang in bsp_ents:
+                ofx, ofy, ofz = org
+                mn, mx = pm.mins, pm.maxs
+                if not self.box_in_pvs((ofx + mn[0], ofy + mn[1], ofz + mn[2]),
+                                       (ofx + mx[0], ofy + mx[1], ofz + mx[2]), vis):
+                    continue
+                for (ax, ay, az), (bx, by, bz) in pm.edges:
+                    d0x, d0y, d0z = ax + ofx - ox, ay + ofy - oy, az + ofz - oz
+                    d1x, d1y, d1z = bx + ofx - ox, by + ofy - oy, bz + ofz - oz
+                    emit_seg(d0x * rx + d0y * ry + d0z * rz,
+                             d0x * ux + d0y * uy + d0z * uz,
+                             d0x * fx + d0y * fy + d0z * fz,
+                             d1x * rx + d1y * ry + d1z * rz,
+                             d1x * ux + d1y * uy + d1z * uz,
+                             d1x * fx + d1y * fy + d1z * fz)
+
         # first-person weapon view model: fixed to the camera, no PVS cull
         if view_model:
             mdl, verts, org, ang = view_model
@@ -462,10 +548,11 @@ class Renderer:
         return segments, leaf
 
     def render_shaded(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
-                      view_model=None):
+                      view_model=None, bsp_ents=None):
         """Flat-shaded polygons, back-to-front (painter's algorithm via the BSP).
         Returns (polys, leaf) where each poly is (flat_xy_coords, fill_color).
-        alias_ents: (mdl, model_space_verts, origin, angles) for .mdl entities."""
+        alias_ents: (mdl, model_space_verts, origin, angles) for .mdl entities.
+        bsp_ents: (PickupModel, origin, angles) for external .bsp pickups."""
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -632,9 +719,31 @@ class Renderer:
                 bl = min(255, int(bb * inten))
                 project_poly([ca, cb, cc], f"#{r:02x}{g:02x}{bl:02x}")
 
+        # external .bsp pickup (health/ammo box): a convex brush model with its
+        # own geometry. Backface-cull each face (so only the front shows) and
+        # project it offset to the entity origin -- like emit_face_ofs but over
+        # the pickup's own faces instead of the world's.
+        def emit_bsp_model(item):
+            pm = item["pickup"]
+            ofx, ofy, ofz = item["origin"]
+            clx, cly, clz = ox - ofx, oy - ofy, oz - ofz
+            for verts, (nx, ny, nz, dist), color in pm.faces:
+                if clx * nx + cly * ny + clz * nz - dist <= BACKFACE_EPS:
+                    continue
+                pts = []
+                for vx, vy, vz in verts:
+                    dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
+                    pts.append((dx * rx + dy * ry + dz * rz,
+                                dx * ux + dy * uy + dz * uz,
+                                dx * fx + dy * fy + dz * fz))
+                project_poly(pts, color)
+
         def emit_model(item):
             if "mdl" in item:
                 emit_alias(item)
+                return
+            if "pickup" in item:
+                emit_bsp_model(item)
                 return
             # a brush model has its own BSP sub-tree; walk it far-child-first so
             # its faces paint back-to-front (correct even when non-convex). The
@@ -704,6 +813,21 @@ class Renderer:
                     pending.append({"mdl": mdl, "verts": verts, "origin": org,
                                     "angles": ang, "mins": mins, "maxs": maxs,
                                     "center": org})
+
+        # external .bsp pickups (health/ammo boxes), routed by their centre like
+        # the other entities so the painter draws them at their true depth.
+        if bsp_ents:
+            for pm, org, ang in bsp_ents:
+                mn, mx = pm.mins, pm.maxs
+                mins = (org[0] + mn[0], org[1] + mn[1], org[2] + mn[2])
+                maxs = (org[0] + mx[0], org[1] + mx[1], org[2] + mx[2])
+                if self.box_in_pvs(mins, maxs, vis):
+                    cx = (mins[0] + maxs[0]) * 0.5
+                    cy = (mins[1] + maxs[1]) * 0.5
+                    cz = (mins[2] + maxs[2]) * 0.5
+                    pending.append({"pickup": pm, "origin": org, "angles": ang,
+                                    "mins": mins, "maxs": maxs,
+                                    "center": (cx, cy, cz)})
 
         # PVS: mark every node on the path from each visible leaf up to the root
         node_visframe = self.node_visframe

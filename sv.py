@@ -41,13 +41,15 @@ CONTENTS_EMPTY = -1
 CONTENTS_SOLID = -2
 
 SVC_TEMPENTITY = 23         # broadcast effect message (gunshots, teleport fog, ...)
-# temp-entity type -> (palette colour, particle count). Point effects only; beam
-# types (lightning) just spark once at their start point, which is harmless.
+# temp-entity type -> (palette colour, particle count, velocity spread u/s).
+# Point effects only; beam types (lightning) just spark once at their start
+# point, which is harmless. The spread is the peak outward speed: Quake flings
+# explosion particles at ~256 u/s, so a near-static drift reads wrong.
 _TE_EFFECT = {
-    0: (0, 6), 1: (0, 8), 2: (0, 6),        # spike, superspike, gunshot (grey)
-    3: (75, 24), 4: (75, 24),               # explosion, tarexplosion (orange)
-    7: (60, 10), 8: (0, 8),                 # wizspike (green), knightspike
-    10: (244, 32), 11: (244, 30),           # lavasplash, teleport (white fog)
+    0: (0, 6, 60), 1: (0, 8, 80), 2: (0, 6, 60),    # spike, superspike, gunshot
+    3: (75, 24, 200), 4: (75, 24, 200),             # explosion, tarexplosion
+    7: (60, 10, 80), 8: (0, 8, 80),                 # wizspike (green), knightspike
+    10: (244, 32, 120), 11: (244, 30, 60),          # lavasplash, teleport fog
 }
 
 # movetypes the engine integrates each frame (origin += velocity*dt)
@@ -1104,16 +1106,18 @@ class Server:
             if msg:
                 self.center_msg = (msg, self.time)
 
-    def _burst(self, org, vel, color, count):
-        """Spawn `count` point sprites at org with a velocity + random spread."""
+    def _burst(self, org, vel, color, count, spread=20.0):
+        """Spawn `count` point sprites at org with a base velocity plus a random
+        outward kick of +/- `spread` u/s per axis (so explosions actually fly
+        apart rather than hang in place)."""
         count = max(1, min(count, 24))
         die = self.time + 0.6
         for i in range(count):
             self.particles.append([
                 org[0], org[1], org[2],
-                vel[0] + (random.random() - 0.5) * 40,
-                vel[1] + (random.random() - 0.5) * 40,
-                vel[2] + (random.random() - 0.5) * 40,
+                vel[0] + (random.random() * 2.0 - 1.0) * spread,
+                vel[1] + (random.random() * 2.0 - 1.0) * spread,
+                vel[2] + (random.random() * 2.0 - 1.0) * spread,
                 (color + i) & 255, die])
         if len(self.particles) > 400:                # bound the list
             del self.particles[:len(self.particles) - 400]
@@ -1141,8 +1145,8 @@ class Server:
         coords = self._te[1]
         coords.append(self.vm.parm_f(1))
         if len(coords) == 3:                     # have a full position -> spark it
-            color, count = _TE_EFFECT.get(self._te[0], (0, 6))
-            self._burst(coords, (0.0, 0.0, 0.0), color, count)
+            color, count, spread = _TE_EFFECT.get(self._te[0], (0, 6, 60))
+            self._burst(coords, (0.0, 0.0, 0.0), color, count, spread)
             self._te = None
 
     # trail type -> (palette colour base, jitter, step units). Mirrors WinQuake

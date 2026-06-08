@@ -148,7 +148,12 @@ class App:
         self._last_mouse = None
         self.last_t = time.perf_counter()
         self.fps = 0.0
-        self.attacking = False       # mouse held -> button0 (QC handles cadence)
+        # fire (button0) comes from two inputs -- the mouse and the Ctrl key --
+        # OR'd together so releasing one doesn't cancel the other. attacking is
+        # the combined state the QC weapon frame reads (it handles cadence).
+        self.fire_mouse = False
+        self.fire_key = False
+        self.attacking = False
         self.pending_impulse = 0     # weapon-select keypress, sent once to the QC
         self.intermission = False    # frozen at the end-of-level camera spot
 
@@ -266,16 +271,21 @@ class App:
         # so winfo_width() would read 1 and the projection would collapse.
         self.canvas.bind("<Configure>", self._resize)
 
+    def _set_attack(self):
+        self.attacking = self.fire_mouse or self.fire_key
+
     def _click(self, e):
         # first click captures the mouse; while captured, hold to fire (button0).
         # The QC weapon frame handles per-weapon cadence, ammo and animation.
         if not self.mouselook:
             self._set_mouselook(True)
         else:
-            self.attacking = True
+            self.fire_mouse = True
+            self._set_attack()
 
     def _release(self, e):
-        self.attacking = False
+        self.fire_mouse = False
+        self._set_attack()
 
     def _keydown(self, e):
         k = e.keysym.lower()
@@ -314,15 +324,25 @@ class App:
         if len(k) == 1 and "1" <= k <= "8":   # select a weapon (Quake impulse 1-8)
             self.pending_impulse = int(k)
             return
+        if k == "control_l" or k == "control_r":   # Ctrl fires (Quake +attack)
+            self.fire_key = True
+            self._set_attack()
+            return
         self.keys.add(k)
 
     def _keyup(self, e):
-        self.keys.discard(e.keysym.lower())
+        k = e.keysym.lower()
+        if k == "control_l" or k == "control_r":
+            self.fire_key = False
+            self._set_attack()
+            return
+        self.keys.discard(k)
 
     def _set_mouselook(self, on):
         self.mouselook = on
         if not on:
-            self.attacking = False        # releasing the mouse stops firing
+            self.fire_mouse = False       # releasing the mouse stops mouse-firing
+            self._set_attack()
         self.canvas.config(cursor="none" if on else "")
         if on:
             self._last_mouse = None
@@ -389,8 +409,7 @@ class App:
         if self.noclip:
             # free fly along the full view direction (pitch included), no gravity
             forward, right, up = angle_vectors(self.yaw, self.pitch)
-            rise = (("space" in self.keys) -
-                    ("control_l" in self.keys or "control_r" in self.keys))
+            rise = ("space" in self.keys) - ("c" in self.keys)
             speed = NOCLIP_SPEED * (3.0 if fast else 1.0) * dt
             for i in range(3):
                 self.pos[i] += (forward[i] * fwd + right[i] * strafe +
@@ -413,7 +432,7 @@ class App:
 
         # swimming (and wall friction) use the full 3D view; space/ctrl swim up/down
         forward, right, _ = angle_vectors(self.yaw, self.pitch)
-        down = "control_l" in self.keys or "control_r" in self.keys
+        down = "c" in self.keys
         upmove = (("space" in self.keys) - down) * speed
 
         # clamp dt so a hitch can't tunnel the player through a wall
@@ -587,7 +606,7 @@ class App:
                   f"leaf {leaf}   {mode}   health {hp:.0f}\n"
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
-                  f"{'MOUSELOOK — hold to fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
+                  f"{'MOUSELOOK — mouse/Ctrl fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
                   f"[N]oclip [F]lat [Z]buffer [T]exture"))
         # bottom status bar: health / armor / current-weapon ammo, plus the four
         # ammo pools. Health reddens when low so it reads at a glance.

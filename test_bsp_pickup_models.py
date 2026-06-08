@@ -42,17 +42,20 @@ def test_enumeration_picks_external_bsp_only():
     # model_precache: 0 empty, 1 world, 2 a pickup .bsp, 3 a door submodel,
     # 4 a monster .mdl
     precache = ["", "maps/e1m1.bsp", "maps/b_bh25.bsp", "*3", "progs/army.mdl"]
+    # `model` is a nonzero string offset for a live entity; 0 means string_null
+    # (a picked-up item the engine no longer renders).
     ents = [
         {},                                              # 0 world
-        {"modelindex": 2, "origin": (1.0, 2.0, 3.0), "angles": (0.0, 90.0, 0.0)},
-        {"modelindex": 3},                               # a door (inline submodel)
-        {"modelindex": 4},                               # a monster (.mdl)
-        {"modelindex": 1},                               # something on the world map
+        {"modelindex": 2, "model": 9, "origin": (1.0, 2.0, 3.0), "angles": (0.0, 90.0, 0.0)},
+        {"modelindex": 3, "model": 9},                   # a door (inline submodel)
+        {"modelindex": 4, "model": 9},                   # a monster (.mdl)
+        {"modelindex": 1, "model": 9},                   # something on the world map
+        {"modelindex": 2, "model": 0, "origin": (5.0, 6.0, 7.0)},  # picked-up box
     ]
     srv = Server.__new__(Server)
     srv.vm = FakeVM(ents)
     srv.model_precache = precache
-    srv.f = {n: n for n in ("modelindex", "origin", "angles")}
+    srv.f = {n: n for n in ("modelindex", "model", "origin", "angles")}
     got = srv.bsp_model_entities()
     assert got == [(2, (1.0, 2.0, 3.0), (0.0, 90.0, 0.0))], got
 

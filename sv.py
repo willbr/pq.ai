@@ -681,11 +681,16 @@ class Server:
         renderer (monsters, items). Skips brush '*N' and non-.mdl models."""
         vm = self.vm
         mp = self.model_precache
-        fmi, forg, fang, ffr = (self.f["modelindex"], self.f["origin"],
-                                self.f["angles"], self.f["frame"])
+        fmi, forg, fang, ffr, fmod = (self.f["modelindex"], self.f["origin"],
+                                      self.f["angles"], self.f["frame"],
+                                      self.f["model"])
         out = []
         for num in range(1, vm.num_edicts):
             if vm.free[num]:
+                continue
+            # picked-up items clear .model (string_null) but keep modelindex;
+            # the engine hides them (sv_main.c: !pr_strings[ent->v.model]).
+            if vm.fget_i(num, fmod) == 0:
                 continue
             mi = vm.fget_i(num, fmi)
             if 0 < mi < len(mp) and mp[mi][-4:] == ".mdl":
@@ -702,9 +707,14 @@ class Server:
         vm = self.vm
         mp = self.model_precache
         fmi, forg, fang = self.f["modelindex"], self.f["origin"], self.f["angles"]
+        fmod = self.f["model"]
         out = []
         for num in range(1, vm.num_edicts):
             if vm.free[num]:
+                continue
+            # hidden once picked up: .model is cleared though modelindex remains
+            # (sv_main.c: !pr_strings[ent->v.model]).
+            if vm.fget_i(num, fmod) == 0:
                 continue
             mi = vm.fget_i(num, fmi)
             if 1 < mi < len(mp) and mp[mi][:1] != "*" and mp[mi][-4:] == ".bsp":

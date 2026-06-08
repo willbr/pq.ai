@@ -97,6 +97,7 @@ _WEAPON_NAMES = {
 # system globals we read/write
 _GLOBALS = ("self", "other", "time", "frametime", "force_retouch", "skill",
             "v_forward", "v_right", "v_up", "msg_entity", "mapname",
+            "intermission_running", "intermission_exittime",
             "trace_allsolid", "trace_startsolid", "trace_fraction", "trace_endpos",
             "trace_plane_normal", "trace_plane_dist", "trace_ent",
             "trace_inopen", "trace_inwater")
@@ -248,6 +249,10 @@ class Server:
 
     def gget_i(self, name):
         return self.vm.gi[self.g[name]]
+
+    def gget_f(self, name):
+        o = self.g[name]
+        return self.vm.gf[o] if o is not None else 0.0
 
     # ================================================================
     # level load: build edicts from the entity string and spawn them
@@ -1259,6 +1264,33 @@ class Server:
         vm.fset_v(e, f["v_angle"], angles)
         self._link_abs(e)
 
+    def intermission_active(self):
+        """True once the QC has entered intermission (execute_changelevel set
+        intermission_running). The host freezes the camera at the player's
+        intermission spot and hides the view model while this holds."""
+        return self.gget_f("intermission_running") > 0.0
+
+    def run_intermission(self, button0):
+        """Drive the player's IntermissionThink, which PlayerPreThink would run
+        each frame during intermission: once `time` passes intermission_exittime
+        and the player presses a button, it calls GotoNextMap -> changelevel
+        (which sets self.changelevel for the host to load). The player edict was
+        already frozen at the camera spot by execute_changelevel."""
+        if not self.player:
+            return
+        func = self.pr.find_function("IntermissionThink")
+        if func is None:
+            return
+        vm, f, e = self.vm, self.f, self.player
+        vm.fset_f(e, f["button0"], 1.0 if button0 else 0.0)
+        self.gset_f("time", self.time)
+        self.gset_i("self", e)
+        self.gset_i("other", 0)
+        try:
+            vm.execute(func)
+        except PR_RunError as ex:
+            print(f"IntermissionThink aborted: {ex}")
+
     def set_input(self, button0, impulse=0):
         """Host -> server input for the player: attack-held state and a weapon
         select impulse. The impulse is queued and consumed by the next weapon
@@ -1274,6 +1306,8 @@ class Server:
         This drives every weapon -- ammo, view-model animation and all -- from the
         game's own QC, instead of the engine hardcoding a single weapon."""
         if not self.player or self.phys is None:
+            return
+        if self.intermission_active():     # PlayerPreThink returns before weapons
             return
         vm, f, e = self.vm, self.f, self.player
         if vm.fget_f(e, f["health"]) <= 0:

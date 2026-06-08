@@ -140,6 +140,7 @@ class App:
         self.fps = 0.0
         self.attacking = False       # mouse held -> button0 (QC handles cadence)
         self.pending_impulse = 0     # weapon-select keypress, sent once to the QC
+        self.intermission = False    # frozen at the end-of-level camera spot
 
         if not self._load_map(mapname):
             sys.exit(f"no such map: maps/{mapname}.bsp")
@@ -392,57 +393,88 @@ class App:
         self.last_t = now
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
-        self.bobtime += dt          # phase for the weapon bob
+        # Intermission: the QC has frozen the player at the end-of-level camera
+        # spot. Don't move or camera-drive them -- just advance the QC and let
+        # IntermissionThink load the next map on a fire press after the delay.
+        if self.intermission or self.sv.intermission_active():
+            self.intermission = True
+            self.sv_accum += dt
+            steps = 0
+            while self.sv_accum >= SV_TICK and steps < 5:
+                self.sv.run_frame(SV_TICK)
+                self.sv.run_intermission(self.attacking)
+                self.sv_accum -= SV_TICK
+                steps += 1
+        else:
+            self.bobtime += dt          # phase for the weapon bob
 
-        # refresh the brush models the player collides with (doors, func_walls,
-        # gates), at the positions last set by the QC tick, then move
-        self.phys.set_brush_entities(self.sv.solid_brush_models())
-        self._move(dt)
+            # refresh the brush models the player collides with (doors,
+            # func_walls, gates), at the positions last set by the QC tick
+            self.phys.set_brush_entities(self.sv.solid_brush_models())
+            self._move(dt)
 
-        # push the camera into the client edict so monsters target the player and
-        # shots originate from the current view
-        self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
-                              (self.pitch, self.yaw, 0.0))
+            # push the camera into the client edict so monsters target the
+            # player and shots originate from the current view
+            self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
+                                  (self.pitch, self.yaw, 0.0))
 
-        # SV_Impact: fire touch on the solid movers the move just bumped, so
-        # walking into a button presses it and into a key door opens it
-        self.sv.touch_impacts(self.phys.touched)
+            # SV_Impact: fire touch on the solid movers the move just bumped, so
+            # walking into a button presses it and into a key door opens it
+            self.sv.touch_impacts(self.phys.touched)
 
-        # advance the QC server at a fixed tick (catch up real time, capped so a
-        # hitch can't trigger a spiral of death), then read back entity positions
-        # hand this frame's weapon input to the server, then advance the QC.
-        # The impulse is one-shot (a single keypress switches once).
-        self.sv.set_input(self.attacking, self.pending_impulse)
-        self.pending_impulse = 0
-        self.sv_accum += dt
-        steps = 0
-        while self.sv_accum >= SV_TICK and steps < 5:
-            self.sv.run_frame(SV_TICK)
-            # ride lifts/doors: fold the pusher's carry into the camera position
-            cx, cy, cz = self.sv.player_carry
-            if cx or cy or cz:
-                self.pos[0] += cx
-                self.pos[1] += cy
-                self.pos[2] += cz
-                self.onground = True       # still standing on the mover
-            self.sv_accum -= SV_TICK
-            steps += 1
-        if steps:
-            self._sync_from_player()      # adopt teleports / trigger-moved origin
-        if self.sv.changelevel:           # walked into a slipgate -> load next map
+            # advance the QC server at a fixed tick (catch up real time, capped
+            # so a hitch can't trigger a spiral of death), then read back entity
+            # positions. The impulse is one-shot (a keypress switches once).
+            self.sv.set_input(self.attacking, self.pending_impulse)
+            self.pending_impulse = 0
+            self.sv_accum += dt
+            steps = 0
+            while self.sv_accum >= SV_TICK and steps < 5:
+                self.sv.run_frame(SV_TICK)
+                # ride lifts/doors: fold the pusher's carry into the camera
+                cx, cy, cz = self.sv.player_carry
+                if cx or cy or cz:
+                    self.pos[0] += cx
+                    self.pos[1] += cy
+                    self.pos[2] += cz
+                    self.onground = True       # still standing on the mover
+                self.sv_accum -= SV_TICK
+                steps += 1
+            if steps:
+                self._sync_from_player()      # adopt teleports / trigger moves
+            # the exit may have started intermission during this frame's QC tick
+            self.intermission = self.sv.intermission_active()
+
+        # a changelevel can be queued by a slipgate (normal play) or by
+        # GotoNextMap (intermission). Load it and render the new map next frame.
+        if self.sv.changelevel:
             self._change_level(self.sv.changelevel)
+            self.intermission = False
             self.root.after(16, self.tick)
             return                        # sv/bsp just swapped; render next frame
         brush_ents = self.sv.brush_models()
         alias_ents = self._alias_ents()
         bsp_ents = self._bsp_ents()
 
-        # head-bob: shift both the view origin and the gun by it, as Quake does,
-        # so the weapon rides nearly still with the view instead of sloshing.
-        bob = self._calc_bob()
-        fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
-        eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
-        view_model = self._view_model(gun_org)
+        if self.intermission:
+            # V_CalcIntermissionRefdef: camera sits at the spot origin (no view
+            # height, no bob) looking along its mangle, and the gun is hidden.
+            org = self.sv.player_origin()
+            ang = self.sv.player_angles()
+            if org:
+                self.pos = [org[0], org[1], org[2]]
+            if ang:
+                self.pitch = max(-89.0, min(89.0, ang[0]))
+                self.yaw = ang[1]
+            eye = (self.pos[0], self.pos[1], self.pos[2])
+            view_model = None
+        else:
+            # head-bob: shift both the view origin and the gun by it, as Quake
+            # does, so the weapon rides nearly still instead of sloshing.
+            bob = self._calc_bob()
+            fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
+            eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
+            view_model = self._view_model(gun_org)
         if self.flat:
             polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
                                                   brush_ents, alias_ents, view_model,

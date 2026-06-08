@@ -565,7 +565,8 @@ class App:
                                                     brush_ents, alias_ents,
                                                     view_model, bsp_ents,
                                                     textured=self.textured,
-                                                    lightstyles=styles)
+                                                    lightstyles=styles,
+                                                    time=self.sv.time)
             self._draw_fb(fbdata)
             nprim = fbdata[1] * fbdata[2]
         elif self.flat:

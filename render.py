@@ -26,7 +26,15 @@ MIN_POLY_PX2 = 16.0        # drop polygons smaller than this area (Tk fill cost)
 # 1/ZBUF_SCALE of the window, then the UI scales it up. Pure-Python per-pixel
 # fill is slow, so a low internal resolution keeps it interactive.
 ZBUF_SCALE = 4
-ZBUF_BG = (40, 40, 56)     # flat colour where nothing is drawn (no sky render)
+ZBUF_BG = (40, 40, 56)     # flat colour where nothing is drawn (past the sky)
+
+# turbulent-surface warp (water, lava, slime, teleporters). Quake offsets each
+# texel by a sine of the *other* axis plus time: amplitude 8 texels, phase
+# index (coord*0.125 + time) * TURBSCALE, wrapped to the 256-entry table.
+_TURBSCALE = 256.0 / (2.0 * math.pi)
+_TURBSIN = [8.0 * math.sin(i * 2.0 * math.pi / 256.0) for i in range(256)]
+# sky drift: texels/sec the scrolling sky texture slides across its faces.
+SKY_SCROLL = 24.0
 
 # lightmap luxels are 0..255; Quake brightens them with overbright bits we don't
 # emulate, so a gain keeps lit areas from looking muddy. DEFAULT_LIGHT is what an
@@ -222,6 +230,11 @@ class Renderer:
         # miptex has no level-0 pixels or no palette was supplied.
         self.tex_rgb = self._decode_textures()
 
+        # classify miptexes by Quake's name conventions: sky* scroll, *liquids
+        # warp (water/lava/slime/teleport), and +N frames cycle. _classify_tex
+        # also builds the animation chains (per-miptex list of frame indices).
+        self.is_sky, self.is_turb, self.tex_anim = self._classify_textures()
+
         # per-face texture record for the rasteriser: (w, h, rgb_bytes, s_vec,
         # t_vec) or None to fall back to flat colour. Plus a per-face integer
         # shade (0..256, 8-bit fixed point) from the same directional light, so
@@ -229,6 +242,9 @@ class Renderer:
         # palette colours, so no 2.2 gain here (that only rescued dark averages).
         self.face_tex = []
         self.face_shade = []
+        self.face_sky = [False] * nfaces      # scroll the sky texture
+        self.face_turb = [False] * nfaces     # sine-warp (liquids, teleporters)
+        self.face_anim = [None] * nfaces      # [(w,h,rgb), ...] frames, or None
         for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
             self.face_shade.append(int((0.55 + 0.45 * max(0.0,
                                    nx * lx + ny * ly + nz * lz)) * 256))
@@ -236,10 +252,21 @@ class Renderer:
             ti = bsp.faces[fi][4]
             if 0 <= ti < len(texinfo):
                 mt = texinfo[ti][0]
-                if 0 <= mt < len(self.tex_rgb) and self.tex_rgb[mt] is not None:
-                    w, h, rgb = self.tex_rgb[mt]
-                    rec = (w, h, rgb, texinfo[ti][2], texinfo[ti][3])
+                if 0 <= mt < len(self.tex_rgb):
+                    self.face_sky[fi] = self.is_sky[mt]
+                    self.face_turb[fi] = self.is_turb[mt]
+                    if self.tex_anim[mt] is not None:
+                        frames = [self.tex_rgb[m] for m in self.tex_anim[mt]
+                                  if self.tex_rgb[m] is not None]
+                        if len(frames) > 1:
+                            self.face_anim[fi] = frames
+                    if self.tex_rgb[mt] is not None:
+                        w, h, rgb = self.tex_rgb[mt]
+                        rec = (w, h, rgb, texinfo[ti][2], texinfo[ti][3])
             self.face_tex.append(rec)
+        # faces whose texture cycles -- the only ones _animate_surfaces touches
+        self.anim_faces = [fi for fi in range(nfaces)
+                           if self.face_anim[fi] is not None]
 
         # per-face lightmaps from the LIGHTING lump (baked static light). Each
         # entry: (lmw, lmh, smin, tmin, luxels, has_real). For surfaces with a
@@ -317,6 +344,49 @@ class Renderer:
             out.append((w, h, rgb))
         return out
 
+    def _classify_textures(self):
+        """Split miptexes by Quake's name conventions and build +N animation
+        chains. Returns (is_sky, is_turb, tex_anim) aligned to bsp.textures:
+          - is_sky[mt]:  name starts 'sky'  -> scrolling sky.
+          - is_turb[mt]: name starts '*'    -> sine-warped liquid/teleporter.
+          - tex_anim[mt]: the main-sequence frame list ['+0x','+1x',...] this
+            miptex belongs to (sorted by digit), or None. The alternate '+a..'
+            sequence (entity-triggered) is ignored -- world surfaces only cycle
+            the main one."""
+        textures = self.bsp.textures
+        n = len(textures)
+        is_sky = [False] * n
+        is_turb = [False] * n
+        tex_anim = [None] * n
+        groups = {}                  # base name -> {digit: miptex index}
+        for mt, t in enumerate(textures):
+            if t is None:
+                continue
+            name = t[0].lower()
+            if name.startswith("sky"):
+                is_sky[mt] = True
+            elif name.startswith("*"):
+                is_turb[mt] = True
+            elif name.startswith("+") and len(name) >= 2 and name[1].isdigit():
+                groups.setdefault(name[2:], {})[int(name[1])] = mt
+        for frames in groups.values():
+            chain = [frames[k] for k in sorted(frames)]
+            for mt in chain:
+                tex_anim[mt] = chain
+        return is_sky, is_turb, tex_anim
+
+    def _animate_surfaces(self, t):
+        """Swap each +N face to the frame for time t (Quake cycles at 5 Hz).
+        Only animated faces are touched; sky/turb need no per-frame state."""
+        if not self.anim_faces:
+            return
+        fidx = int(t * 5.0)
+        for fi in self.anim_faces:
+            frames = self.face_anim[fi]
+            w, h, rgb = frames[fidx % len(frames)]
+            old = self.face_tex[fi]
+            self.face_tex[fi] = (w, h, rgb, old[3], old[4])
+
     def _build_lightmaps(self):
         """Per-face lightmap data from the LIGHTING lump. Fills self.face_lm
         (the live, possibly animated map sampled by the rasteriser) and
@@ -373,8 +443,11 @@ class Renderer:
                         self.style_faces.setdefault(st, []).append(fi)
                     rec = (lmw, lmh, bsmin * 16.0, btmin * 16.0, bytearray(n), True)
             if rec is None:
+                # no lightmap == TEX_SPECIAL (sky / liquids / teleport): Quake
+                # draws these full-bright. The textured rasteriser samples this
+                # 1x1 luxel (255), while flat mode keeps the directional shade.
                 shade = min(255, self.face_shade[fi])
-                rec = (1, 1, 0.0, 0.0, bytearray((shade,)), False)
+                rec = (1, 1, 0.0, 0.0, bytearray((255,)), False)
                 self.face_light_avg[fi] = shade        # constant; never recombined
             self.face_lm.append(rec)
             self.face_lm_styles.append(blocks)
@@ -1165,7 +1238,7 @@ class Renderer:
 
     def render_zbuffer(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
                        view_model=None, bsp_ents=None, textured=True,
-                       lightstyles=None):
+                       lightstyles=None, time=0.0):
         """True per-pixel z-buffered software rasteriser. World/brush faces are
         perspective-correct texture-mapped (textured=True) or flat-shaded; both
         resolve occlusion with a 1/z depth buffer (no painter's ordering, so
@@ -1189,6 +1262,9 @@ class Renderer:
         face_color_rgb = self.face_color_rgb
         face_tex = self.face_tex
         face_lm = self.face_lm
+        face_sky = self.face_sky
+        face_turb = self.face_turb
+        sky_off = (time * SKY_SCROLL) % 256.0     # sky texels scrolled this frame
         face_frame = self.face_frame
         vert_frame = self.vert_frame
         vcache = self.vcache
@@ -1202,6 +1278,8 @@ class Renderer:
 
         if lightstyles is not None:                   # animate flickering lights
             self._animate_lightmaps(lightstyles)
+        if textured:                                  # cycle +N animated textures
+            self._animate_surfaces(time)
 
         leaf = self.point_leaf(origin)
         if leafs[leaf][0] == -2 or leafs[leaf][1] < 0:
@@ -1416,6 +1494,118 @@ class Renderer:
                                sx[k + 1], sy[k + 1], sz[k + 1], su[k + 1], sv[k + 1],
                                tw, th, tex, lmw, lmh, lsmin, ltmin, lux)
 
+        def raster_tri_tex_turb(ax, ay, az, au, av, bx, by, bz, bu, bv,
+                                cx, cy, cz, cu, cv, tw, th, tex):
+            # Turbulent (liquid/teleport) triangle: same perspective-correct
+            # setup as raster_tri_tex, but each pixel's texel is sine-warped in
+            # both axes and drawn full-bright (no lightmap -- these are special
+            # surfaces). Hot but only over liquid/sky area, so kept separate
+            # from the common path rather than branching per pixel there.
+            sintab = _TURBSIN; scale = _TURBSCALE; tt = time
+            x0 = ax if ax < bx else bx
+            if cx < x0: x0 = cx
+            x1 = ax if ax > bx else bx
+            if cx > x1: x1 = cx
+            y0 = ay if ay < by else by
+            if cy < y0: y0 = cy
+            y1 = ay if ay > by else by
+            if cy > y1: y1 = cy
+            x0 = int(x0)
+            if x0 < 0: x0 = 0
+            x1 = int(x1) + 1
+            if x1 > iw: x1 = iw
+            y0 = int(y0)
+            if y0 < 0: y0 = 0
+            y1 = int(y1) + 1
+            if y1 > ih: y1 = ih
+            if x0 >= x1 or y0 >= y1:
+                return
+            area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if area == 0.0:
+                return
+            A0 = by - cy; B0 = cx - bx
+            A1 = cy - ay; B1 = ax - cx
+            A2 = ay - by; B2 = bx - ax
+            px = x0 + 0.5; py = y0 + 0.5
+            w0r = (cx - bx) * (py - by) - (cy - by) * (px - bx)
+            w1r = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
+            w2r = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+            if area < 0.0:
+                A0 = -A0; A1 = -A1; A2 = -A2
+                B0 = -B0; B1 = -B1; B2 = -B2
+                w0r = -w0r; w1r = -w1r; w2r = -w2r
+                area = -area
+            inv = 1.0 / area
+            za = az * inv; zbb = bz * inv; zc = cz * inv
+            ua = au * inv; ub = bu * inv; uc = cu * inv
+            va = av * inv; vb = bv * inv; vc = cv * inv
+            for y in range(y0, y1):
+                w0 = w0r; w1 = w1r; w2 = w2r
+                row = y * iw
+                for x in range(x0, x1):
+                    if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
+                        iz = w0 * za + w1 * zbb + w2 * zc
+                        idx = row + x
+                        if iz > zb[idx]:
+                            z = 1.0 / iz
+                            u = (w0 * ua + w1 * ub + w2 * uc) * z
+                            v = (w0 * va + w1 * vb + w2 * vc) * z
+                            su2 = u + sintab[int((v * 0.125 + tt) * scale) & 255]
+                            sv2 = v + sintab[int((u * 0.125 + tt) * scale) & 255]
+                            o = (int(sv2) % th * tw + int(su2) % tw) * 3
+                            zb[idx] = iz
+                            fo = idx * 3
+                            fb[fo] = tex[o]
+                            fb[fo + 1] = tex[o + 1]
+                            fb[fo + 2] = tex[o + 2]
+                    w0 += A0; w1 += A1; w2 += A2
+                w0r += B0; w1r += B1; w2r += B2
+
+        def raster_poly_tex_turb(cam, rec):
+            # near-clip + project + fan, like raster_poly_tex, into warped tris
+            tw, th, tex = rec[0], rec[1], rec[2]
+            out = []
+            A = cam[-1]; da = A[2] - NEAR
+            for B in cam:
+                db = B[2] - NEAR
+                if da >= 0.0:
+                    out.append(A)
+                if (da >= 0.0) != (db >= 0.0):
+                    t = da / (da - db)
+                    out.append((A[0] + (B[0] - A[0]) * t,
+                                A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t,
+                                A[3] + (B[3] - A[3]) * t,
+                                A[4] + (B[4] - A[4]) * t))
+                A, da = B, db
+            n = len(out)
+            if n < 3:
+                return
+            sx = []; sy = []; sz = []; su = []; sv = []
+            for cx, cy, cz, u, v in out:
+                iz = 1.0 / cz
+                sx.append(hw + cx * focal * iz)
+                sy.append(hh - cy * focal * iz)
+                sz.append(iz)
+                su.append(u * iz)
+                sv.append(v * iz)
+            for k in range(1, n - 1):
+                raster_tri_tex_turb(sx[0], sy[0], sz[0], su[0], sv[0],
+                                    sx[k], sy[k], sz[k], su[k], sv[k],
+                                    sx[k + 1], sy[k + 1], sz[k + 1],
+                                    su[k + 1], sv[k + 1], tw, th, tex)
+
+        def emit_face(fi, pts, rec):
+            # dispatch a world/brush face to the right sampler: warped liquid,
+            # scrolled sky, or the plain lightmapped path.
+            if face_turb[fi]:
+                raster_poly_tex_turb(pts, rec)
+            elif face_sky[fi]:
+                raster_poly_tex([(p[0], p[1], p[2], p[3] + sky_off, p[4])
+                                 for p in pts], rec, face_lm[fi])
+            else:
+                raster_poly_tex(pts, rec, face_lm[fi])
+
         def raster_alias(mdl, verts, org, ang):
             # rotate model verts into world, transform to camera, flat-shade each
             # triangle by its world normal (matches render_shaded's emit_alias).
@@ -1518,7 +1708,7 @@ class Renderer:
                         cam.append((c[0], c[1], c[2],
                                     vx * s0 + vy * s1 + vz * s2 + s3,
                                     vx * t0 + vy * t1 + vz * t2 + t3))
-                    raster_poly_tex(cam, rec, face_lm[fi])
+                    emit_face(fi, cam, rec)
                 else:
                     r, g, b = face_color_rgb[fi]
                     raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
@@ -1557,7 +1747,7 @@ class Renderer:
                                         dx * fx + dy * fy + dz * fz,
                                         vx * s0 + vy * s1 + vz * s2 + s3,
                                         vx * t0 + vy * t1 + vz * t2 + t3))
-                        raster_poly_tex(pts, rec, face_lm[fi])
+                        emit_face(fi, pts, rec)
                     else:
                         pts = []
                         for vi in face_verts[fi]:

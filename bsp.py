@@ -46,8 +46,10 @@ class Bsp:
         self.edges = [e for e in _S_EDGE.iter_unpack(lump(EDGES))]
         self.surfedges = [s[0] for s in _S_SURFEDGE.iter_unpack(lump(SURFEDGES))]
 
-        # faces: keep (planenum, side, firstedge, numedges, texinfo)
-        self.faces = [(f[0], f[1], f[2], f[3], f[4])
+        # faces: (planenum, side, firstedge, numedges, texinfo, lightofs, styles).
+        # lightofs is a byte offset into the LIGHTING lump (-1 = no lightmap);
+        # styles[4] selects up to four light styles stacked at that offset.
+        self.faces = [(f[0], f[1], f[2], f[3], f[4], f[9], (f[5], f[6], f[7], f[8]))
                       for f in _S_FACE.iter_unpack(lump(FACES))]
 
         # texinfo: (miptex index, flags, s_vec[4], t_vec[4]). The s/t vectors map
@@ -73,6 +75,7 @@ class Bsp:
                       for l in _S_LEAF.iter_unpack(lump(LEAFS))]
         self.marksurfaces = [m[0] for m in _S_MARK.iter_unpack(lump(MARKSURFACES))]
         self.visdata = lump(VISIBILITY)
+        self.lightdata = lump(LIGHTING)        # 8-bit luxels, indexed by lightofs
 
         # models: model 0 is the world. keep headnode[0] + face range + bounds.
         self.models = []

@@ -28,6 +28,12 @@ MIN_POLY_PX2 = 16.0        # drop polygons smaller than this area (Tk fill cost)
 ZBUF_SCALE = 4
 ZBUF_BG = (40, 40, 56)     # flat colour where nothing is drawn (no sky render)
 
+# lightmap luxels are 0..255; Quake brightens them with overbright bits we don't
+# emulate, so a gain keeps lit areas from looking muddy. DEFAULT_LIGHT is what an
+# unlit surface / off-map alias model gets so it stays visible.
+LIGHT_GAIN = 1.6
+DEFAULT_LIGHT = 180
+
 
 def angle_vectors(yaw_deg, pitch_deg):
     yaw = math.radians(yaw_deg)
@@ -103,7 +109,7 @@ class PickupModel:
         self.edges = []                 # (p0, p1) local-space, for wireframe mode
         ff, nf = m0["firstface"], m0["numfaces"]
         for fi in range(ff, ff + nf):
-            planenum, side, firstedge, numedges, ti = bsp.faces[fi]
+            planenum, side, firstedge, numedges, ti, _lofs, _styles = bsp.faces[fi]
             verts = []
             for k in range(numedges):
                 se = bsp.surfedges[firstedge + k]
@@ -151,7 +157,7 @@ class Renderer:
         self.face_edges = []
         self.face_verts = []
         self.face_plane = []
-        for planenum, side, firstedge, numedges, texinfo in bsp.faces:
+        for planenum, side, firstedge, numedges, texinfo, _lofs, _styles in bsp.faces:
             eidx = []
             vidx = []
             for k in range(numedges):
@@ -220,6 +226,14 @@ class Renderer:
                     rec = (w, h, rgb, texinfo[ti][2], texinfo[ti][3])
             self.face_tex.append(rec)
 
+        # per-face lightmaps from the LIGHTING lump (baked static light). Each
+        # entry: (lmw, lmh, smin, tmin, luxels, has_real). For surfaces with a
+        # lightmap the luxels come from the BSP (one per 16 texels, all active
+        # styles summed and gain-boosted). Faces with no lightmap (sky, liquids)
+        # get a 1x1 map holding their directional shade, so the rasteriser always
+        # samples a lightmap and never branches per pixel.
+        self.face_lm = self._build_lightmaps()
+
         # per-frame staleness markers (avoid clearing big arrays every frame)
         self.frame = 0
         self.face_frame = [0] * nfaces
@@ -287,6 +301,104 @@ class Renderer:
                 o += 3
             out.append((w, h, rgb))
         return out
+
+    def _build_lightmaps(self):
+        """Per-face baked lightmap from the LIGHTING lump. Returns a list of
+        (lmw, lmh, smin, tmin, luxels, has_real): real lightmaps have one luxel
+        per 16 texels (all active styles summed, gain-applied); faces without one
+        get a 1x1 map holding their directional shade so sampling never branches.
+        smin/tmin are the surface's texture-space mins (Quake's CalcSurfaceExtents)."""
+        bsp = self.bsp
+        light = bsp.lightdata
+        texinfo = bsp.texinfo
+        vertexes = bsp.vertexes
+        face_verts = self.face_verts
+        out = []
+        for fi in range(len(bsp.faces)):
+            lightofs = bsp.faces[fi][5]
+            styles = bsp.faces[fi][6]
+            ti = bsp.faces[fi][4]
+            rec = None
+            if lightofs >= 0 and light and 0 <= ti < len(texinfo):
+                s0, s1, s2, s3 = texinfo[ti][2]
+                t0, t1, t2, t3 = texinfo[ti][3]
+                smin = tmin = 1e30
+                smax = tmax = -1e30
+                for vi in face_verts[fi]:
+                    vx, vy, vz = vertexes[vi]
+                    s = vx * s0 + vy * s1 + vz * s2 + s3
+                    t = vx * t0 + vy * t1 + vz * t2 + t3
+                    if s < smin: smin = s
+                    if s > smax: smax = s
+                    if t < tmin: tmin = t
+                    if t > tmax: tmax = t
+                bsmin = math.floor(smin / 16); bsmax = math.ceil(smax / 16)
+                btmin = math.floor(tmin / 16); btmax = math.ceil(tmax / 16)
+                lmw = int(bsmax - bsmin) + 1
+                lmh = int(btmax - btmin) + 1
+                n = lmw * lmh
+                nstyles = sum(1 for st in styles if st != 255) or 1
+                if n > 0 and lightofs + n * nstyles <= len(light):
+                    acc = [0] * n
+                    for sidx in range(nstyles):
+                        base = lightofs + sidx * n
+                        for i in range(n):
+                            acc[i] += light[base + i]
+                    lux = bytearray(n)
+                    for i in range(n):
+                        v = int(acc[i] * LIGHT_GAIN)
+                        lux[i] = v if v < 255 else 255
+                    rec = (lmw, lmh, bsmin * 16.0, btmin * 16.0, bytes(lux), True)
+            if rec is None:
+                rec = (1, 1, 0.0, 0.0, bytes([min(255, self.face_shade[fi])]), False)
+            out.append(rec)
+        return out
+
+    def light_point(self, p):
+        """Baked light at world point p: trace straight down to the nearest lit
+        surface and read its lightmap (Quake's RecursiveLightPoint). Used to light
+        whole alias models by their surroundings. 0..255, DEFAULT_LIGHT if none."""
+        if not self.bsp.lightdata:
+            return DEFAULT_LIGHT
+        r = self._recursive_light(self.headnode, p,
+                                  (p[0], p[1], p[2] - 2048.0))
+        return r if r >= 0 else DEFAULT_LIGHT
+
+    def _recursive_light(self, node, start, end):
+        if node < 0:
+            return -1                              # ray reached a leaf, no hit
+        bsp = self.bsp
+        planenum, children, ff, nf = bsp.nodes[node]
+        (nx, ny, nz), dist, _ = bsp.planes[planenum]
+        front = start[0] * nx + start[1] * ny + start[2] * nz - dist
+        back = end[0] * nx + end[1] * ny + end[2] * nz - dist
+        side = front < 0
+        if (back < 0) == side:                     # both ends same side: descend it
+            return self._recursive_light(children[1] if side else children[0],
+                                         start, end)
+        frac = front / (front - back)
+        mid = (start[0] + (end[0] - start[0]) * frac,
+               start[1] + (end[1] - start[1]) * frac,
+               start[2] + (end[2] - start[2]) * frac)
+        r = self._recursive_light(children[1] if side else children[0], start, mid)
+        if r >= 0:                                 # hit nearer surface on the way
+            return r
+        texinfo = bsp.texinfo
+        for fi in range(ff, ff + nf):
+            rec = self.face_lm[fi]
+            if not rec[5]:                         # no real lightmap on this face
+                continue
+            ti = bsp.faces[fi][4]
+            s0, s1, s2, s3 = texinfo[ti][2]
+            t0, t1, t2, t3 = texinfo[ti][3]
+            s = mid[0] * s0 + mid[1] * s1 + mid[2] * s2 + s3
+            t = mid[0] * t0 + mid[1] * t1 + mid[2] * t2 + t3
+            lmw, lmh, smin, tmin, lux, _ = rec
+            ds = s - smin; dt = t - tmin
+            if ds < 0 or dt < 0 or ds > (lmw - 1) * 16 or dt > (lmh - 1) * 16:
+                continue
+            return lux[(int(dt) >> 4) * lmw + (int(ds) >> 4)]
+        return self._recursive_light(children[0] if side else children[1], mid, end)
 
     def _update_focal(self):
         self.focal = (self.width / 2) / math.tan(math.radians(self.fov) / 2)
@@ -982,7 +1094,7 @@ class Renderer:
         face_plane = self.face_plane
         face_color_rgb = self.face_color_rgb
         face_tex = self.face_tex
-        face_shade = self.face_shade
+        face_lm = self.face_lm
         face_frame = self.face_frame
         vert_frame = self.vert_frame
         vcache = self.vcache
@@ -1100,10 +1212,12 @@ class Renderer:
                            sx[k + 1], sy[k + 1], sz[k + 1], r, g, b)
 
         def raster_tri_tex(ax, ay, az, au, av, bx, by, bz, bu, bv,
-                           cx, cy, cz, cu, cv, tw, th, tex, sh):
+                           cx, cy, cz, cu, cv, tw, th, tex,
+                           lmw, lmh, lsmin, ltmin, lux):
             # textured z-buffered triangle. Vertices carry (x, y, invz, u*invz,
             # v*invz); invz/u*invz/v*invz interpolate linearly in screen space,
             # so per pixel u,v = (interp)/invz recovers perspective-correct texels.
+            # The texel is then modulated by the lightmap luxel covering it.
             x0 = ax if ax < bx else bx
             if cx < x0: x0 = cx
             x1 = ax if ax > bx else bx
@@ -1150,9 +1264,16 @@ class Renderer:
                         idx = row + x
                         if iz > zb[idx]:
                             z = 1.0 / iz
-                            tx = int((w0 * ua + w1 * ub + w2 * uc) * z) % tw
-                            ty = int((w0 * va + w1 * vb + w2 * vc) * z) % th
-                            o = (ty * tw + tx) * 3
+                            u = (w0 * ua + w1 * ub + w2 * uc) * z
+                            v = (w0 * va + w1 * vb + w2 * vc) * z
+                            lc = int((u - lsmin) * 0.0625)
+                            if lc < 0: lc = 0
+                            elif lc >= lmw: lc = lmw - 1
+                            lr = int((v - ltmin) * 0.0625)
+                            if lr < 0: lr = 0
+                            elif lr >= lmh: lr = lmh - 1
+                            sh = lux[lr * lmw + lc]      # lightmap luxel 0..255
+                            o = (int(v) % th * tw + int(u) % tw) * 3
                             zb[idx] = iz
                             fo = idx * 3
                             fb[fo] = (tex[o] * sh) >> 8
@@ -1161,10 +1282,12 @@ class Renderer:
                     w0 += A0; w1 += A1; w2 += A2
                 w0r += B0; w1r += B1; w2r += B2
 
-        def raster_poly_tex(cam, rec, sh):
+        def raster_poly_tex(cam, rec, lm):
             # cam: list of (cx, cy, cz, u, v). Near-clip (z >= NEAR) interpolating
-            # u,v too, project, fan-triangulate into textured triangles.
+            # u,v too, project, fan-triangulate into textured triangles. lm is the
+            # face's lightmap (lmw, lmh, smin, tmin, luxels) sampled per pixel.
             tw, th, tex = rec[0], rec[1], rec[2]
+            lmw, lmh, lsmin, ltmin, lux = lm[0], lm[1], lm[2], lm[3], lm[4]
             out = []
             A = cam[-1]; da = A[2] - NEAR
             for B in cam:
@@ -1194,7 +1317,7 @@ class Renderer:
                 raster_tri_tex(sx[0], sy[0], sz[0], su[0], sv[0],
                                sx[k], sy[k], sz[k], su[k], sv[k],
                                sx[k + 1], sy[k + 1], sz[k + 1], su[k + 1], sv[k + 1],
-                               tw, th, tex, sh)
+                               tw, th, tex, lmw, lmh, lsmin, ltmin, lux)
 
         def raster_alias(mdl, verts, org, ang):
             # rotate model verts into world, transform to camera, flat-shade each
@@ -1233,10 +1356,11 @@ class Renderer:
                 raster_poly([cam[a], cam[b], cam[c]], r, g, bl)
 
         def raster_alias_tex(mdl, verts, org, ang):
-            # textured alias model: same transform/shade as raster_alias, but each
-            # triangle is texture-mapped from the skin via its per-corner texcoords
-            # (mdl.tri_st) instead of filled with the average skin colour.
+            # textured alias model: skin-mapped per triangle, lit by the baked
+            # light sampled at the model's origin (so a monster in a dark room is
+            # dark) modulated by each triangle's facing.
             rec = mdl.skin_rgb                       # (skinw, skinh, rgb_bytes)
+            wl = self.light_point(org)               # 0..255 ambient from the world
             ox_e, oy_e, oz_e = org
             afwd, arr, aup = model_axes(ang)
             afx, afy, afz = afwd
@@ -1264,14 +1388,16 @@ class Renderer:
                 ny = uz1 * vx1 - ux1 * vz1
                 nz = ux1 * vy1 - uy1 * vx1
                 nl = math.sqrt(nx * nx + ny * ny + nz * nz)
-                shf = 0.55 + 0.45 * abs((nx * lx + ny * ly + nz * lz) / nl) if nl else 0.7
-                shi = int(shf * 256)
-                if shi > 256:
-                    shi = 256
+                shf = 0.6 + 0.4 * abs((nx * lx + ny * ly + nz * lz) / nl) if nl else 0.8
+                shi = int(wl * shf)                  # world light * facing
+                if shi > 255:
+                    shi = 255
                 ca, cb, cc = cam[a], cam[b], cam[c]
+                # a 1x1 lightmap carries the per-triangle light into raster_poly_tex
+                lm = (1, 1, 0.0, 0.0, bytes((shi,)))
                 raster_poly_tex([(ca[0], ca[1], ca[2], s0, t0),
                                  (cb[0], cb[1], cb[2], s1, t1),
-                                 (cc[0], cc[1], cc[2], s2, t2)], rec, shi)
+                                 (cc[0], cc[1], cc[2], s2, t2)], rec, lm)
 
         # world (model 0): PVS-visible leaves' faces, backface-culled
         for li in visible_leaves:
@@ -1295,7 +1421,7 @@ class Renderer:
                         cam.append((c[0], c[1], c[2],
                                     vx * s0 + vy * s1 + vz * s2 + s3,
                                     vx * t0 + vy * t1 + vz * t2 + t3))
-                    raster_poly_tex(cam, rec, face_shade[fi])
+                    raster_poly_tex(cam, rec, face_lm[fi])
                 else:
                     r, g, b = face_color_rgb[fi]
                     raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
@@ -1334,7 +1460,7 @@ class Renderer:
                                         dx * fx + dy * fy + dz * fz,
                                         vx * s0 + vy * s1 + vz * s2 + s3,
                                         vx * t0 + vy * t1 + vz * t2 + t3))
-                        raster_poly_tex(pts, rec, face_shade[fi])
+                        raster_poly_tex(pts, rec, face_lm[fi])
                     else:
                         pts = []
                         for vi in face_verts[fi]:

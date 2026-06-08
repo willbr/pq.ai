@@ -11,10 +11,9 @@ VM, and renders three ways (wireframe / flat-shaded / textured software rasteris
 
 `README.md` is the authoritative architecture doc — read it first. The per-module
 docstrings (top of each `.py`) are detailed and current; trust them over this file for
-specifics. A couple of older docstrings lag the code: the `sv.py` header says physics
-builtins are "stubbed" (they are now wired to `physics.py`), and comments mentioning a
-"10 Hz" server tick are stale — `main.py` runs the server **every frame** with the real
-frametime (clamped to 100ms); only `nextthink`-gated thinks fire at ~10 Hz.
+specifics. Note one easy-to-misread detail: `main.py` runs the QC server **every frame**
+with the real frametime (clamped to 100ms), not on a fixed clock; only `nextthink`-gated
+thinks (monster AI, etc.) fire at their own ~10 Hz cadence.
 
 ## Commands
 
@@ -29,21 +28,31 @@ whose `if __name__ == "__main__"` block calls its test functions and prints `OK`
 success (functions are named `test_*`, so a pytest run would also work if installed).
 
 Requires Python 3.13+ and the shareware data at `quake-shareware/id1/pak0.pak` (id
-copyright — gitignored, download separately). Sound is **macOS-only** (CoreAudio via
-ctypes); it degrades gracefully elsewhere.
+copyright — gitignored, download separately). Sound currently has only a **macOS**
+backend (`mac.py`, CoreAudio via ctypes); on other platforms it runs muted until a
+Windows/Linux backend is added.
 
 ## Architecture (data flow)
 
+The platform-agnostic engine is the **`quake/`** package; the tkinter UI (`main.py`) and
+the platform audio backend (`mac.py`) live at the repo root, **outside** the package, so
+the engine imports nothing OS- or UI-specific. Inside `quake/` use **relative imports**
+(`from .pr_exec import VM`) — including lazy in-function and `__main__` imports; code
+outside the package uses absolute (`from quake.sv import Server`). Run a module self-test
+with `python3 -m quake.bsp` (not `python3 quake/bsp.py`, which breaks relative imports).
+
 ```
-pak.py        PAK archive reader → raw lumps by name
-  ├─ bsp.py   BSP v29 → flat tuple arrays (faces, planes, leaves, PVS, lightmaps, entity string)
-  ├─ mdl.py   .mdl alias models → per-frame float vertex sets
-  └─ progs.py progs.dat → bytecode statements, defs, globals buffer (eval_t union)
-pr_exec.py    QuakeC VM: opcode loop + flat integer-indexed edict store
-sv.py         server: ~70 builtins (pr_cmds.c port), entity spawning, think/movetype loop, player, combat
-physics.py    clip-hull tracing + player/monster movement; backs the collision builtins
-render.py     three renderers (wireframe, flat, textured z-buffer); lightmaps, light styles, animated surfaces
-main.py       tkinter app: input → player edict, game loop, framebuffer scaling
+quake/pak.py        PAK archive reader → raw lumps by name
+  ├─ quake/bsp.py   BSP v29 → flat tuple arrays (faces, planes, leaves, PVS, lightmaps, entity string)
+  ├─ quake/mdl.py   .mdl alias models → per-frame float vertex sets
+  └─ quake/progs.py progs.dat → bytecode statements, defs, globals buffer (eval_t union)
+quake/pr_exec.py    QuakeC VM: opcode loop + flat integer-indexed edict store
+quake/sv.py         server: ~70 builtins (pr_cmds.c port), entity spawning, think/movetype loop, player, combat
+quake/physics.py    clip-hull tracing + player/monster movement; backs the collision builtins
+quake/render.py     three renderers (wireframe, flat, textured z-buffer); lightmaps, light styles, animated surfaces
+quake/snd.py        platform-agnostic mixer: decode/spatialize/mix(nframes)→int16 stereo; no OS calls
+mac.py              macOS audio backend (outside pkg): CoreAudio AudioQueue pulling from the mixer
+main.py             tkinter app (outside pkg): input → player edict, game loop, framebuffer; picks audio backend by sys.platform
 ```
 
 ### Things that will bite you if you don't know them

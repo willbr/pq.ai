@@ -55,6 +55,11 @@ class Physics:
         self.nodes = bsp.nodes
         self.leafs = bsp.leafs
         self.headnode0 = bsp.models[0]["headnode"]
+        # solid brush-model entities (doors, func_walls, gates) to clip against,
+        # as (hull-1 headnode, origin). Refreshed each frame by the host; their
+        # submodel hulls were compiled at the closed position, so we trace in the
+        # entity's local space (start/end minus its current origin).
+        self.brush_entities = []
 
     # ---- hull queries ----
     def hull_point_contents(self, num, p):
@@ -70,7 +75,7 @@ class Physics:
     def point_contents(self, p):
         return self.hull_point_contents(self.headnode, p)
 
-    def _recurse(self, num, p1f, p2f, p1, p2, tr):
+    def _recurse(self, num, p1f, p2f, p1, p2, tr, top):
         if num < 0:
             if num != CONTENTS_SOLID:
                 tr.allsolid = False
@@ -88,9 +93,9 @@ class Physics:
             t2 = _dot(n, p2) - dist
 
         if t1 >= 0 and t2 >= 0:
-            return self._recurse(children[0], p1f, p2f, p1, p2, tr)
+            return self._recurse(children[0], p1f, p2f, p1, p2, tr, top)
         if t1 < 0 and t2 < 0:
-            return self._recurse(children[1], p1f, p2f, p1, p2, tr)
+            return self._recurse(children[1], p1f, p2f, p1, p2, tr, top)
 
         # the line crosses the plane; split at the crosspoint (nudged to near side)
         if t1 < 0:
@@ -103,11 +108,11 @@ class Physics:
         mid = [p1[i] + frac * (p2[i] - p1[i]) for i in range(3)]
         side = 1 if t1 < 0 else 0
 
-        if not self._recurse(children[side], p1f, midf, p1, mid, tr):
+        if not self._recurse(children[side], p1f, midf, p1, mid, tr, top):
             return False
 
         if self.hull_point_contents(children[side ^ 1], mid) != CONTENTS_SOLID:
-            return self._recurse(children[side ^ 1], midf, p2f, mid, p2, tr)
+            return self._recurse(children[side ^ 1], midf, p2f, mid, p2, tr, top)
 
         if tr.allsolid:
             return False        # never got out of the solid area
@@ -119,7 +124,7 @@ class Physics:
             tr.plane_normal = (-n[0], -n[1], -n[2])
 
         # back the midpoint out of any residual solid (float imprecision)
-        while self.hull_point_contents(self.headnode, mid) == CONTENTS_SOLID:
+        while self.hull_point_contents(top, mid) == CONTENTS_SOLID:
             frac -= 0.1
             if frac < 0:
                 tr.fraction = midf
@@ -134,7 +139,38 @@ class Physics:
 
     def trace(self, start, end):
         tr = Trace(end)
-        self._recurse(self.headnode, 0.0, 1.0, start, end, tr)
+        self._recurse(self.headnode, 0.0, 1.0, start, end, tr, self.headnode)
+        return tr
+
+    def trace_hull(self, headnode, start, end):
+        """Trace start->end through an arbitrary clip hull (a brush submodel)."""
+        tr = Trace(end)
+        self._recurse(headnode, 0.0, 1.0, start, end, tr, headnode)
+        return tr
+
+    def set_brush_entities(self, ents):
+        """ents: list of (hull-1 headnode, origin) for solid brush models."""
+        self.brush_entities = ents
+
+    def move(self, start, end):
+        """SV_Move: trace start->end against the world and every solid brush
+        entity, returning the earliest impact. This is what makes func_walls,
+        doors and gates block the player."""
+        tr = self.trace(list(start), list(end))
+        if not self.brush_entities:
+            return tr
+        for headnode, org in self.brush_entities:
+            ls = [start[i] - org[i] for i in range(3)]
+            le = [end[i] - org[i] for i in range(3)]
+            t2 = self.trace_hull(headnode, ls, le)
+            if t2.startsolid:
+                tr.startsolid = True
+            if t2.allsolid:
+                tr.allsolid = True
+            if t2.fraction < tr.fraction:
+                tr.fraction = t2.fraction
+                tr.endpos = [t2.endpos[i] + org[i] for i in range(3)]
+                tr.plane_normal = t2.plane_normal
         return tr
 
     # ---- hull 0 (point) trace for hitscan ----
@@ -199,7 +235,7 @@ class Physics:
     def push(self, origin, push):
         """Move origin by push vector with collision; return the trace."""
         end = [origin[i] + push[i] for i in range(3)]
-        tr = self.trace(origin, end)
+        tr = self.move(origin, end)
         origin[:] = tr.endpos
         return tr
 
@@ -229,7 +265,7 @@ class Physics:
             if not (vel[0] or vel[1] or vel[2]):
                 break
             end = [origin[i] + time_left * vel[i] for i in range(3)]
-            tr = self.trace(origin, end)
+            tr = self.move(origin, end)
 
             if tr.allsolid:
                 vel[:] = (0.0, 0.0, 0.0)

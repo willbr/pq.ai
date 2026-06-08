@@ -326,6 +326,9 @@ class App:
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
 
+        # refresh the brush models the player collides with (doors, func_walls,
+        # gates), at the positions last set by the QC tick, then move
+        self.phys.set_brush_entities(self.sv.solid_brush_models())
         self._move(dt)
 
         # push the camera into the client edict so monsters target the player and

@@ -404,6 +404,29 @@ class Server:
                 out.append((int(mp[mi][1:]), vm.fget_v(num, forg), vm.fget_v(num, fang)))
         return out
 
+    def solid_brush_models(self):
+        """Solid brush-model entities (func_wall, doors, gates) as
+        (hull-1 headnode, origin), for clipping the player's movement. Skips the
+        world, non-solid brushes (open episode gates) and non-inline models. This
+        is what makes func_walls and closed doors block you."""
+        vm = self.vm
+        if self.bsp is None:
+            return []
+        mp = self.model_precache
+        fmi, forg, fsol = self.f["modelindex"], self.f["origin"], self.f["solid"]
+        models = self.bsp.models
+        out = []
+        for num in range(1, vm.num_edicts):
+            if vm.free[num] or int(vm.fget_f(num, fsol)) != SOLID_BSP:
+                continue
+            mi = vm.fget_i(num, fmi)
+            if not (0 < mi < len(mp)) or mp[mi][:1] != "*":
+                continue
+            sub = int(mp[mi][1:])
+            if sub < len(models):
+                out.append((models[sub]["headnodes"][1], vm.fget_v(num, forg)))
+        return out
+
     def alias_entities(self):
         """Live .mdl entities as (modelindex, origin, angles, frame), for the
         renderer (monsters, items). Skips brush '*N' and non-.mdl models."""

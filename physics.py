@@ -245,6 +245,15 @@ class Physics:
         self._recurse0(self.headnode0, 0.0, 1.0, list(start), list(end), tr)
         return tr
 
+    def trace_hull0(self, headnode, start, end):
+        """Trace a point (bullet) through an arbitrary hull-0 submodel -- a solid
+        brush model's visual BSP nodes. Used for hitscan against doors and
+        func_walls; callers pass start/end in the entity's local space (minus its
+        current origin), since the submodel hull was compiled at the closed pose."""
+        tr = Trace(end)
+        self._recurse0(headnode, 0.0, 1.0, list(start), list(end), tr)
+        return tr
+
     def push(self, origin, push):
         """Move origin by push vector with collision; return the trace."""
         end = [origin[i] + push[i] for i in range(3)]

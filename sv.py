@@ -1074,8 +1074,13 @@ class Server:
 
     def _move_trace(self, start, end, nomonsters, ignore):
         """Line trace through the world point hull, then clipped against solid
-        bbox entities (monsters/the player). Returns
-        (fraction, endpos, plane_normal, allsolid, startsolid, hit_ent)."""
+        brush-model entities (doors, secret doors, func_walls) and -- unless
+        nomonsters -- monster/player bboxes. Returns
+        (fraction, endpos, plane_normal, allsolid, startsolid, hit_ent).
+
+        Clipping bullets against SOLID_BSP submodels is what lets you shoot a
+        shootable/secret door open: the trace returns the door as trace_ent so the
+        QC applies T_Damage and fires its th_pain (fd_secret_use)."""
         if self.phys is not None:
             wtr = self.phys.trace_point(start, end)
             frac = wtr.fraction
@@ -1084,24 +1089,45 @@ class Server:
         else:
             frac, pnorm, allsolid, startsolid = 1.0, (0.0, 0.0, 0.0), False, False
         hit_ent = 0
-        if not nomonsters:
-            vm = self.vm
-            fsol, famn, famx = self.f["solid"], self.f["absmin"], self.f["absmax"]
-            fown = self.f["owner"]
-            # a moving missile never clips against its owner or its owner's other
-            # missiles (so a rocket doesn't blow up on the player who fired it)
-            ig_owner = vm.fget_i(ignore, fown) if ignore else 0
-            for e in range(1, vm.num_edicts):
-                if e == ignore or e == ig_owner or vm.free[e]:
+        vm = self.vm
+        fsol, famn, famx = self.f["solid"], self.f["absmin"], self.f["absmax"]
+        fown, fmi, forg = self.f["owner"], self.f["modelindex"], self.f["origin"]
+        mp = self.model_precache
+        models = self.bsp.models if self.bsp is not None else None
+        # a moving missile never clips against its owner or its owner's other
+        # missiles (so a rocket doesn't blow up on the player who fired it)
+        ig_owner = vm.fget_i(ignore, fown) if ignore else 0
+        for e in range(1, vm.num_edicts):
+            if e == ignore or e == ig_owner or vm.free[e]:
+                continue
+            if ignore and vm.fget_i(e, fown) == ignore:
+                continue
+            sol = vm.fget_f(e, fsol)
+            if sol == SOLID_BSP and self.phys is not None and models is not None:
+                # clip the bullet against this solid brush model's point hull,
+                # in the entity's local space (its hull was compiled when closed)
+                mi = vm.fget_i(e, fmi)
+                if not (0 < mi < len(mp)) or mp[mi][:1] != "*":
                     continue
-                if ignore and vm.fget_i(e, fown) == ignore:
+                sub = int(mp[mi][1:])
+                if sub >= len(models):
                     continue
-                sol = vm.fget_f(e, fsol)
-                if sol != SOLID_SLIDEBOX and sol != 2:   # SLIDEBOX or BBOX only
-                    continue
-                hit = _ray_box(start, end, vm.fget_v(e, famn), vm.fget_v(e, famx))
-                if hit is not None and hit[0] < frac:
-                    frac, pnorm, hit_ent = hit[0], hit[1], e
+                org = vm.fget_v(e, forg)
+                ls = [start[i] - org[i] for i in range(3)]
+                le = [end[i] - org[i] for i in range(3)]
+                t2 = self.phys.trace_hull0(models[sub]["headnode"], ls, le)
+                if t2.fraction < frac:
+                    frac = t2.fraction
+                    pnorm = t2.plane_normal or (0.0, 0.0, 0.0)
+                    hit_ent = e
+                continue
+            if nomonsters:
+                continue
+            if sol != SOLID_SLIDEBOX and sol != 2:   # SLIDEBOX or BBOX only
+                continue
+            hit = _ray_box(start, end, vm.fget_v(e, famn), vm.fget_v(e, famx))
+            if hit is not None and hit[0] < frac:
+                frac, pnorm, hit_ent = hit[0], hit[1], e
         endpos = [start[i] + (end[i] - start[i]) * frac for i in range(3)]
         return frac, endpos, pnorm, allsolid, startsolid, hit_ent
 

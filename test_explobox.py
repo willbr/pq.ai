@@ -10,11 +10,11 @@ brush model's size from the model bounds; reading them from the pak fixes it.
 Driven against the real shareware progs on e1m1.
 """
 
-from pak import Pak
-from bsp import Bsp
-from progs import Progs, OFS_PARM0, OFS_PARM_STRIDE
-from sv import Server
-from physics import Physics
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.progs import Progs, OFS_PARM0, OFS_PARM_STRIDE
+from quake.sv import Server
+from quake.physics import Physics
 
 PAK = "quake-shareware/id1/pak0.pak"
 

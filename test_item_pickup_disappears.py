@@ -13,7 +13,7 @@ empty, even when `modelindex` still points at the old model. Otherwise a
 health/ammo box (bsp) or weapon/key/powerup (mdl) stays visible after pickup.
 """
 
-from sv import Server
+from quake.sv import Server
 
 
 class FakeVM:

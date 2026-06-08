@@ -16,9 +16,9 @@ Driven against the real shareware textures on e1m1.
 """
 
 import math
-from pak import Pak
-from bsp import Bsp
-from render import Renderer
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.render import Renderer
 
 PAK = "quake-shareware/id1/pak0.pak"
 

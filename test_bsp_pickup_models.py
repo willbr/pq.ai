@@ -13,10 +13,10 @@ Covers three seams of the fix:
      of the camera.
 """
 
-from pak import Pak
-from bsp import Bsp
-from render import Renderer, PickupModel
-from sv import Server, SOLID_BSP
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.render import Renderer, PickupModel
+from quake.sv import Server, SOLID_BSP
 
 PAK = "quake-shareware/id1/pak0.pak"
 

@@ -19,7 +19,7 @@ restores. All copies go through the int view so any bit pattern (float/ent/func/
 string ref) survives intact.
 """
 
-from progs import OFS_RETURN, OFS_PARM0, OFS_PARM_STRIDE
+from .progs import OFS_RETURN, OFS_PARM0, OFS_PARM_STRIDE
 
 # opcodes, in pr_comp.h enum order
 (OP_DONE, OP_MUL_F, OP_MUL_V, OP_MUL_FV, OP_MUL_VF, OP_DIV_F, OP_ADD_F, OP_ADD_V,
@@ -353,7 +353,7 @@ class VM:
 # ==========================================================================
 if __name__ == "__main__":
     from array import array
-    from progs import Function
+    from .progs import Function
 
     class FakeProgs:
         """Minimal duck-typed stand-in: just what VM.execute touches."""

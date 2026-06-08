@@ -19,15 +19,15 @@ import sys
 import time
 import tkinter as tk
 
-from pak import Pak
-from bsp import Bsp
-from render import (Renderer, PickupModel, angle_vectors, ZBUF_SCALE,
-                    lightstyle_values)
-from physics import Physics, VIEW_HEIGHT, MAXSPEED
-from progs import Progs
-from sv import Server, anglemod
-from mdl import Mdl, EF_ROTATE
-import snd
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.render import (Renderer, PickupModel, angle_vectors, ZBUF_SCALE,
+                          lightstyle_values)
+from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED
+from quake.progs import Progs
+from quake.sv import Server, anglemod
+from quake.mdl import Mdl, EF_ROTATE
+from quake import snd
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
 # Quake runs the server once per rendered frame with the real frametime (clamped
@@ -108,7 +108,15 @@ class App:
         self.palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2])
                         for i in range(256)]
         self._missing_warned = set()   # maps not in the pak we've already flagged
-        self.mixer = snd.Mixer()       # CoreAudio sound mixer (muted if unavailable)
+        # The mixer is platform-agnostic; a backend (chosen by OS) opens the
+        # output stream and flips mixer.ok on. Kept on self so its ctypes
+        # callback trampoline isn't garbage-collected. No backend -> muted.
+        self.mixer = snd.Mixer()
+        self.audio = None
+        if sys.platform == "darwin":
+            import mac
+            self.audio = mac.CoreAudioBackend(self.mixer)
+        # else: runs muted until a windows/linux backend is added
 
         # window
         self.root = tk.Tk()

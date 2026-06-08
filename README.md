@@ -37,18 +37,24 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 
 ## How it works
 
+The platform-agnostic engine lives in the **`quake/`** package; the tkinter UI and
+the platform audio backend stay outside it (at the repo root), so the engine itself
+imports nothing OS- or UI-specific. Sound is split the same way: the mixer is portable;
+only the output stream is platform code.
+
 | File | Role |
 |------|------|
-| `pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
-| `bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing; texinfo, embedded miptex decode, and the lightmap (`LIGHTING`) lump |
-| `mdl.py` | Alias model (`.mdl`) reader: header, skins, triangles, and per-frame vertex sets (single + time-animated groups), decoded to float positions |
-| `progs.py` | `progs.dat` (QuakeC v6) loader: statements, defs, functions, a growable string heap, and the globals block as one buffer with aliased float/int views (the `eval_t` union) |
-| `pr_exec.py` | The QuakeC bytecode interpreter — `PR_ExecuteProgram`'s opcode loop, call frames, and a flat integer-indexed edict store (all edict fields in one buffer, edict *N* at *N·edict_size*) |
-| `sv.py` | Server layer: the ~70 builtins (`pr_cmds.c`), entity spawning from the BSP string (`ED_LoadFromFile`), the think/movetype frame loop, the player edict, weapon firing, combat/damage, monster movement, and the death→respawn path. Runs id's **actual compiled game code** |
-| `physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove`. Backs the collision builtins (`traceline`, `walkmove`, `movetogoal`, `droptofloor`) |
-| `render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (perspective-correct texels modulated by baked lightmaps, per-pixel 1/z depth). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
-| `snd.py` | Software sound mixer feeding macOS CoreAudio through ctypes — a port of `S_PaintChannels` / `SND_Spatialize`. One 16-bit stereo AudioQueue stream; distance attenuation + stereo pan re-panned every frame as you move |
-| `main.py` | tkinter app: mouse-look, movement, input → the player edict, the game loop, the reused Canvas line/poly pools and scaled framebuffer; ticks the QC server at a fixed 10 Hz |
+| `quake/pak.py` | PAK archive reader (`"PACK"` header + 64-byte directory entries) |
+| `quake/bsp.py` | BSP v29 parser → flat arrays of tuples; entity/spawn parsing; texinfo, embedded miptex decode, and the lightmap (`LIGHTING`) lump |
+| `quake/mdl.py` | Alias model (`.mdl`) reader: header, skins, triangles, and per-frame vertex sets (single + time-animated groups), decoded to float positions |
+| `quake/progs.py` | `progs.dat` (QuakeC v6) loader: statements, defs, functions, a growable string heap, and the globals block as one buffer with aliased float/int views (the `eval_t` union) |
+| `quake/pr_exec.py` | The QuakeC bytecode interpreter — `PR_ExecuteProgram`'s opcode loop, call frames, and a flat integer-indexed edict store (all edict fields in one buffer, edict *N* at *N·edict_size*) |
+| `quake/sv.py` | Server layer: the ~70 builtins (`pr_cmds.c`), entity spawning from the BSP string (`ED_LoadFromFile`), the think/movetype frame loop, the player edict, weapon firing, combat/damage, monster movement, and the death→respawn path. Runs id's **actual compiled game code** |
+| `quake/physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove`. Backs the collision builtins (`traceline`, `walkmove`, `movetogoal`, `droptofloor`) |
+| `quake/render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (perspective-correct texels modulated by baked lightmaps, per-pixel 1/z depth). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
+| `quake/snd.py` | Platform-agnostic software sound mixer — a port of `S_PaintChannels` / `SND_Spatialize`. Decodes/resamples once at precache; `mix(nframes)` sums active voices to 16-bit stereo with distance attenuation + stereo pan re-panned every frame. Touches no OS — a backend pulls from it |
+| `mac.py` | macOS audio backend (outside the package): one 16-bit stereo CoreAudio `AudioQueue` stream via ctypes, whose realtime callback pulls samples from the mixer. Windows/Linux get sibling backends; `main.py` picks one by `sys.platform` |
+| `main.py` | tkinter app (outside the package): mouse-look, movement, input → the player edict, the game loop, the reused Canvas line/poly pools and scaled framebuffer; runs the QC server once per rendered frame |
 
 **Three ways to draw, three sets of tradeoffs.** Wireframe needs **no framebuffer** —
 edges go straight to `Canvas.create_line` (C-implemented), and PVS + backface culling

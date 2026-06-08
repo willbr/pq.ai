@@ -184,7 +184,7 @@ def _avg_color(img, palette):
 
 if __name__ == "__main__":
     import sys
-    from pak import Pak
+    from .pak import Pak
     pak = Pak("quake-shareware/id1/pak0.pak")
     pal = pak.read("gfx/palette.lmp")
     palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]) for i in range(256)]

@@ -19,11 +19,11 @@ after the body settles requests a level restart.
 Driven against the real shareware progs on e1m1.
 """
 
-from pak import Pak
-from bsp import Bsp
-from progs import Progs
-from sv import Server, MOVETYPE_TOSS, DEAD_DEAD
-from physics import Physics
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.progs import Progs
+from quake.sv import Server, MOVETYPE_TOSS, DEAD_DEAD
+from quake.physics import Physics
 
 PAK = "quake-shareware/id1/pak0.pak"
 

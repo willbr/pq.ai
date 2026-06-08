@@ -13,10 +13,10 @@ to the shell count, so after spawn the player has shotgun + axe, 25 shells, and
 no other weapons or ammo.
 """
 
-from pak import Pak
-from bsp import Bsp
-from progs import Progs
-from sv import (Server, IT_SHOTGUN, IT_AXE, IT_SHELLS, IT_SUPER_SHOTGUN,
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.progs import Progs
+from quake.sv import (Server, IT_SHOTGUN, IT_AXE, IT_SHELLS, IT_SUPER_SHOTGUN,
                 IT_NAILGUN, IT_GRENADE_LAUNCHER, IT_ROCKET_LAUNCHER,
                 IT_LIGHTNING, IT_NAILS, IT_ROCKETS, IT_CELLS)
 

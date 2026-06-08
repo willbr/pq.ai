@@ -18,11 +18,11 @@ Driven against the real shareware progs on e1m1.
 """
 
 import math
-from pak import Pak
-from bsp import Bsp
-from progs import Progs
-from sv import Server
-from physics import Physics
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.progs import Progs
+from quake.sv import Server
+from quake.physics import Physics
 
 PAK = "quake-shareware/id1/pak0.pak"
 

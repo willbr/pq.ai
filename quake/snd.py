@@ -1,13 +1,15 @@
-"""Software sound mixer feeding macOS CoreAudio directly through ctypes.
+"""Software sound mixer: decode, spatialize, and mix Quake voices. Pure stdlib.
 
-No third-party deps: ctypes calls the system AudioToolbox framework, and the
-mixing is plain Python -- a port of Quake's S_PaintChannels / SND_Spatialize.
+Platform-agnostic -- this never touches the OS. It produces interleaved 16-bit
+stereo samples on demand via Mixer.mix(nframes); a platform audio backend
+(mac.py's CoreAudioBackend, and later windows/linux siblings) owns the OS output
+stream and pulls from the mixer on its realtime callback, so the engine stays
+portable.
 
-One AudioQueue output stream (16-bit stereo, 11025 Hz) runs a callback on a
-CoreAudio thread. The callback sums every active channel's samples into the
-buffer. Sounds are decoded + resampled to the output rate ONCE at precache, so
-the realtime path just steps one source sample per output sample and adds --
-no resampling, no allocation per sound.
+The mix is a port of Quake's S_PaintChannels / SND_Spatialize. Sounds are decoded
++ resampled to the output rate ONCE at precache, so the realtime path just steps
+one source sample per output sample and adds -- no resampling, no allocation per
+sound.
 
     sound(entity, channel, sample, vol, atten)   -> start_sound(...)
     ambientsound(pos, sample, vol, atten)         -> start_sound(loop=True)
@@ -16,58 +18,22 @@ Spatialization matches Quake: distance attenuation fades a sound to silence at
 1000/atten units, and the stereo split comes from the dot of the listener's
 right-vector with the direction to the source. Channels store their world
 origin so set_listener() can re-pan them every frame as the player moves.
+
+A backend marks the mixer live by setting `ok = True` once its stream is open;
+until then (or with no backend, e.g. an unsupported platform) the mixer is muted
+and every entry point is a cheap no-op, so the game runs silently anywhere.
 """
 
-import ctypes
 import io
 import threading
 import wave
 from array import array
-from ctypes import (CFUNCTYPE, POINTER, Structure, byref, c_double, c_int32,
-                    c_uint32, c_void_p)
 
 OUT_RATE = 11025           # output sample rate (matches 188/190 Quake sounds)
 OUT_CHANNELS = 2           # stereo
-FRAMES_PER_BUF = 512       # ~46 ms per buffer
-NUM_BUFFERS = 3            # queued ahead; underrun-safe, ~70 ms typical latency
 MAX_CHANNELS = 16          # simultaneous voices before we steal the oldest
 NOMINAL_CLIP = 1000.0      # units at which atten=1 sounds reach silence
 MASTER_VOL = 0.7           # overall gain
-
-# ---- CoreAudio (AudioToolbox) types via ctypes -----------------------------
-_FMT_LPCM = 0x6C70636D                     # 'lpcm'  (FourCharCode, big-endian)
-_FLAG_SIGNED_INT = 0x4                      # kAudioFormatFlagIsSignedInteger
-_FLAG_PACKED = 0x8                          # kAudioFormatFlagIsPacked
-
-
-class _ASBD(Structure):                     # AudioStreamBasicDescription
-    _fields_ = [("mSampleRate", c_double),
-                ("mFormatID", c_uint32),
-                ("mFormatFlags", c_uint32),
-                ("mBytesPerPacket", c_uint32),
-                ("mFramesPerPacket", c_uint32),
-                ("mBytesPerFrame", c_uint32),
-                ("mChannelsPerFrame", c_uint32),
-                ("mBitsPerChannel", c_uint32),
-                ("mReserved", c_uint32)]
-
-
-class _AQBuffer(Structure):                 # AudioQueueBuffer
-    _fields_ = [("mAudioDataBytesCapacity", c_uint32),
-                ("mAudioData", c_void_p),
-                ("mAudioDataByteSize", c_uint32),
-                ("mUserData", c_void_p),
-                ("mPacketDescriptionCapacity", c_uint32),
-                ("mPacketDescriptions", c_void_p),
-                ("mPacketDescriptionCount", c_uint32)]
-
-
-_AQBufferRef = POINTER(_AQBuffer)
-_AQRef = c_void_p
-# void cb(void *user, AudioQueueRef aq, AudioQueueBufferRef buf)
-_CALLBACK = CFUNCTYPE(None, c_void_p, _AQRef, _AQBufferRef)
-
-_LIB = "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox"
 
 
 def _decode_wav(data):
@@ -115,65 +81,17 @@ class Mixer:
         self.lock = threading.Lock()
         self.listener = (0.0, 0.0, 0.0)
         self.right = (0.0, 1.0, 0.0)
-        self.ok = False
+        self.ok = False                     # a backend flips this on once live
+
+    # ---- the realtime mix (called by the platform backend) ------------------
+    def mix(self, nframes):
+        """Sum every active voice into `nframes` of interleaved int16 stereo.
+
+        Returns an array('h') of length nframes * OUT_CHANNELS, clamped to int16.
+        Runs on the backend's audio thread; never raises -- on any error it
+        returns silence so a backend's stream can't be killed by the mixer."""
         try:
-            self._open_stream()
-            self.ok = True
-        except Exception as e:              # no audio device / headless -> silent
-            print(f"snd: audio unavailable ({e}); running muted")
-
-    # ---- CoreAudio setup ----------------------------------------------------
-    def _open_stream(self):
-        at = ctypes.CDLL(_LIB)
-        at.AudioQueueNewOutput.argtypes = [POINTER(_ASBD), _CALLBACK, c_void_p,
-                                           c_void_p, c_void_p, c_uint32,
-                                           POINTER(_AQRef)]
-        at.AudioQueueNewOutput.restype = c_int32
-        at.AudioQueueAllocateBuffer.argtypes = [_AQRef, c_uint32,
-                                                POINTER(_AQBufferRef)]
-        at.AudioQueueAllocateBuffer.restype = c_int32
-        at.AudioQueueEnqueueBuffer.argtypes = [_AQRef, _AQBufferRef, c_uint32,
-                                               c_void_p]
-        at.AudioQueueEnqueueBuffer.restype = c_int32
-        at.AudioQueueStart.argtypes = [_AQRef, c_void_p]
-        at.AudioQueueStart.restype = c_int32
-        at.AudioQueueStop.argtypes = [_AQRef, c_uint32]
-        at.AudioQueueStop.restype = c_int32
-        self._at = at
-
-        fmt = _ASBD(mSampleRate=float(OUT_RATE), mFormatID=_FMT_LPCM,
-                    mFormatFlags=_FLAG_SIGNED_INT | _FLAG_PACKED,
-                    mBytesPerPacket=2 * OUT_CHANNELS, mFramesPerPacket=1,
-                    mBytesPerFrame=2 * OUT_CHANNELS,
-                    mChannelsPerFrame=OUT_CHANNELS, mBitsPerChannel=16,
-                    mReserved=0)
-        self._fmt = fmt                     # keep alive
-
-        self._cb = _CALLBACK(self._fill)    # keep the trampoline alive (vital)
-        self._queue = _AQRef()
-        # NULL run loop + mode => callback fires on an internal CoreAudio thread
-        err = at.AudioQueueNewOutput(byref(fmt), self._cb, None, None, None, 0,
-                                     byref(self._queue))
-        if err:
-            raise OSError(f"AudioQueueNewOutput failed ({err})")
-
-        bufsize = FRAMES_PER_BUF * OUT_CHANNELS * 2
-        self._buffers = []
-        for _ in range(NUM_BUFFERS):
-            ref = _AQBufferRef()
-            err = at.AudioQueueAllocateBuffer(self._queue, bufsize, byref(ref))
-            if err:
-                raise OSError(f"AudioQueueAllocateBuffer failed ({err})")
-            self._buffers.append(ref)
-            self._fill(None, self._queue, ref)   # prime with silence + enqueue
-        err = at.AudioQueueStart(self._queue, None)
-        if err:
-            raise OSError(f"AudioQueueStart failed ({err})")
-
-    # ---- the realtime mix callback -----------------------------------------
-    def _fill(self, user, aq, buf):
-        try:
-            F = FRAMES_PER_BUF
+            F = nframes
             out = [0] * (F * OUT_CHANNELS)
             with self.lock:
                 for ch in self.channels:
@@ -201,19 +119,17 @@ class Mixer:
                     ch["pos"] = pos
                 if any(c.get("done") for c in self.channels):
                     self.channels = [c for c in self.channels if not c.get("done")]
-            # clamp to int16 and pack
+            # clamp to int16
             for k in range(F * OUT_CHANNELS):
                 x = out[k]
                 if x > 32767:
                     out[k] = 32767
                 elif x < -32768:
                     out[k] = -32768
-            data = array("h", out).tobytes()
-            ctypes.memmove(buf.contents.mAudioData, data, len(data))
-            buf.contents.mAudioDataByteSize = len(data)
-            self._at.AudioQueueEnqueueBuffer(aq, buf, 0, None)
+            return array("h", out)
         except Exception as e:              # never let an exception kill audio
             print(f"snd: mix error {e}")
+            return array("h", bytes(nframes * OUT_CHANNELS * 2))
 
     # ---- public API ---------------------------------------------------------
     def precache(self, name, data):
@@ -267,14 +183,6 @@ class Mixer:
         with self.lock:
             self.channels = []
 
-    def shutdown(self):
-        if not self.ok:
-            return
-        try:
-            self._at.AudioQueueStop(self._queue, 1)
-        except Exception:
-            pass
-
     # ---- spatialization (Quake SND_Spatialize) ------------------------------
     def _spatialize(self, origin, vol, atten):
         lx, ly, lz = self.listener
@@ -297,31 +205,30 @@ class Mixer:
         return lv, rv
 
 
-# ---- standalone self-test: python3 snd.py [sound/path.wav ...] --------------
+# ---- standalone self-test (silent: no audio device) ------------------------
+# Decodes a few pak sounds and mixes one buffer, exercising everything but the
+# OS stream. For an AUDIBLE test, run a platform backend instead (python3 mac.py).
+#   python3 -m quake.snd [sound/path.wav ...]
 if __name__ == "__main__":
     import sys
-    import time
-    from pak import Pak
+    from quake.pak import Pak
 
     pak = Pak("quake-shareware/id1/pak0.pak")
     names = sys.argv[1:] or ["sound/weapons/rocket1.wav",
-                             "sound/weapons/sgun1.wav",
-                             "sound/player/death1.wav"]
+                             "sound/weapons/sgun1.wav"]
     m = Mixer()
+    m.ok = True                             # enable decode/mix without a backend
     for n in names:
         if n in pak.files:
             m.precache(n, pak.read(n))
             print("precached", n, len(m.sounds.get(n, [])), "samples")
         else:
             print("not in pak:", n)
-    # pan each one across the stereo field as it plays
     m.set_listener((0, 0, 0), (0, 1, 0))
-    for i, n in enumerate(names):
+    for n in names:
         if n in m.sounds:
-            side = -800 if i % 2 == 0 else 800
-            print("playing", n, "(left)" if side < 0 else "(right)")
-            m.start_sound(1, 0, n, 1.0, 1.0, (0.0, float(side), 0.0))
-            time.sleep(1.2)
-    time.sleep(0.5)
-    m.shutdown()
+            m.start_sound(1, 0, n, 1.0, 1.0, (0.0, 800.0, 0.0))
+    buf = m.mix(512)
+    peak = max((abs(x) for x in buf), default=0)
+    print(f"mixed {len(buf)} samples, peak {peak}")
     print("done")

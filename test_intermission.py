@@ -20,10 +20,10 @@ This exercises the server seams the host relies on:
   - Server.run_intermission(button) advances to nextmap after the exit time.
 """
 
-from pak import Pak
-from bsp import Bsp
-from progs import Progs
-from sv import Server, SOLID_NOT, MOVETYPE_NONE
+from quake.pak import Pak
+from quake.bsp import Bsp
+from quake.progs import Progs
+from quake.sv import Server, SOLID_NOT, MOVETYPE_NONE
 
 PAK = "quake-shareware/id1/pak0.pak"
 

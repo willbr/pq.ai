@@ -152,7 +152,7 @@ class Progs:
 
 if __name__ == "__main__":
     import sys
-    from pak import Pak
+    from .pak import Pak
     pak = Pak(sys.argv[1] if len(sys.argv) > 1 else "quake-shareware/id1/pak0.pak")
     p = Progs(pak.read("progs.dat"))
     print("progs.dat:")

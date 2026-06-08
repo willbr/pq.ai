@@ -14,8 +14,8 @@ submodel positioned as a SOLID_BSP edict, then fires a ray through it and assert
 the trace reports the door edict as the hit entity.
 """
 
-from physics import Physics
-from sv import Server, SOLID_BSP
+from quake.physics import Physics
+from quake.sv import Server, SOLID_BSP
 
 CONTENTS_EMPTY = -1
 CONTENTS_SOLID = -2

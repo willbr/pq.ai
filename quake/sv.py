@@ -12,7 +12,7 @@ trace against the real clip hulls -- not just animate in place via OP_STATE chai
 import math
 import random
 
-from pr_exec import VM, PR_RunError
+from .pr_exec import VM, PR_RunError
 
 # spawnflags for skill / deathmatch inhibition (defs.qc)
 SPAWNFLAG_NOT_EASY = 256
@@ -994,7 +994,7 @@ class Server:
         bounds = None
         if self.pak is not None and name in self.pak.files:
             try:
-                from bsp import Bsp
+                from .bsp import Bsp
                 bm = Bsp(self.pak.read(name)).models[0]
                 bounds = (tuple(bm["mins"]), tuple(bm["maxs"]))
             except Exception as ex:
@@ -1254,7 +1254,7 @@ class Server:
             name = mp[modelindex]
             if name.endswith(".mdl") and name in self.pak.files:
                 try:
-                    from mdl import (model_flags, EF_ROCKET, EF_GRENADE, EF_GIB,
+                    from .mdl import (model_flags, EF_ROCKET, EF_GRENADE, EF_GIB,
                                      EF_TRACER, EF_ZOMGIB, EF_TRACER2, EF_TRACER3)
                     fl = model_flags(self.pak.read(name))
                     # priority matches CL_RelinkEntities' if/else ladder
@@ -1963,9 +1963,9 @@ def _atof(s):
 
 if __name__ == "__main__":
     import sys
-    from pak import Pak
-    from progs import Progs
-    from bsp import Bsp
+    from .pak import Pak
+    from .progs import Progs
+    from .bsp import Bsp
 
     pak = Pak("quake-shareware/id1/pak0.pak")
     mapname = "maps/" + (sys.argv[1] if len(sys.argv) > 1 else "e1m1") + ".bsp"

@@ -14,10 +14,10 @@ Covers two seams of the fix:
      rotation, and leaves non-rotating models untouched.
 """
 
-from pak import Pak
-from mdl import Mdl, EF_ROTATE
+from quake.pak import Pak
+from quake.mdl import Mdl, EF_ROTATE
 from main import spin_yaw
-from sv import anglemod
+from quake.sv import anglemod
 
 PAK = "quake-shareware/id1/pak0.pak"
 

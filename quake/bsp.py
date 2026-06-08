@@ -159,7 +159,7 @@ class Bsp:
 
 if __name__ == "__main__":
     import sys
-    from pak import Pak
+    from .pak import Pak
     pak = Pak("quake-shareware/id1/pak0.pak")
     name = sys.argv[1] if len(sys.argv) > 1 else "maps/e1m1.bsp"
     b = Bsp(pak.read(name))

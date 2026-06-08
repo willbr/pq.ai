@@ -335,6 +335,19 @@ class Server:
         ntf, thf, mtf = self.f["nextthink"], self.f["think"], self.f["movetype"]
         forg, fang = self.f["origin"], self.f["angles"]
         fvel, favel, fgrav = self.f["velocity"], self.f["avelocity"], self.f["gravity"]
+
+        # Pusher movers (doors/plats/buttons, MOVETYPE_PUSH) run on their own clock
+        # 'ltime'. QC schedules every move and wait as self.ltime + delay, so if
+        # ltime never advances those deadlines sit in the past and SUB_CalcMoveDone
+        # fires instantly -- the door snaps open and slams shut in two frames.
+        # Keep ltime in lockstep with server time so the deadlines land ahead.
+        fltime = self.pr.field_by_name.get("ltime")
+        fltime = fltime[1] if fltime is not None else None
+        if fltime is not None:
+            for num in range(1, vm.num_edicts):
+                if not vm.free[num] and int(vm.fget_f(num, mtf)) == MOVETYPE_PUSH:
+                    vm.fset_f(num, fltime, self.time)
+
         for num in range(1, vm.num_edicts):
             if vm.free[num]:
                 continue
@@ -378,10 +391,19 @@ class Server:
         self.gset_f("time", self.time)
 
     def touch_triggers(self, ent):
-        """Fire the touch function of every SOLID_TRIGGER whose volume overlaps
-        ent's bounding box (SV_TouchLinks, restricted to one mover -- the player).
-        This is what makes trigger_teleport / trigger_changelevel / trigger_multiple
-        fire: the engine never called touch before, so triggers did nothing."""
+        """Fire the touch functions ent is in contact with (SV_TouchLinks /
+        SV_Impact, restricted to one mover -- the player):
+
+        * SOLID_TRIGGER volumes, by exact box overlap -- trigger_teleport /
+          trigger_changelevel / trigger_multiple and the rider-trigger plats spawn.
+        * SOLID_BSP movers carrying a touch (doors, buttons), by contact -- the
+          engine has no SV_Impact, so this is what makes walking into a door fire
+          door_touch and pressing a button fire button_touch. These movers block
+          the player, so the player box stops flush against them; pad it slightly
+          so 'pressed against' still counts as a touch.
+
+        Without this, the engine never called touch on solids and doors/buttons
+        did nothing."""
         if not ent:
             return
         vm, f = self.vm, self.f
@@ -394,18 +416,26 @@ class Server:
         amn, amx, fsol = f["absmin"], f["absmax"], f["solid"]
         e0x, e0y, e0z = vm.fget_v(ent, amn)
         e1x, e1y, e1z = vm.fget_v(ent, amx)
+        PAD = 1.0                       # contact slop for solid movers
+        p0x, p0y, p0z = e0x - PAD, e0y - PAD, e0z - PAD
+        p1x, p1y, p1z = e1x + PAD, e1y + PAD, e1z + PAD
         for e in range(1, vm.num_edicts):
             if e == ent or vm.free[e]:
-                continue
-            if vm.fget_f(e, fsol) != SOLID_TRIGGER:
                 continue
             tf = vm.fget_i(e, toff)
             if not tf:
                 continue
+            sol = int(vm.fget_f(e, fsol))
+            if sol == SOLID_TRIGGER:
+                b0x, b0y, b0z, b1x, b1y, b1z = e0x, e0y, e0z, e1x, e1y, e1z
+            elif sol == SOLID_BSP:      # door/button brush (world/func_wall have no touch)
+                b0x, b0y, b0z, b1x, b1y, b1z = p0x, p0y, p0z, p1x, p1y, p1z
+            else:
+                continue
             tmn = vm.fget_v(e, amn)
             tmx = vm.fget_v(e, amx)
-            if (e0x > tmx[0] or e1x < tmn[0] or e0y > tmx[1] or e1y < tmn[1] or
-                    e0z > tmx[2] or e1z < tmn[2]):
+            if (b0x > tmx[0] or b1x < tmn[0] or b0y > tmx[1] or b1y < tmn[1] or
+                    b0z > tmx[2] or b1z < tmn[2]):
                 continue
             self.gset_i("self", e)
             self.gset_i("other", ent)

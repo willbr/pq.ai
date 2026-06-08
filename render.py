@@ -33,6 +33,9 @@ ZBUF_BG = (40, 40, 56)     # flat colour where nothing is drawn (no sky render)
 # unlit surface / off-map alias model gets so it stays visible.
 LIGHT_GAIN = 1.6
 DEFAULT_LIGHT = 180
+# flat-shaded mode has no texture detail, so it leans on the texture average
+# being brightened more (it used a 2.2 directional gain before lighting existed).
+FLAT_LIGHT_GAIN = 2.2 / 255.0
 
 
 def lightstyle_values(styles, t):
@@ -196,8 +199,8 @@ class Renderer:
         # lightmaps, which we don't apply) -> boost so the scene is visible.
         gain = 2.2
         texinfo = bsp.texinfo
-        self.face_color = []
-        self.face_color_rgb = []        # (r,g,b) ints, for the z-buffer rasteriser
+        self.face_color_rgb = []        # (r,g,b) ints, for the z-buffer flat fill
+        self.face_base_rgb = []         # raw texture average, lit per-face by flat mode
         for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
             inten = (0.50 + 0.50 * max(0.0, nx * lx + ny * ly + nz * lz)) * gain
             base = None
@@ -208,10 +211,10 @@ class Renderer:
                     base = tex_rgb[mt]
             if base is None:
                 base = (140.0, 140.0, 140.0)
+            self.face_base_rgb.append(base)
             r = min(255, int(base[0] * inten))
             g = min(255, int(base[1] * inten))
             b = min(255, int(base[2] * inten))
-            self.face_color.append(f"#{r:02x}{g:02x}{b:02x}")
             self.face_color_rgb.append((r, g, b))
 
         # full-resolution textures decoded to packed RGB bytes (once), for the
@@ -330,9 +333,13 @@ class Renderer:
         texinfo = bsp.texinfo
         vertexes = bsp.vertexes
         face_verts = self.face_verts
+        nfaces = len(bsp.faces)
         self.face_lm = []
         self.face_lm_styles = []        # per face: [(style_num, block_bytes), ...] | None
         self.style_faces = {}           # style_num -> [face indices using it]
+        self.face_light_avg = [0.0] * nfaces   # mean luxel per face, for flat shading
+        self.face_lit_hex = [None] * nfaces    # cached lit flat colour
+        self.face_lit_L = [-1.0] * nfaces      # the light level that cache was built at
         for fi in range(len(bsp.faces)):
             lightofs = bsp.faces[fi][5]
             styles = bsp.faces[fi][6]
@@ -366,8 +373,9 @@ class Renderer:
                         self.style_faces.setdefault(st, []).append(fi)
                     rec = (lmw, lmh, bsmin * 16.0, btmin * 16.0, bytearray(n), True)
             if rec is None:
-                rec = (1, 1, 0.0, 0.0, bytearray((min(255, self.face_shade[fi]),)),
-                       False)
+                shade = min(255, self.face_shade[fi])
+                rec = (1, 1, 0.0, 0.0, bytearray((shade,)), False)
+                self.face_light_avg[fi] = shade        # constant; never recombined
             self.face_lm.append(rec)
             self.face_lm_styles.append(blocks)
 
@@ -393,9 +401,13 @@ class Renderer:
                 for i in range(n):
                     acc[i] += block[i] * sv
         g = LIGHT_GAIN / 256.0
+        tot = 0
         for i in range(n):
             v = int(acc[i] * g)
-            buf[i] = v if v < 255 else 255
+            if v > 255: v = 255
+            buf[i] = v
+            tot += v
+        self.face_light_avg[fi] = tot / n        # flat mode reads this per face
 
     def _animate_lightmaps(self, styleval):
         """Rebuild only the faces whose light-style brightness changed this frame
@@ -785,14 +797,19 @@ class Renderer:
         return segments, leaf
 
     def render_shaded(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
-                      view_model=None, bsp_ents=None):
+                      view_model=None, bsp_ents=None, lightstyles=None):
         """Flat-shaded polygons, back-to-front (painter's algorithm via the BSP).
+        Each world/brush face is filled with its texture average modulated by the
+        baked lightmap's mean level for that face (so it darkens in shadow and
+        animates with light styles), instead of a static directional shade.
         Returns (polys, leaf) where each poly is (flat_xy_coords, fill_color).
         alias_ents: (mdl, model_space_verts, origin, angles) for .mdl entities.
         bsp_ents: (PickupModel, origin, angles) for external .bsp pickups."""
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
+        if lightstyles is not None:                   # animate flickering lights
+            self._animate_lightmaps(lightstyles)
         forward, right, up = angle_vectors(yaw, pitch)
         ox, oy, oz = origin
         fx, fy, fz = forward
@@ -806,7 +823,10 @@ class Renderer:
         planes = bsp.planes
         face_verts = self.face_verts
         face_plane = self.face_plane
-        face_color = self.face_color
+        face_base_rgb = self.face_base_rgb
+        face_light_avg = self.face_light_avg
+        face_lit_hex = self.face_lit_hex
+        face_lit_L = self.face_lit_L
         face_frame = self.face_frame
         vert_frame = self.vert_frame
         vcache = self.vcache
@@ -814,6 +834,23 @@ class Renderer:
         hw = self.width / 2
         hh = self.height / 2
         backface = self.backface
+
+        def lit_color(fi):
+            # texture average * the face's mean baked light. Cached per face and
+            # only recomputed when that light level changes (i.e. on animation).
+            L = face_light_avg[fi]
+            if L == face_lit_L[fi]:
+                return face_lit_hex[fi]
+            br, bg, bb = face_base_rgb[fi]
+            f = L * FLAT_LIGHT_GAIN
+            r = int(br * f); g = int(bg * f); b = int(bb * f)
+            if r > 255: r = 255
+            if g > 255: g = 255
+            if b > 255: b = 255
+            hexc = f"#{r:02x}{g:02x}{b:02x}"
+            face_lit_hex[fi] = hexc
+            face_lit_L[fi] = L
+            return hexc
         # camera-space clip planes (a*x+b*y+c*z+d >= 0 is inside): near + the
         # four view-frustum sides, so clipped polygons project on-screen and Tk
         # never has to fill a huge off-screen area.
@@ -887,7 +924,7 @@ class Renderer:
             nx, ny, nz, dist = face_plane[fi]
             if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
                 return                                  # backface
-            project_poly([transform(vi) for vi in face_verts[fi]], face_color[fi])
+            project_poly([transform(vi) for vi in face_verts[fi]], lit_color(fi))
 
         # offset-aware face emit for a brush-model entity at (ofx, ofy, ofz)
         def emit_face_ofs(fi, ofx, ofy, ofz):
@@ -904,7 +941,7 @@ class Renderer:
                 pts.append((dx * rx + dy * ry + dz * rz,
                             dx * ux + dy * uy + dz * uz,
                             dx * fx + dy * fy + dz * fz))
-            project_poly(pts, face_color[fi])
+            project_poly(pts, lit_color(fi))
 
         def emit_alias(item):
             # alias (.mdl) entity: rotate model verts by angles, translate to the

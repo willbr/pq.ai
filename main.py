@@ -529,9 +529,10 @@ class App:
             self._draw_fb(fbdata)
             nprim = fbdata[1] * fbdata[2]
         elif self.flat:
+            styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
             polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
                                                   brush_ents, alias_ents, view_model,
-                                                  bsp_ents)
+                                                  bsp_ents, lightstyles=styles)
             self._draw_polys(polys)
             nprim = len(polys)
         else:

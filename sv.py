@@ -87,11 +87,6 @@ IT_NAILS = 512
 IT_ROCKETS = 1024
 IT_CELLS = 2048
 IT_AXE = 4096
-# every weapon + every ammo-type bit: a full single-player arsenal
-IT_ALL_WEAPONS = (IT_AXE | IT_SHOTGUN | IT_SUPER_SHOTGUN | IT_NAILGUN |
-                  IT_SUPER_NAILGUN | IT_GRENADE_LAUNCHER | IT_ROCKET_LAUNCHER |
-                  IT_LIGHTNING)
-IT_ALL_AMMO = IT_SHELLS | IT_NAILS | IT_ROCKETS | IT_CELLS
 _WEAPON_NAMES = {
     IT_AXE: "Axe", IT_SHOTGUN: "Shotgun", IT_SUPER_SHOTGUN: "Super Shotgun",
     IT_NAILGUN: "Nailgun", IT_SUPER_NAILGUN: "Super Nailgun",
@@ -1163,15 +1158,16 @@ class Server:
         vm.fset_f(e, f["solid"], float(SOLID_SLIDEBOX))
         vm.fset_f(e, f["movetype"], float(MOVETYPE_WALK))
         vm.fset_f(e, f["flags"], float(int(vm.fget_f(e, f["flags"])) | FL_CLIENT))
-        # full arsenal: every weapon owned with ammo, so all of them are usable
-        # and selectable (ImpulseCommands/W_ChangeWeapon gate on .items + ammo).
-        vm.fset_f(e, f["items"], float(IT_ALL_WEAPONS | IT_ALL_AMMO))
+        # Quake's default loadout (client.qc SetNewParms): just the Axe and
+        # Shotgun with 25 shells. W_SetCurrentAmmo below ORs in the IT_SHELLS
+        # active-ammo bit and sets currentammo from the shell count.
+        vm.fset_f(e, f["items"], float(IT_SHOTGUN | IT_AXE))
         vm.fset_f(e, f["weapon"], float(IT_SHOTGUN))
-        vm.fset_f(e, f["currentammo"], 100.0)
-        vm.fset_f(e, f["ammo_shells"], 100.0)
-        vm.fset_f(e, f["ammo_nails"], 200.0)
-        vm.fset_f(e, f["ammo_rockets"], 100.0)
-        vm.fset_f(e, f["ammo_cells"], 100.0)
+        vm.fset_f(e, f["currentammo"], 25.0)
+        vm.fset_f(e, f["ammo_shells"], 25.0)
+        vm.fset_f(e, f["ammo_nails"], 0.0)
+        vm.fset_f(e, f["ammo_rockets"], 0.0)
+        vm.fset_f(e, f["ammo_cells"], 0.0)
         vm.fset_v(e, f["view_ofs"], (0.0, 0.0, 22.0))
         self._set_minmax(e, (-16.0, -16.0, -24.0), (16.0, 16.0, 32.0))
         # let the real QC pick the view model: W_SetCurrentAmmo sets .weaponmodel

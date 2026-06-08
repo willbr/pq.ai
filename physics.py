@@ -161,10 +161,12 @@ class Physics:
         """ents: list of (hull-1 headnode, origin) for solid brush models."""
         self.brush_entities = ents
 
-    def move(self, start, end):
-        """SV_Move: trace start->end against the world and every solid brush
-        entity, returning the earliest impact. This is what makes func_walls,
-        doors and gates block the player."""
+    def move(self, start, end, record=True):
+        """SV_Move: trace start->end (hull 1) against the world and every solid
+        brush entity, returning the earliest impact. This is what makes
+        func_walls, doors and gates block the player. `record` adds the bumped
+        entities to self.touched (SV_Impact); monster moves pass record=False so
+        their probing traces don't fire touches meant for the player."""
         tr = self.trace(list(start), list(end))
         if not self.brush_entities:
             return tr
@@ -174,7 +176,8 @@ class Physics:
             t2 = self.trace_hull(headnode, ls, le)
             if t2.startsolid:
                 tr.startsolid = True
-                self.touched.add(ent)       # already overlapping it
+                if record:
+                    self.touched.add(ent)   # already overlapping it
             if t2.allsolid:
                 tr.allsolid = True
             if t2.fraction < tr.fraction:
@@ -182,7 +185,7 @@ class Physics:
                 tr.endpos = [t2.endpos[i] + org[i] for i in range(3)]
                 tr.plane_normal = t2.plane_normal
                 tr.ent = ent                # this entity blocked the move
-        if tr.ent is not None:
+        if record and tr.ent is not None:
             self.touched.add(tr.ent)        # SV_Impact: bumped while moving
         return tr
 

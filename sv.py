@@ -21,7 +21,13 @@ SPAWNFLAG_NOT_MEDIUM = 512
 SPAWNFLAG_NOT_HARD = 1024
 SPAWNFLAG_NOT_DEATHMATCH = 2048
 
+FL_FLY = 1
+FL_SWIM = 2
+FL_MONSTER = 32
 FL_ONGROUND = 512
+FL_PARTIALGROUND = 1024
+STEPSIZE = 18.0             # monsters step up/down ledges this tall (SV_movestep)
+DI_NODIR = -1.0            # SV_NewChaseDir: "no direction"
 SOLID_BSP = 4
 MOVETYPE_NONE = 0
 MOVETYPE_FLY = 5
@@ -32,6 +38,7 @@ MOVETYPE_FLYMISSILE = 9
 MOVETYPE_BOUNCE = 10
 SV_GRAVITY = 800.0          # sv_gravity default, scaled per-entity by .gravity
 CONTENTS_EMPTY = -1
+CONTENTS_SOLID = -2
 
 SVC_TEMPENTITY = 23         # broadcast effect message (gunshots, teleport fog, ...)
 # temp-entity type -> (palette colour, particle count). Point effects only; beam
@@ -64,7 +71,7 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "weapon", "weaponmodel", "weaponframe", "items", "impulse",
            "attack_finished", "currentammo", "ammo_shells", "ammo_nails",
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
-           "button0", "deadflag", "enemy", "owner", "touch")
+           "button0", "deadflag", "enemy", "owner", "touch", "goalentity")
 
 FL_CLIENT = 8
 SOLID_NOT = 0
@@ -926,7 +933,16 @@ class Server:
                 return
 
     def _pf_checkclient(self):
-        self.vm.ret_i(0)
+        """SV_CheckClient/PF_checkclient: return a client a monster might be able
+        to see, for FindTarget. Quake cycles through clients and gates on the
+        check's PVS; single-player has one client, so return the player if alive
+        (FindTarget still does its own range / line-of-sight / infront tests).
+        Returns the world (0) when there is no live player."""
+        e = self.player
+        if e and self.vm.fget_f(e, self.f["health"]) > 0:
+            self.vm.ret_i(e)
+        else:
+            self.vm.ret_i(0)
 
     # --- strings / printing ---
     def _varstring(self, first):
@@ -1339,21 +1355,282 @@ class Server:
         self.vm.ret_f(CONTENTS_EMPTY)
 
     def _pf_walkmove(self):
-        self.vm.ret_f(0.0)        # blocked: no real movement yet
+        """PF_walkmove(yaw, dist): try to step the monster `dist` units along
+        `yaw`. Returns whether the step succeeded. Used by the QC for melee
+        lunges, dodges and the spawn placement walk."""
+        vm, f = self.vm, self.f
+        e = vm.gi[self.g["self"]]
+        if self.phys is None:
+            vm.ret_f(0.0)            # no collision world -> can't step (test boot)
+            return
+        if not (int(vm.fget_f(e, f["flags"])) & (FL_ONGROUND | FL_FLY | FL_SWIM)):
+            vm.ret_f(0.0)
+            return
+        yaw = math.radians(vm.parm_f(0))
+        dist = vm.parm_f(1)
+        move = (math.cos(yaw) * dist, math.sin(yaw) * dist, 0.0)
+        # SV_movestep may run other progs (touch); save/restore self.
+        oldself = vm.gi[self.g["self"]]
+        ok = self._sv_movestep(e, move, relink=True)
+        self.gset_i("self", oldself)
+        vm.ret_f(1.0 if ok else 0.0)
 
     def _pf_droptofloor(self):
-        # leave the entity at its placed origin, mark it grounded
-        e = self.vm.gi[self.g["self"]]
-        fl = int(self.vm.fget_f(e, self.f["flags"])) | FL_ONGROUND
-        self.vm.fset_f(e, self.f["flags"], float(fl))
-        self.vm.fset_i(e, self.f["groundentity"], 0)
-        self.vm.ret_f(1.0)
+        """PF_droptofloor: drop the entity straight down (up to 256 units) onto
+        the floor and mark it standing. Monsters call this at spawn to settle
+        onto the ground; returns 0 (and the QC removes the monster) if it is
+        stuck in solid or floating with no floor below."""
+        vm, f = self.vm, self.f
+        e = vm.gi[self.g["self"]]
+        if self.phys is None:
+            # no collision world (headless/test boot): leave the entity at its
+            # placed origin and mark it grounded, as the old stub did
+            fl = int(vm.fget_f(e, f["flags"])) | FL_ONGROUND
+            vm.fset_f(e, f["flags"], float(fl))
+            vm.fset_i(e, f["groundentity"], 0)
+            vm.ret_f(1.0)
+            return
+        org = vm.fget_v(e, f["origin"])
+        end = (org[0], org[1], org[2] - 256.0)
+        tr = self._box_move(e, org, end)
+        if tr.fraction == 1.0 or tr.allsolid:
+            vm.ret_f(0.0)
+            return
+        vm.fset_v(e, f["origin"], tuple(tr.endpos))
+        self._link_abs(e)
+        fl = int(vm.fget_f(e, f["flags"])) | FL_ONGROUND
+        vm.fset_f(e, f["flags"], float(fl))
+        vm.fset_i(e, f["groundentity"], tr.ent if tr.ent is not None else 0)
+        vm.ret_f(1.0)
 
     def _pf_checkbottom(self):
-        self.vm.ret_f(1.0)
+        if self.phys is None:
+            self.vm.ret_f(1.0)
+            return
+        e = self.vm.gi[self.g["self"]]
+        self.vm.ret_f(1.0 if self._sv_check_bottom(e) else 0.0)
 
     def _pf_movetogoal(self):
-        pass
+        """SV_MoveToGoal(dist): the heart of monster locomotion. Step `dist`
+        toward .goalentity, re-deriving a path (SV_NewChaseDir) when the current
+        heading is blocked or at random, and stopping once close to the goal."""
+        vm, f = self.vm, self.f
+        if self.phys is None:
+            return
+        e = vm.gi[self.g["self"]]
+        goal = vm.fget_i(e, f["goalentity"])
+        dist = vm.parm_f(0)
+        if not (int(vm.fget_f(e, f["flags"])) & (FL_ONGROUND | FL_FLY | FL_SWIM)):
+            vm.ret_f(0.0)
+            return
+        # if the next step reaches the enemy, stop here
+        if vm.fget_i(e, f["enemy"]) != 0 and self._sv_close_enough(e, goal, dist):
+            return
+        oldself = vm.gi[self.g["self"]]
+        if (random.randint(0, 3) == 1
+                or not self._sv_step_direction(e, vm.fget_f(e, f["ideal_yaw"]), dist)):
+            self._sv_new_chase_dir(e, goal, dist)
+        self.gset_i("self", oldself)
+
+    # ---- SV_Move helpers for walkmonsters (sv_move.c) ----
+    def _box_move(self, ent, start, end):
+        """SV_Move for a walkmonster's bounding box (hull 1), clipped against the
+        world and solid brush models. Does not record player touches."""
+        return self.phys.move(list(start), list(end), record=False)
+
+    def _sv_movestep(self, ent, move, relink):
+        """SV_movestep: try to move `ent` by `move`, stepping up to STEPSIZE over
+        ledges and refusing moves that walk off an edge (CheckBottom). Returns
+        True on success, with the entity's origin advanced."""
+        vm, f = self.vm, self.f
+        org = vm.fget_v(ent, f["origin"])
+        flags = int(vm.fget_f(ent, f["flags"]))
+
+        if flags & (FL_SWIM | FL_FLY):
+            # flying/swimming: try with a little vertical chase, then flat
+            enemy = vm.fget_i(ent, f["enemy"])
+            for i in range(2):
+                neworg = [org[0] + move[0], org[1] + move[1], org[2] + move[2]]
+                if i == 0 and enemy != 0:
+                    eo = vm.fget_v(enemy, f["origin"])
+                    dz = org[2] - eo[2]
+                    if dz > 40:
+                        neworg[2] -= 8
+                    if dz < 30:
+                        neworg[2] += 8
+                tr = self._box_move(ent, org, neworg)
+                if tr.fraction == 1.0:
+                    if (flags & FL_SWIM) and \
+                            self.phys.point_contents_0(tr.endpos) == CONTENTS_EMPTY:
+                        return False        # swim monster left the water
+                    vm.fset_v(ent, f["origin"], tuple(tr.endpos))
+                    if relink:
+                        self._link_abs(ent)
+                    return True
+                if enemy == 0:
+                    break
+            return False
+
+        # walking: drop down from a step above the wished spot
+        neworg = [org[0] + move[0], org[1] + move[1], org[2] + move[2] + STEPSIZE]
+        end = [neworg[0], neworg[1], neworg[2] - STEPSIZE * 2.0]
+        tr = self._box_move(ent, neworg, end)
+        if tr.allsolid:
+            return False
+        if tr.startsolid:
+            neworg[2] -= STEPSIZE
+            tr = self._box_move(ent, neworg, end)
+            if tr.allsolid or tr.startsolid:
+                return False
+        if tr.fraction == 1.0:
+            # walked off a ledge into the air -- only ok if the floor was pulled
+            # out from under a standing monster (FL_PARTIALGROUND)
+            if flags & FL_PARTIALGROUND:
+                vm.fset_v(ent, f["origin"],
+                          (org[0] + move[0], org[1] + move[1], org[2] + move[2]))
+                if relink:
+                    self._link_abs(ent)
+                vm.fset_f(ent, f["flags"], float(flags & ~FL_ONGROUND))
+                return True
+            return False
+
+        vm.fset_v(ent, f["origin"], tuple(tr.endpos))
+        if not self._sv_check_bottom(ent):
+            if flags & FL_PARTIALGROUND:
+                if relink:
+                    self._link_abs(ent)
+                return True
+            vm.fset_v(ent, f["origin"], org)        # restore: no footing
+            return False
+
+        if flags & FL_PARTIALGROUND:
+            vm.fset_f(ent, f["flags"], float(flags & ~FL_PARTIALGROUND))
+        vm.fset_i(ent, f["groundentity"], tr.ent if tr.ent is not None else 0)
+        if relink:
+            self._link_abs(ent)
+        return True
+
+    def _sv_step_direction(self, ent, yaw, dist):
+        """SV_StepDirection: face `yaw`, then movestep that way. Backs the move
+        out if the turn didn't finish, so monsters round corners cleanly."""
+        vm, f = self.vm, self.f
+        vm.fset_f(ent, f["ideal_yaw"], yaw)
+        self.gset_i("self", ent)
+        self._pf_changeyaw_ent(ent)
+        ry = math.radians(yaw)
+        move = (math.cos(ry) * dist, math.sin(ry) * dist, 0.0)
+        oldorg = vm.fget_v(ent, f["origin"])
+        if self._sv_movestep(ent, move, relink=False):
+            cur = vm.fget_v(ent, f["angles"])[1]
+            delta = cur - vm.fget_f(ent, f["ideal_yaw"])
+            if delta > 45 and delta < 315:        # turned too little; don't step
+                vm.fset_v(ent, f["origin"], oldorg)
+            self._link_abs(ent)
+            return True
+        self._link_abs(ent)
+        return False
+
+    def _sv_new_chase_dir(self, actor, enemy, dist):
+        """SV_NewChaseDir: pick a fresh heading toward the goal when the straight
+        path is blocked -- try the two axis directions, then sweep all 8."""
+        vm, f = self.vm, self.f
+        olddir = anglemod(int(vm.fget_f(actor, f["ideal_yaw"]) / 45) * 45)
+        turnaround = anglemod(olddir - 180)
+        ao = vm.fget_v(actor, f["origin"])
+        eo = vm.fget_v(enemy, f["origin"]) if enemy != 0 else ao
+        deltax, deltay = eo[0] - ao[0], eo[1] - ao[1]
+        d1 = 0.0 if deltax > 10 else 180.0 if deltax < -10 else DI_NODIR
+        d2 = 270.0 if deltay < -10 else 90.0 if deltay > 10 else DI_NODIR
+
+        # straight diagonal toward the goal first
+        if d1 != DI_NODIR and d2 != DI_NODIR:
+            tdir = (45.0 if d2 == 90 else 315.0) if d1 == 0 else \
+                   (135.0 if d2 == 90 else 215.0)
+            if tdir != turnaround and self._sv_step_direction(actor, tdir, dist):
+                return
+
+        if random.randint(0, 1) or abs(deltay) > abs(deltax):
+            d1, d2 = d2, d1
+        if d1 != DI_NODIR and d1 != turnaround and \
+                self._sv_step_direction(actor, d1, dist):
+            return
+        if d2 != DI_NODIR and d2 != turnaround and \
+                self._sv_step_direction(actor, d2, dist):
+            return
+        if olddir != DI_NODIR and self._sv_step_direction(actor, olddir, dist):
+            return
+
+        dirs = range(0, 316, 45) if random.randint(0, 1) else range(315, -1, -45)
+        for tdir in dirs:
+            if tdir != turnaround and self._sv_step_direction(actor, float(tdir), dist):
+                return
+        if turnaround != DI_NODIR and \
+                self._sv_step_direction(actor, turnaround, dist):
+            return
+        vm.fset_f(actor, f["ideal_yaw"], olddir)     # can't move
+
+    def _sv_close_enough(self, ent, goal, dist):
+        """SV_CloseEnough: are ent and goal within `dist` on every axis?"""
+        if goal == 0:
+            return False
+        vm, f = self.vm, self.f
+        amn, amx = vm.fget_v(ent, f["absmin"]), vm.fget_v(ent, f["absmax"])
+        gmn, gmx = vm.fget_v(goal, f["absmin"]), vm.fget_v(goal, f["absmax"])
+        for i in range(3):
+            if gmn[i] > amx[i] + dist:
+                return False
+            if gmx[i] < amn[i] - dist:
+                return False
+        return True
+
+    def _sv_check_bottom(self, ent):
+        """SV_CheckBottom: is the entity standing on solid ground? Quick test --
+        all four bottom corners over solid world -- then a fuller probe that the
+        corners are within STEPSIZE of the centre, so monsters don't teeter off
+        ledges."""
+        vm, f = self.vm, self.f
+        org = vm.fget_v(ent, f["origin"])
+        mn = vm.fget_v(ent, f["mins"])
+        mx = vm.fget_v(ent, f["maxs"])
+        mins = [org[0] + mn[0], org[1] + mn[1], org[2] + mn[2]]
+        maxs = [org[0] + mx[0], org[1] + mx[1], org[2] + mx[2]]
+
+        pc = self.phys.point_contents_0
+        start = [0.0, 0.0, mins[2] - 1.0]
+        easy = True
+        for x in (mins[0], maxs[0]):
+            for y in (mins[1], maxs[1]):
+                start[0], start[1] = x, y
+                if pc(start) != CONTENTS_SOLID:
+                    easy = False
+                    break
+            if not easy:
+                break
+        if easy:
+            return True
+
+        # fuller check uses point traces straight down (SV_Move with a zero box)
+        start[2] = mins[2]
+        midx = (mins[0] + maxs[0]) * 0.5
+        midy = (mins[1] + maxs[1]) * 0.5
+        stopz = start[2] - 2.0 * STEPSIZE
+        tr = self.phys.trace_point([midx, midy, start[2]], [midx, midy, stopz])
+        if tr.fraction == 1.0:
+            return False
+        mid = bottom = tr.endpos[2]
+        for x in (mins[0], maxs[0]):
+            for y in (mins[1], maxs[1]):
+                tr = self.phys.trace_point([x, y, start[2]], [x, y, stopz])
+                if tr.fraction != 1.0 and tr.endpos[2] > bottom:
+                    bottom = tr.endpos[2]
+                if tr.fraction == 1.0 or mid - tr.endpos[2] > STEPSIZE:
+                    return False
+        return True
+
+    def _pf_changeyaw_ent(self, ent):
+        """changeyaw for a specific edict (SV_StepDirection turns the actor)."""
+        self.gset_i("self", ent)
+        self._pf_changeyaw()
 
     def _pf_changeyaw(self):
         vm = self.vm

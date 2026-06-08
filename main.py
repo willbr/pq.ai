@@ -168,6 +168,7 @@ class App:
         self.vel = [0.0, 0.0, 0.0]
         self.bobtime = 0.0          # wall-clock phase for the weapon bob
         self.onground = False
+        self.waterlevel = 0
         self.noclip = False
         self.yaw = yaw
         self.pitch = 0.0
@@ -320,21 +321,29 @@ class App:
             self.vel = [0.0, 0.0, 0.0]
             return
 
-        # walking: build a horizontal wish direction from yaw only
-        forward, right, _ = angle_vectors(self.yaw, 0.0)
-        wx = forward[0] * fwd + right[0] * strafe
-        wy = forward[1] * fwd + right[1] * strafe
+        speed = MAXSPEED * (1.6 if fast else 1.0)
+
+        # ground/air movement uses a horizontal wish direction from yaw only
+        fwdh, righth, _ = angle_vectors(self.yaw, 0.0)
+        wx = fwdh[0] * fwd + righth[0] * strafe
+        wy = fwdh[1] * fwd + righth[1] * strafe
         wl = math.hypot(wx, wy)
         if wl < 1e-6:
             wishdir, wishspeed = (0.0, 0.0, 0.0), 0.0
         else:
             wishdir = (wx / wl, wy / wl, 0.0)
-            wishspeed = MAXSPEED * (1.6 if fast else 1.0)
+            wishspeed = speed
+
+        # swimming (and wall friction) use the full 3D view; space/ctrl swim up/down
+        forward, right, _ = angle_vectors(self.yaw, self.pitch)
+        down = "control_l" in self.keys or "control_r" in self.keys
+        upmove = (("space" in self.keys) - down) * speed
 
         # clamp dt so a hitch can't tunnel the player through a wall
         step = min(dt, 0.05)
-        self.onground = self.phys.player_move(
+        self.onground, self.waterlevel = self.phys.player_move(
             self.pos, self.vel, wishdir, wishspeed,
+            forward, right, fwd * speed, strafe * speed, upmove, speed,
             self.onground, "space" in self.keys, step)
 
     # ---- main loop ----
@@ -393,7 +402,9 @@ class App:
         self._draw_particles(eye)
 
         spd = math.hypot(self.vel[0], self.vel[1])
-        mode = "NOCLIP" if self.noclip else ("ground" if self.onground else "air")
+        mode = ("NOCLIP" if self.noclip else
+                "water" if self.waterlevel >= 2 else
+                "ground" if self.onground else "air")
         hp = self.sv.player_health()
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()

@@ -10,12 +10,14 @@ the offset is zero against the world model.
 
 import math
 
-# clipnode contents
+# clipnode / leaf contents
 CONTENTS_SOLID = -2
+CONTENTS_WATER = -3     # water/slime/lava are <= this (slime -4, lava -5, sky -6)
 
 # physics constants (Quake cvar defaults)
 GRAVITY = 800.0
 FRICTION = 4.0
+EDGEFRICTION = 2.0      # sv_edgefriction: friction multiplier when over a dropoff
 STOPSPEED = 100.0
 MAXSPEED = 320.0
 ACCELERATE = 10.0
@@ -24,7 +26,9 @@ STEPSIZE = 18.0
 JUMPSPEED = 270.0
 DIST_EPSILON = 0.03125
 STOP_EPSILON = 0.1
-VIEW_HEIGHT = 22.0      # eye above the player origin
+VIEW_HEIGHT = 22.0      # eye above the player origin (view_ofs[2])
+PLAYER_MINS_Z = -24.0   # player bounding box bottom, origin-relative
+PLAYER_MAXS_Z = 32.0    # player bounding box top, origin-relative
 
 
 class Trace:
@@ -262,9 +266,10 @@ class Physics:
 
     def fly_move(self, origin, vel, dt):
         """Slide-move origin along vel for dt, clipping against up to 4 planes.
-        Returns (blocked_mask, onground)."""
+        Returns (blocked_mask, onground, step_wall_normal)."""
         blocked = 0
         onground = False
+        stepnormal = None
         original = list(vel)
         primal = list(vel)
         planes = []
@@ -278,7 +283,7 @@ class Physics:
 
             if tr.allsolid:
                 vel[:] = (0.0, 0.0, 0.0)
-                return blocked, onground
+                return blocked, onground, stepnormal
 
             if tr.fraction > 0:
                 origin[:] = tr.endpos
@@ -294,6 +299,7 @@ class Physics:
                 onground = True
             if n[2] == 0:
                 blocked |= 2
+                stepnormal = n          # vertical wall: saved for wall friction
 
             time_left -= time_left * tr.fraction
             planes.append(n)
@@ -325,19 +331,47 @@ class Physics:
                 vel[:] = (0.0, 0.0, 0.0)
                 break
 
-        return blocked, onground
+        return blocked, onground, stepnormal
 
-    def walk_move(self, origin, vel, dt, oldonground):
+    def wall_friction(self, vel, forward, normal):
+        """SV_WallFriction: bleed off velocity tangential to a wall, scaled by how
+        head-on the view faces it (a full cut when looking straight at it). Leaves
+        the vertical component alone."""
+        d = _dot(normal, forward) + 0.5
+        if d >= 0:
+            return
+        i = _dot(normal, vel)
+        side = [vel[k] - normal[k] * i for k in range(3)]
+        vel[0] = side[0] * (1.0 + d)
+        vel[1] = side[1] * (1.0 + d)
+
+    def try_unstick(self, origin, vel, oldvel):
+        """SV_TryUnstick: the step-up wedged us on a BSP hull seam (float
+        precision). Shove a couple units in each axial direction and retry the
+        move; keep the first nudge that frees us. Returns (clip, step_normal)."""
+        start = list(origin)
+        for dx, dy in ((2.0, 0.0), (0.0, 2.0), (-2.0, 0.0), (0.0, -2.0),
+                       (2.0, 2.0), (-2.0, 2.0), (2.0, -2.0), (-2.0, -2.0)):
+            self.push(origin, [dx, dy, 0.0])
+            vel[0], vel[1], vel[2] = oldvel[0], oldvel[1], 0.0
+            clip, _, stepnormal = self.fly_move(origin, vel, 0.1)
+            if abs(start[0] - origin[0]) > 4.0 or abs(start[1] - origin[1]) > 4.0:
+                return clip, stepnormal
+            origin[:] = start           # didn't help; undo and try the next nudge
+        vel[:] = (0.0, 0.0, 0.0)
+        return 7, None
+
+    def walk_move(self, origin, vel, forward, dt, oldonground, waterlevel):
         """SV_WalkMove: slide-move, and if blocked by a step, try to climb it."""
         oldorg = list(origin)
         oldvel = list(vel)
 
-        clip, onground = self.fly_move(origin, vel, dt)
+        clip, onground, _ = self.fly_move(origin, vel, dt)
 
         if not (clip & 2):
             return onground            # didn't block on a step wall
-        if not oldonground:
-            return onground            # don't stair-step while airborne
+        if not oldonground and waterlevel == 0:
+            return onground            # don't stair-step while airborne (ok in water)
 
         nosteporg = list(origin)
         nostepvel = list(vel)
@@ -346,7 +380,17 @@ class Physics:
         origin[:] = oldorg
         self.push(origin, [0.0, 0.0, STEPSIZE])
         vel[0], vel[1], vel[2] = oldvel[0], oldvel[1], 0.0
-        self.fly_move(origin, vel, dt)
+        clip, _, stepnormal = self.fly_move(origin, vel, dt)
+
+        # if stepping up made no horizontal progress we're wedged on a hull seam;
+        # nudge in 8 axial directions to escape
+        if clip and abs(oldorg[0] - origin[0]) < DIST_EPSILON \
+                and abs(oldorg[1] - origin[1]) < DIST_EPSILON:
+            clip, stepnormal = self.try_unstick(origin, vel, oldvel)
+
+        # extra friction when still shoving into a wall, scaled by view angle
+        if (clip & 2) and stepnormal is not None:
+            self.wall_friction(vel, forward, stepnormal)
 
         # step back down
         down = self.push(origin, [0.0, 0.0, -STEPSIZE + oldvel[2] * dt])
@@ -360,12 +404,22 @@ class Physics:
         return onground
 
     # ---- player accel / friction ----
-    def friction(self, vel, dt):
+    def friction(self, origin, vel, dt):
         speed = math.sqrt(vel[0] * vel[0] + vel[1] * vel[1])
         if speed < 0.01:
             return
+        # if the leading edge is over a dropoff, increase friction: trace a point
+        # 16 units ahead at foot height, 34 down. Nothing hit -> over a ledge ->
+        # apply sv_edgefriction (2x). A point move traces hull 0 (the world).
+        start = [origin[0] + vel[0] / speed * 16.0,
+                 origin[1] + vel[1] / speed * 16.0,
+                 origin[2] + PLAYER_MINS_Z]
+        stop = [start[0], start[1], start[2] - 34.0]
+        friction = FRICTION
+        if self.trace_point(start, stop).fraction == 1.0:
+            friction *= EDGEFRICTION
         control = STOPSPEED if speed < STOPSPEED else speed
-        newspeed = speed - dt * control * FRICTION
+        newspeed = speed - dt * control * friction
         if newspeed < 0:
             newspeed = 0.0
         newspeed /= speed
@@ -392,11 +446,85 @@ class Physics:
         for i in range(3):
             vel[i] += accelspeed * wishdir[i]
 
-    def player_move(self, origin, vel, wishdir, wishspeed, onground, want_jump, dt):
-        """One step of walking physics. Mutates origin and vel; returns onground."""
+    # ---- water ----
+    def point_contents_0(self, p):
+        """Hull-0 (visual BSP) leaf contents at p. Unlike the clip hulls this
+        encodes water/slime/lava. SV_PointContents."""
+        return self._node_contents0(self.headnode0, p)
+
+    def check_water(self, origin):
+        """SV_CheckWater: sample contents at feet / waist / eyes. Returns
+        (waterlevel 0..3, watertype)."""
+        p = [origin[0], origin[1], origin[2] + PLAYER_MINS_Z + 1.0]
+        watertype = CONTENTS_EMPTY
+        waterlevel = 0
+        if self.point_contents_0(p) <= CONTENTS_WATER:
+            watertype = self.point_contents_0(p)
+            waterlevel = 1
+            p[2] = origin[2] + (PLAYER_MINS_Z + PLAYER_MAXS_Z) * 0.5
+            if self.point_contents_0(p) <= CONTENTS_WATER:
+                waterlevel = 2
+                p[2] = origin[2] + VIEW_HEIGHT
+                if self.point_contents_0(p) <= CONTENTS_WATER:
+                    waterlevel = 3
+        return waterlevel, watertype
+
+    def water_move(self, vel, wishvel, maxspeed, dt):
+        """SV_WaterMove: 3D swim acceleration with water friction. Sets velocity
+        only -- the actual move happens in walk_move via fly_move."""
+        wishspeed = math.sqrt(_dot(wishvel, wishvel))
+        if wishspeed > maxspeed:
+            f = maxspeed / wishspeed
+            wishvel = [wishvel[i] * f for i in range(3)]
+            wishspeed = maxspeed
+        wishspeed *= 0.7
+
+        # water friction: 3D speed, no stopspeed floor and no edge friction
+        speed = math.sqrt(_dot(vel, vel))
+        if speed:
+            newspeed = speed - dt * speed * FRICTION
+            if newspeed < 0:
+                newspeed = 0.0
+            f = newspeed / speed
+            vel[0] *= f
+            vel[1] *= f
+            vel[2] *= f
+        else:
+            newspeed = 0.0
+
+        # water acceleration toward the (already 0.7-scaled) wish velocity
+        if not wishspeed:
+            return
+        addspeed = wishspeed - newspeed
+        if addspeed <= 0:
+            return
+        wl = math.sqrt(_dot(wishvel, wishvel))
+        if wl == 0:
+            return
+        accelspeed = min(ACCELERATE * wishspeed * dt, addspeed)
+        for i in range(3):
+            vel[i] += accelspeed * wishvel[i] / wl
+
+    def player_move(self, origin, vel, wishdir, wishspeed,
+                    forward, right, fmove, smove, upmove, maxspeed,
+                    onground, want_jump, dt):
+        """One step of player physics. Mutates origin and vel; returns
+        (onground, waterlevel). wishdir/wishspeed are the horizontal ground/air
+        intent; forward/right + fmove/smove/upmove are the full 3D swim intent and
+        forward also drives wall friction."""
         self.touched.clear()
-        if onground:
-            self.friction(vel, dt)
+        waterlevel, _ = self.check_water(origin)
+
+        if waterlevel >= 2:
+            # swimming: build a full 3D wish velocity from the view direction
+            wishvel = [forward[i] * fmove + right[i] * smove for i in range(3)]
+            if fmove == 0.0 and smove == 0.0 and upmove == 0.0:
+                wishvel[2] -= 60.0          # idle: drift slowly toward the bottom
+            else:
+                wishvel[2] += upmove
+            self.water_move(vel, wishvel, maxspeed, dt)
+        elif onground:
+            self.friction(origin, vel, dt)
             self.accelerate(vel, wishdir, wishspeed, dt)
         else:
             self.air_accelerate(vel, wishdir, wishspeed, dt)
@@ -405,5 +533,8 @@ class Physics:
             vel[2] = JUMPSPEED
             onground = False
 
-        vel[2] -= GRAVITY * dt
-        return self.walk_move(origin, vel, dt, onground)
+        if waterlevel <= 1:                 # no gravity while swimming
+            vel[2] -= GRAVITY * dt
+
+        onground = self.walk_move(origin, vel, forward, dt, onground, waterlevel)
+        return onground, waterlevel

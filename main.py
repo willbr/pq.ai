@@ -497,9 +497,8 @@ class App:
                 # so walking into a button presses it / into a key door opens it
                 self.sv.touch_impacts(self.phys.touched)
 
-            # advance the QC server at a fixed tick (catch up real time, capped
-            # so a hitch can't trigger a spiral of death), then read back entity
-            # positions. The impulse is one-shot (a keypress switches once).
+            # advance the QC server, then read back entity positions. The impulse
+            # is one-shot (a keypress switches weapon once).
             self.sv.set_input(self.attacking, self.pending_impulse)
             self.pending_impulse = 0
             # one server frame per rendered frame (Quake's model): movers and

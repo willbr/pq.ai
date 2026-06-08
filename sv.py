@@ -5,9 +5,8 @@ logic calls, parses the BSP entity string into edicts (ED_LoadFromFile), and run
 each entity's think function when its nextthink comes due (SV_RunThink).
 
 Physics-dependent builtins (traceline, walkmove, droptofloor, movetogoal, ...) are
-stubbed with safe "clear path / stay put" results for now -- enough to spawn the
-whole level and let monsters/items animate in place via OP_STATE frame chains.
-Wiring them to physics.py is the next step.
+wired to physics.py, so monsters navigate, items drop to the floor, and shots
+trace against the real clip hulls -- not just animate in place via OP_STATE chains.
 """
 
 import math

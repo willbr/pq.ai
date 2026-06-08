@@ -32,7 +32,18 @@ CONTENTS_EMPTY = -1
 _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs",
            "size", "nextthink", "think", "frame", "flags", "solid", "movetype",
            "velocity", "avelocity", "groundentity", "ideal_yaw", "yaw_speed",
-           "chain", "spawnflags", "view_ofs")
+           "chain", "spawnflags", "view_ofs",
+           # player / combat
+           "absmin", "absmax", "health", "max_health", "takedamage", "v_angle",
+           "weapon", "currentammo", "ammo_shells", "button0", "deadflag", "enemy")
+
+FL_CLIENT = 8
+SOLID_NOT = 0
+SOLID_TRIGGER = 1
+SOLID_SLIDEBOX = 3
+MOVETYPE_WALK = 3
+DAMAGE_AIM = 2
+IT_SHOTGUN = 1
 
 # system globals we read/write
 _GLOBALS = ("self", "other", "time", "frametime", "force_retouch",
@@ -44,6 +55,35 @@ _GLOBALS = ("self", "other", "time", "frametime", "force_retouch",
 
 def anglemod(a):
     return (360.0 / 65536) * (int(a * (65536 / 360.0)) & 65535)
+
+
+def _ray_box(p, q, mn, mx):
+    """Slab clip of segment p->q against AABB [mn,mx]. Returns (entry_frac,
+    outward_normal) for the first face crossed, or None (miss / starts inside)."""
+    tmin, tmax = 0.0, 1.0
+    axis = -1
+    for i in range(3):
+        d = q[i] - p[i]
+        if -1e-9 < d < 1e-9:
+            if p[i] < mn[i] or p[i] > mx[i]:
+                return None
+            continue
+        inv = 1.0 / d
+        t1 = (mn[i] - p[i]) * inv
+        t2 = (mx[i] - p[i]) * inv
+        if t1 > t2:
+            t1, t2 = t2, t1
+        if t1 > tmin:
+            tmin, axis = t1, i
+        if t2 < tmax:
+            tmax = t2
+        if tmin > tmax:
+            return None
+    if axis < 0:
+        return None                     # segment starts inside the box
+    n = [0.0, 0.0, 0.0]
+    n[axis] = -1.0 if (q[axis] - p[axis]) > 0 else 1.0
+    return tmin, tuple(n)
 
 
 def angle_vectors(angles):
@@ -101,12 +141,15 @@ def parse_entities(text):
 
 
 class Server:
-    def __init__(self, progs, bsp=None, mapname="", skill=1, max_edicts=600):
+    def __init__(self, progs, bsp=None, mapname="", skill=1, max_edicts=600,
+                 physics=None):
         self.pr = progs
         self.vm = VM(progs, max_edicts=max_edicts)
         self.bsp = bsp
         self.mapname = mapname
         self.skill = skill
+        self.phys = physics         # for traceline / hitscan; None -> clear path
+        self.player = 0             # player edict number (0 until spawn_player)
 
         self.time = 0.0
         self.frametime = 0.1
@@ -292,8 +335,56 @@ class Server:
             self.gset_i("other", 0)
             think = vm.fget_i(num, thf)
             if think:
-                vm.execute(think)
+                # combat AI exercises many builtins; an error in one edict's
+                # think must not take down the whole frame.
+                try:
+                    vm.execute(think)
+                except PR_RunError as ex:
+                    cn = self.pr.string(vm.fget_i(num, self.f["classname"]))
+                    print(f"think {cn} (edict {num}) aborted: {ex}")
+        self.touch_triggers(self.player)        # fire teleports/triggers we touch
         self.gset_f("time", self.time)
+
+    def touch_triggers(self, ent):
+        """Fire the touch function of every SOLID_TRIGGER whose volume overlaps
+        ent's bounding box (SV_TouchLinks, restricted to one mover -- the player).
+        This is what makes trigger_teleport / trigger_changelevel / trigger_multiple
+        fire: the engine never called touch before, so triggers did nothing."""
+        if not ent:
+            return
+        vm, f = self.vm, self.f
+        if vm.free[ent] or vm.fget_f(ent, f["solid"]) == SOLID_NOT:
+            return
+        toff = self.pr.field_by_name.get("touch")
+        if toff is None:
+            return
+        toff = toff[1]
+        amn, amx, fsol = f["absmin"], f["absmax"], f["solid"]
+        e0x, e0y, e0z = vm.fget_v(ent, amn)
+        e1x, e1y, e1z = vm.fget_v(ent, amx)
+        for e in range(1, vm.num_edicts):
+            if e == ent or vm.free[e]:
+                continue
+            if vm.fget_f(e, fsol) != SOLID_TRIGGER:
+                continue
+            tf = vm.fget_i(e, toff)
+            if not tf:
+                continue
+            tmn = vm.fget_v(e, amn)
+            tmx = vm.fget_v(e, amx)
+            if (e0x > tmx[0] or e1x < tmn[0] or e0y > tmx[1] or e1y < tmn[1] or
+                    e0z > tmx[2] or e1z < tmn[2]):
+                continue
+            self.gset_i("self", e)
+            self.gset_i("other", ent)
+            self.gset_f("time", self.time)
+            try:
+                vm.execute(tf)
+            except PR_RunError as ex:
+                cn = self.pr.string(vm.fget_i(e, f["classname"]))
+                print(f"touch {cn} (edict {e}) aborted: {ex}")
+            if vm.free[ent]:        # player removed (e.g. changelevel)
+                break
 
     def brush_models(self):
         """Live brush-model entities as (submodel_index, origin, angles), for the
@@ -436,12 +527,22 @@ class Server:
     def _pf_setorigin(self):
         e = self.vm.parm_i(0)
         self.vm.fset_v(e, self.f["origin"], self.vm.parm_v(1))
+        self._link_abs(e)
+
+    def _link_abs(self, e):
+        """Maintain absmin/absmax = origin + mins/maxs (SV_LinkEdict's job)."""
+        ox, oy, oz = self.vm.fget_v(e, self.f["origin"])
+        mnx, mny, mnz = self.vm.fget_v(e, self.f["mins"])
+        mxx, mxy, mxz = self.vm.fget_v(e, self.f["maxs"])
+        self.vm.fset_v(e, self.f["absmin"], (ox + mnx, oy + mny, oz + mnz))
+        self.vm.fset_v(e, self.f["absmax"], (ox + mxx, oy + mxy, oz + mxz))
 
     def _set_minmax(self, e, mins, maxs):
         self.vm.fset_v(e, self.f["mins"], mins)
         self.vm.fset_v(e, self.f["maxs"], maxs)
         self.vm.fset_v(e, self.f["size"],
                        (maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]))
+        self._link_abs(e)
 
     def _pf_setsize(self):
         e = self.vm.parm_i(0)
@@ -607,18 +708,122 @@ class Server:
     def _pf_aim(self):
         self.vm.ret_v(*self.gget_v("v_forward"))
 
-    # --- physics stubs (clear path / stay put) -- TODO: wire physics.py ---
+    # --- traceline: world (hull 0) + entity bbox clip ---
     def _pf_traceline(self):
-        v2 = self.vm.parm_v(1)
-        self.gset_f("trace_allsolid", 0.0)
-        self.gset_f("trace_startsolid", 0.0)
-        self.gset_f("trace_fraction", 1.0)
+        vm = self.vm
+        v1 = vm.parm_v(0)
+        v2 = vm.parm_v(1)
+        nomonsters = vm.parm_f(2)
+        ignore = vm.parm_i(3)
+        frac, endpos, pnorm, allsolid, startsolid, ent = \
+            self._move_trace(v1, v2, nomonsters, ignore)
+        self.gset_f("trace_allsolid", 1.0 if allsolid else 0.0)
+        self.gset_f("trace_startsolid", 1.0 if startsolid else 0.0)
+        self.gset_f("trace_fraction", frac)
         self.gset_f("trace_inopen", 1.0)
         self.gset_f("trace_inwater", 0.0)
-        self.gset_v("trace_endpos", v2)
-        self.gset_v("trace_plane_normal", (0.0, 0.0, 0.0))
+        self.gset_v("trace_endpos", endpos)
+        self.gset_v("trace_plane_normal", pnorm)
         self.gset_f("trace_plane_dist", 0.0)
-        self.gset_i("trace_ent", 0)
+        self.gset_i("trace_ent", ent)
+
+    def _move_trace(self, start, end, nomonsters, ignore):
+        """Line trace through the world point hull, then clipped against solid
+        bbox entities (monsters/the player). Returns
+        (fraction, endpos, plane_normal, allsolid, startsolid, hit_ent)."""
+        if self.phys is not None:
+            wtr = self.phys.trace_point(start, end)
+            frac = wtr.fraction
+            pnorm = wtr.plane_normal or (0.0, 0.0, 0.0)
+            allsolid, startsolid = wtr.allsolid, wtr.startsolid
+        else:
+            frac, pnorm, allsolid, startsolid = 1.0, (0.0, 0.0, 0.0), False, False
+        hit_ent = 0
+        if not nomonsters:
+            vm = self.vm
+            fsol, famn, famx = self.f["solid"], self.f["absmin"], self.f["absmax"]
+            for e in range(1, vm.num_edicts):
+                if e == ignore or vm.free[e]:
+                    continue
+                sol = vm.fget_f(e, fsol)
+                if sol != SOLID_SLIDEBOX and sol != 2:   # SLIDEBOX or BBOX only
+                    continue
+                hit = _ray_box(start, end, vm.fget_v(e, famn), vm.fget_v(e, famx))
+                if hit is not None and hit[0] < frac:
+                    frac, pnorm, hit_ent = hit[0], hit[1], e
+        endpos = [start[i] + (end[i] - start[i]) * frac for i in range(3)]
+        return frac, endpos, pnorm, allsolid, startsolid, hit_ent
+
+    # ---- player edict + firing (engine-driven; QC does the damage) ----
+    def spawn_player(self, origin, angles):
+        """Create a client edict so monsters have a target and shots have an
+        attacker. The camera drives it each frame via update_player()."""
+        vm, f = self.vm, self.f
+        e = vm.alloc_edict()
+        self.player = e
+        vm.fset_i(e, f["classname"], self.pr.new_string("player"))
+        vm.fset_f(e, f["health"], 100.0)
+        vm.fset_f(e, f["max_health"], 100.0)
+        vm.fset_f(e, f["takedamage"], float(DAMAGE_AIM))
+        vm.fset_f(e, f["solid"], float(SOLID_SLIDEBOX))
+        vm.fset_f(e, f["movetype"], float(MOVETYPE_WALK))
+        vm.fset_f(e, f["flags"], float(int(vm.fget_f(e, f["flags"])) | FL_CLIENT))
+        vm.fset_f(e, f["weapon"], float(IT_SHOTGUN))
+        vm.fset_f(e, f["currentammo"], 100.0)
+        vm.fset_f(e, f["ammo_shells"], 100.0)
+        vm.fset_v(e, f["view_ofs"], (0.0, 0.0, 22.0))
+        self._set_minmax(e, (-16.0, -16.0, -24.0), (16.0, 16.0, 32.0))
+        self.update_player(origin, angles)
+        return e
+
+    def player_health(self):
+        if not self.player:
+            return 0.0
+        return self.vm.fget_f(self.player, self.f["health"])
+
+    def player_origin(self):
+        return self.vm.fget_v(self.player, self.f["origin"]) if self.player else None
+
+    def player_angles(self):
+        return self.vm.fget_v(self.player, self.f["angles"]) if self.player else None
+
+    def player_velocity(self):
+        return self.vm.fget_v(self.player, self.f["velocity"]) if self.player else None
+
+    def update_player(self, origin, angles):
+        if not self.player:
+            return
+        vm, f, e = self.vm, self.f, self.player
+        vm.fset_v(e, f["origin"], origin)
+        vm.fset_v(e, f["angles"], angles)
+        vm.fset_v(e, f["v_angle"], angles)
+        self._link_abs(e)
+
+    def fire(self):
+        """Fire the shotgun from the player's view (real QC FireBullets/T_Damage).
+        Returns True if the weapon code ran."""
+        if not self.player or self.phys is None:
+            return False
+        vm, f, e = self.vm, self.f, self.player
+        if vm.fget_f(e, f["health"]) <= 0:
+            return False
+        func = self.pr.find_function("W_FireShotgun")
+        if func is None:
+            return False
+        self.gset_f("time", self.time)
+        self.gset_i("self", e)
+        self.gset_i("other", 0)
+        # aim() (a stub) returns v_forward, so seed it from the view angles
+        fwd, right, up = angle_vectors(vm.fget_v(e, f["v_angle"]))
+        self.gset_v("v_forward", fwd)
+        self.gset_v("v_right", right)
+        self.gset_v("v_up", up)
+        try:
+            vm.execute(func)
+        except PR_RunError as ex:
+            print(f"fire aborted: {ex}")
+            return False
+        return True
 
     def _pf_pointcontents(self):
         self.vm.ret_f(CONTENTS_EMPTY)

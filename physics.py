@@ -42,11 +42,19 @@ def _dot(a, b):
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
+CONTENTS_EMPTY = -1
+
+
 class Physics:
     def __init__(self, bsp):
         self.planes = bsp.planes
         self.clipnodes = bsp.clipnodes
         self.headnode = bsp.models[0]["headnodes"][1]   # hull 1 (player size)
+        # hull 0 is the visual BSP itself (a point hull) -- used for hitscan,
+        # where the "player box" expansion of hull 1 would stop bullets short.
+        self.nodes = bsp.nodes
+        self.leafs = bsp.leafs
+        self.headnode0 = bsp.models[0]["headnode"]
 
     # ---- hull queries ----
     def hull_point_contents(self, num, p):
@@ -127,6 +135,65 @@ class Physics:
     def trace(self, start, end):
         tr = Trace(end)
         self._recurse(self.headnode, 0.0, 1.0, start, end, tr)
+        return tr
+
+    # ---- hull 0 (point) trace for hitscan ----
+    def _node_contents0(self, num, p):
+        nodes = self.nodes
+        planes = self.planes
+        while num >= 0:
+            planenum, children, _, _ = nodes[num]
+            n, dist, ptype = planes[planenum]
+            d = (p[ptype] - dist) if ptype < 3 else (_dot(n, p) - dist)
+            num = children[0] if d >= 0 else children[1]
+        return self.leafs[-num - 1][0]
+
+    def _recurse0(self, num, p1f, p2f, p1, p2, tr):
+        if num < 0:
+            if self.leafs[-num - 1][0] != CONTENTS_SOLID:
+                tr.allsolid = False
+            else:
+                tr.startsolid = True
+            return True
+
+        planenum, children, _, _ = self.nodes[num]
+        n, dist, ptype = self.planes[planenum]
+        if ptype < 3:
+            t1 = p1[ptype] - dist
+            t2 = p2[ptype] - dist
+        else:
+            t1 = _dot(n, p1) - dist
+            t2 = _dot(n, p2) - dist
+
+        if t1 >= 0 and t2 >= 0:
+            return self._recurse0(children[0], p1f, p2f, p1, p2, tr)
+        if t1 < 0 and t2 < 0:
+            return self._recurse0(children[1], p1f, p2f, p1, p2, tr)
+
+        if t1 < 0:
+            frac = (t1 + DIST_EPSILON) / (t1 - t2)
+        else:
+            frac = (t1 - DIST_EPSILON) / (t1 - t2)
+        frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
+        midf = p1f + (p2f - p1f) * frac
+        mid = [p1[i] + frac * (p2[i] - p1[i]) for i in range(3)]
+        side = 1 if t1 < 0 else 0
+
+        if not self._recurse0(children[side], p1f, midf, p1, mid, tr):
+            return False
+        if self._node_contents0(children[side ^ 1], mid) != CONTENTS_SOLID:
+            return self._recurse0(children[side ^ 1], midf, p2f, mid, p2, tr)
+        if tr.allsolid:
+            return False
+        tr.plane_normal = n if side == 0 else (-n[0], -n[1], -n[2])
+        tr.fraction = midf
+        tr.endpos = mid
+        return False
+
+    def trace_point(self, start, end):
+        """Trace a point (bullet) through hull 0. Returns a Trace."""
+        tr = Trace(end)
+        self._recurse0(self.headnode0, 0.0, 1.0, list(start), list(end), tr)
         return tr
 
     def push(self, origin, push):

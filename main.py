@@ -75,7 +75,8 @@ class App:
         # QuakeC server: spawn the level's entities and run their logic. Doors,
         # buttons and lifts are entities now; their brush models are drawn at the
         # origins the QC sets, and invisible triggers no longer render.
-        self.sv = Server(Progs(pak.read("progs.dat")), bsp=self.bsp, mapname=path)
+        self.sv = Server(Progs(pak.read("progs.dat")), bsp=self.bsp, mapname=path,
+                         physics=self.phys)
         self.sv.load_level()
         self.sv_accum = 0.0
 
@@ -97,6 +98,11 @@ class App:
         self.yaw = yaw
         self.pitch = 0.0
 
+        # a client edict driven by the camera: gives monsters a target and gives
+        # fired shots an attacker (so QC's damage/death logic runs)
+        self.sv.spawn_player(tuple(self.pos), (self.pitch, self.yaw, 0.0))
+        self.last_fire = 0.0
+
         # window
         self.root = tk.Tk()
         self.root.title(f"pq.ai — {mapname}")
@@ -117,6 +123,8 @@ class App:
         self.poly_prev = 0
         self.hud = self.canvas.create_text(
             8, 8, anchor="nw", fill="#00ff66", font=("Menlo", 11), text="")
+        self.crosshair = self.canvas.create_text(
+            0, 0, fill="#00ff66", font=("Menlo", 18), text="+")
 
         # input state
         self.keys = set()
@@ -135,11 +143,25 @@ class App:
         r.bind("<KeyPress>", self._keydown)
         r.bind("<KeyRelease>", self._keyup)
         r.bind("<Motion>", self._motion)
-        self.canvas.bind("<Button-1>", lambda e: self._set_mouselook(True))
+        self.canvas.bind("<Button-1>", self._click)
         # bind on the canvas (not root) and use the event's own size: at startup
         # the canvas may not be laid out when the root's first <Configure> fires,
         # so winfo_width() would read 1 and the projection would collapse.
         self.canvas.bind("<Configure>", self._resize)
+
+    def _click(self, e):
+        # first click captures the mouse; clicks while captured fire the shotgun
+        if not self.mouselook:
+            self._set_mouselook(True)
+        else:
+            self._fire()
+
+    def _fire(self):
+        now = time.perf_counter()
+        if now - self.last_fire < 0.4:        # shotgun cadence
+            return
+        self.last_fire = now
+        self.sv.fire()
 
     def _keydown(self, e):
         k = e.keysym.lower()
@@ -272,6 +294,11 @@ class App:
 
         self._move(dt)
 
+        # push the camera into the client edict so monsters target the player and
+        # shots originate from the current view
+        self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
+                              (self.pitch, self.yaw, 0.0))
+
         # advance the QC server at a fixed tick (catch up real time, capped so a
         # hitch can't trigger a spiral of death), then read back entity positions
         self.sv_accum += dt
@@ -280,6 +307,8 @@ class App:
             self.sv.run_frame(SV_TICK)
             self.sv_accum -= SV_TICK
             steps += 1
+        if steps:
+            self._sync_from_player()      # adopt teleports / trigger-moved origin
         brush_ents = self.sv.brush_models()
         alias_ents = self._alias_ents()
 
@@ -297,19 +326,43 @@ class App:
 
         spd = math.hypot(self.vel[0], self.vel[1])
         mode = "NOCLIP" if self.noclip else ("ground" if self.onground else "air")
+        hp = self.sv.player_health()
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        self.canvas.coords(self.crosshair, w // 2, h // 2)
         self.canvas.itemconfig(
             self.hud,
             text=(f"{self.fps:5.1f} fps   "
                   f"{'polys' if self.flat else 'segs'} {nprim}   "
-                  f"leaf {leaf}   {mode}\n"
+                  f"leaf {leaf}   {mode}   health {hp:.0f}\n"
                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
-                  f"{'MOUSELOOK' if self.mouselook else 'click to capture mouse'} "
+                  f"{'MOUSELOOK — click to fire' if self.mouselook else 'click to capture mouse'} "
                   f"[N]oclip [F]lat"))
         self.canvas.tag_raise(self.hud)
+        self.canvas.tag_raise(self.crosshair)
         # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
         work_ms = (time.perf_counter() - now) * 1000
         self.root.after(max(1, int(16 - work_ms)), self.tick)
+
+    def _sync_from_player(self):
+        """A trigger (teleport) may have moved the player edict during the QC
+        frame. We push the camera into the edict each tick, so any origin change
+        is the game logic relocating us -- adopt it back into the camera."""
+        org = self.sv.player_origin()
+        if org is None:
+            return
+        if (abs(org[0] - self.pos[0]) > 1.0 or abs(org[1] - self.pos[1]) > 1.0 or
+                abs(org[2] - self.pos[2]) > 1.0):
+            self.pos = [org[0], org[1], org[2]]
+            vel = self.sv.player_velocity()
+            if vel is not None:
+                self.vel = [vel[0], vel[1], vel[2]]
+            ang = self.sv.player_angles()
+            if ang is not None:                  # teleport sets fixangle -> face dest
+                self.yaw = ang[1]
+                self.pitch = max(-89.0, min(89.0, ang[0]))
+            self.onground = False
 
     def _alias_ents(self):
         """Resolve live .mdl entities to (mdl, current-frame verts, origin, angles)."""

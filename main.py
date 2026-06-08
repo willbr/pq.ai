@@ -21,7 +21,8 @@ import tkinter as tk
 
 from pak import Pak
 from bsp import Bsp
-from render import Renderer, PickupModel, angle_vectors, ZBUF_SCALE
+from render import (Renderer, PickupModel, angle_vectors, ZBUF_SCALE,
+                    lightstyle_values)
 from physics import Physics, VIEW_HEIGHT, MAXSPEED
 from progs import Progs
 from sv import Server, anglemod
@@ -519,10 +520,12 @@ class App:
             eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
             view_model = self._view_model(gun_org)
         if self.zbuf:
+            styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
             fbdata, leaf = self.rend.render_zbuffer(eye, self.yaw, self.pitch,
                                                     brush_ents, alias_ents,
                                                     view_model, bsp_ents,
-                                                    textured=self.textured)
+                                                    textured=self.textured,
+                                                    lightstyles=styles)
             self._draw_fb(fbdata)
             nprim = fbdata[1] * fbdata[2]
         elif self.flat:

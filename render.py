@@ -35,6 +35,18 @@ LIGHT_GAIN = 1.6
 DEFAULT_LIGHT = 180
 
 
+def lightstyle_values(styles, t):
+    """Current brightness (0..550, 256 = normal) for light styles 0..63 from
+    {index: animation_string} at time t. Quake cycles the string at 10 Hz and
+    maps each character a..z to a scale via 22*(c-'a'); unset styles stay 256."""
+    tick = int(t * 10)
+    out = [256] * 64
+    for s, st in styles.items():
+        if 0 <= s < 64 and st:
+            out[s] = 22 * (ord(st[tick % len(st)]) - 97)
+    return out
+
+
 def angle_vectors(yaw_deg, pitch_deg):
     yaw = math.radians(yaw_deg)
     pitch = math.radians(pitch_deg)
@@ -228,11 +240,11 @@ class Renderer:
 
         # per-face lightmaps from the LIGHTING lump (baked static light). Each
         # entry: (lmw, lmh, smin, tmin, luxels, has_real). For surfaces with a
-        # lightmap the luxels come from the BSP (one per 16 texels, all active
-        # styles summed and gain-boosted). Faces with no lightmap (sky, liquids)
-        # get a 1x1 map holding their directional shade, so the rasteriser always
-        # samples a lightmap and never branches per pixel.
-        self.face_lm = self._build_lightmaps()
+        # lightmap the luxels come from the BSP (one per 16 texels, the active
+        # styles combined by current brightness). Faces with no lightmap (sky,
+        # liquids) get a 1x1 map holding their directional shade, so the
+        # rasteriser always samples a lightmap and never branches per pixel.
+        self._build_lightmaps()
 
         # per-frame staleness markers (avoid clearing big arrays every frame)
         self.frame = 0
@@ -303,21 +315,29 @@ class Renderer:
         return out
 
     def _build_lightmaps(self):
-        """Per-face baked lightmap from the LIGHTING lump. Returns a list of
-        (lmw, lmh, smin, tmin, luxels, has_real): real lightmaps have one luxel
-        per 16 texels (all active styles summed, gain-applied); faces without one
-        get a 1x1 map holding their directional shade so sampling never branches.
-        smin/tmin are the surface's texture-space mins (Quake's CalcSurfaceExtents)."""
+        """Per-face lightmap data from the LIGHTING lump. Fills self.face_lm
+        (the live, possibly animated map sampled by the rasteriser) and
+        self.face_lm_styles (each face's raw per-style luxel blocks, recombined
+        when a style's brightness changes).
+
+        face_lm entry: (lmw, lmh, smin, tmin, luxels, has_real). Real lightmaps
+        have one luxel per 16 texels (Quake's CalcSurfaceExtents); faces without
+        one (sky, liquids) get a 1x1 map holding their directional shade, so the
+        rasteriser samples a lightmap unconditionally. luxels is a bytearray so
+        animation can rewrite it in place."""
         bsp = self.bsp
         light = bsp.lightdata
         texinfo = bsp.texinfo
         vertexes = bsp.vertexes
         face_verts = self.face_verts
-        out = []
+        self.face_lm = []
+        self.face_lm_styles = []        # per face: [(style_num, block_bytes), ...] | None
+        self.style_faces = {}           # style_num -> [face indices using it]
         for fi in range(len(bsp.faces)):
             lightofs = bsp.faces[fi][5]
             styles = bsp.faces[fi][6]
             ti = bsp.faces[fi][4]
+            blocks = None
             rec = None
             if lightofs >= 0 and light and 0 <= ti < len(texinfo):
                 s0, s1, s2, s3 = texinfo[ti][2]
@@ -337,22 +357,58 @@ class Renderer:
                 lmw = int(bsmax - bsmin) + 1
                 lmh = int(btmax - btmin) + 1
                 n = lmw * lmh
-                nstyles = sum(1 for st in styles if st != 255) or 1
-                if n > 0 and lightofs + n * nstyles <= len(light):
-                    acc = [0] * n
-                    for sidx in range(nstyles):
-                        base = lightofs + sidx * n
-                        for i in range(n):
-                            acc[i] += light[base + i]
-                    lux = bytearray(n)
-                    for i in range(n):
-                        v = int(acc[i] * LIGHT_GAIN)
-                        lux[i] = v if v < 255 else 255
-                    rec = (lmw, lmh, bsmin * 16.0, btmin * 16.0, bytes(lux), True)
+                active = [st for st in styles if st != 255]
+                if n > 0 and active and lightofs + n * len(active) <= len(light):
+                    blocks = []
+                    for si, st in enumerate(active):
+                        base = lightofs + si * n
+                        blocks.append((st, light[base:base + n]))
+                        self.style_faces.setdefault(st, []).append(fi)
+                    rec = (lmw, lmh, bsmin * 16.0, btmin * 16.0, bytearray(n), True)
             if rec is None:
-                rec = (1, 1, 0.0, 0.0, bytes([min(255, self.face_shade[fi])]), False)
-            out.append(rec)
-        return out
+                rec = (1, 1, 0.0, 0.0, bytearray((min(255, self.face_shade[fi]),)),
+                       False)
+            self.face_lm.append(rec)
+            self.face_lm_styles.append(blocks)
+
+        # initial combine at normal brightness (256). _prev_styleval seeds the
+        # animation diff to the same baseline, so the first animated frame only
+        # rebuilds faces whose styles actually differ from normal.
+        normal = [256] * 64
+        for fi in range(len(self.face_lm)):
+            if self.face_lm_styles[fi] is not None:
+                self._combine_face(fi, normal)
+        self._prev_styleval = normal[:]
+
+    def _combine_face(self, fi, styleval):
+        """Recombine face fi's lightmap luxels for the current style brightnesses
+        (in place). luxel = clamp(sum(block * styleval[style]) * gain / 256)."""
+        rec = self.face_lm[fi]
+        lmw, lmh, buf = rec[0], rec[1], rec[4]
+        n = lmw * lmh
+        acc = [0] * n
+        for style, block in self.face_lm_styles[fi]:
+            sv = styleval[style] if style < len(styleval) else 256
+            if sv:
+                for i in range(n):
+                    acc[i] += block[i] * sv
+        g = LIGHT_GAIN / 256.0
+        for i in range(n):
+            v = int(acc[i] * g)
+            buf[i] = v if v < 255 else 255
+
+    def _animate_lightmaps(self, styleval):
+        """Rebuild only the faces whose light-style brightness changed this frame
+        (constant styles never rebuild, so most faces are touched once)."""
+        prev = self._prev_styleval
+        dirty = set()
+        for style, faces in self.style_faces.items():
+            v = styleval[style] if style < len(styleval) else 256
+            if v != prev[style]:
+                prev[style] = v
+                dirty.update(faces)
+        for fi in dirty:
+            self._combine_face(fi, styleval)
 
     def light_point(self, p):
         """Baked light at world point p: trace straight down to the nearest lit
@@ -1071,7 +1127,8 @@ class Renderer:
         return polys, leaf
 
     def render_zbuffer(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
-                       view_model=None, bsp_ents=None, textured=True):
+                       view_model=None, bsp_ents=None, textured=True,
+                       lightstyles=None):
         """True per-pixel z-buffered software rasteriser. World/brush faces are
         perspective-correct texture-mapped (textured=True) or flat-shaded; both
         resolve occlusion with a 1/z depth buffer (no painter's ordering, so
@@ -1105,6 +1162,9 @@ class Renderer:
         hh = ih * 0.5
         fb = bytearray(self._bg_frame)                # fresh background to draw over
         zb = array('f', self._zb_zero)                # depth = 1/z, 0 == far away
+
+        if lightstyles is not None:                   # animate flickering lights
+            self._animate_lightmaps(lightstyles)
 
         leaf = self.point_leaf(origin)
         if leafs[leaf][0] == -2 or leafs[leaf][1] < 0:

@@ -226,6 +226,8 @@ class Server:
         self.center_msg = None      # (text, time) from centerprint; host displays it
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
         self._te = None             # in-progress temp-entity message being parsed
+        self._ent_lastorg = {}      # edict -> last origin, for trail segments
+        self._model_trail = {}      # modelindex -> trail type (or None), cached
         self.snd = None             # sound mixer (set by host after precache); None -> muted
         self.ambients = []          # deferred looping ambientsounds: (name, pos, vol, atten)
 
@@ -458,6 +460,7 @@ class Server:
         self.run_weapon_frame()                 # PlayerPostThink: drive the weapons
         self.run_player_death_think()           # PlayerPreThink's dead->respawn FSM
         self.touch_triggers(self.player)        # fire teleports/triggers we touch
+        self._emit_trails()                     # R_RocketTrail for moving missiles
         self._advance_particles(dt)
         self.gset_f("time", self.time)
 
@@ -1141,6 +1144,94 @@ class Server:
             color, count = _TE_EFFECT.get(self._te[0], (0, 6))
             self._burst(coords, (0.0, 0.0, 0.0), color, count)
             self._te = None
+
+    # trail type -> (palette colour base, jitter, step units). Mirrors WinQuake
+    # R_RocketTrail's six cases: smoke for rocket/grenade, blood for gibs, and
+    # the coloured tracer streams. Stepped along the move so the trail follows
+    # the projectile's path rather than just marking its current spot.
+    _TRAILS = {
+        0: (8, 6.0, 4.0),       # rocket: grey smoke
+        1: (6, 6.0, 4.0),       # grenade: dark smoke
+        2: (67, 6.0, 4.0),      # gib: blood (red)
+        3: (52, 0.0, 4.0),      # tracer: green (scrag)
+        4: (67, 6.0, 4.0),      # zombie gib: blood
+        5: (230, 0.0, 4.0),     # tracer2: orange (hellknight)
+        6: (146, 0.0, 4.0),     # tracer3: purple (vore)
+    }
+
+    def _trail_type(self, modelindex):
+        """Trail type for a model (by precache index) from its .mdl effect flags,
+        cached. None if the model has no trail flag / can't be read."""
+        if modelindex in self._model_trail:
+            return self._model_trail[modelindex]
+        tt = None
+        mp = self.model_precache
+        if self.pak is not None and 0 < modelindex < len(mp):
+            name = mp[modelindex]
+            if name.endswith(".mdl") and name in self.pak.files:
+                try:
+                    from mdl import (model_flags, EF_ROCKET, EF_GRENADE, EF_GIB,
+                                     EF_TRACER, EF_ZOMGIB, EF_TRACER2, EF_TRACER3)
+                    fl = model_flags(self.pak.read(name))
+                    # priority matches CL_RelinkEntities' if/else ladder
+                    if fl & EF_ROCKET:    tt = 0
+                    elif fl & EF_GRENADE: tt = 1
+                    elif fl & EF_GIB:     tt = 2
+                    elif fl & EF_ZOMGIB:  tt = 4
+                    elif fl & EF_TRACER:  tt = 3
+                    elif fl & EF_TRACER2: tt = 5
+                    elif fl & EF_TRACER3: tt = 6
+                except Exception as ex:
+                    print(f"trail flags for {name} failed: {ex}")
+        self._model_trail[modelindex] = tt
+        return tt
+
+    def _emit_trails(self):
+        """R_RocketTrail: for every live entity whose model carries a trail flag,
+        lay particles along the segment it moved this frame. Runs client-side in
+        Quake; we do it here since this is where particles live and entity origins
+        are known. Rebuilding the last-origin map each frame prunes dead edicts."""
+        vm, f = self.vm, self.f
+        fmi, forg = f["modelindex"], f["origin"]
+        last = self._ent_lastorg
+        newlast = {}
+        for num in range(1, vm.num_edicts):
+            if vm.free[num]:
+                continue
+            tt = self._trail_type(vm.fget_i(num, fmi))
+            if tt is None:
+                continue
+            org = vm.fget_v(num, forg)
+            newlast[num] = org
+            old = last.get(num)
+            if old is not None and old != org:
+                self._rocket_trail(old, org, tt)
+        self._ent_lastorg = newlast
+
+    def _rocket_trail(self, start, end, ttype):
+        color, jitter, step = self._TRAILS.get(ttype, self._TRAILS[0])
+        dx, dy, dz = end[0] - start[0], end[1] - start[1], end[2] - start[2]
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if dist < 0.01:
+            return
+        n = int(dist / step)
+        if n <= 0:
+            n = 1
+        if n > 48:                                   # cap a long teleport jump
+            n = 48
+        ux, uy, uz = dx / n, dy / n, dz / n
+        die = self.time + 0.5
+        px, py, pz = start
+        for i in range(n):
+            self.particles.append([
+                px + (random.random() - 0.5) * jitter,
+                py + (random.random() - 0.5) * jitter,
+                pz + (random.random() - 0.5) * jitter,
+                0.0, 0.0, 0.0,
+                (color + (random.randint(0, 3) if jitter else 0)) & 255, die])
+            px += ux; py += uy; pz += uz
+        if len(self.particles) > 600:                # bound the list
+            del self.particles[:len(self.particles) - 600]
 
     def _advance_particles(self, dt):
         if not self.particles:

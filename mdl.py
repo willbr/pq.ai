@@ -26,10 +26,28 @@ import struct
 
 ALIAS_VERSION = 6
 IDPO = b"IDPO"
+# model effect flags (mdl.h). The client reads these off the model to decide a
+# moving entity's particle trail / spin -- they are NOT entity .effects.
+EF_ROCKET = 1           # leave a rocket (fire/smoke) trail
+EF_GRENADE = 2          # leave a grenade smoke trail
+EF_GIB = 4              # leave a blood trail
 EF_ROTATE = 8           # model flag: bonus item, spun client-side (cl_main.c)
+EF_TRACER = 16          # green split trail (scrag/wizard)
+EF_ZOMGIB = 32          # small blood trail (zombie gibs)
+EF_TRACER2 = 64         # orange split trail (hellknight)
+EF_TRACER3 = 128        # purple trail (vore/voor)
 
 # mdl_t: ident, version, scale[3], origin[3], radius, eye[3], 8 ints, size
 _HEADER = struct.Struct("<ii 3f 3f f 3f iiiiiiii f")
+
+
+def model_flags(data):
+    """Read just the mdl flags field from a raw .mdl, without decoding the model.
+    Returns 0 if the data isn't a recognisable MDL (so callers can treat it as
+    'no trail'). The flags drive client-side trails and item spin."""
+    if len(data) < _HEADER.size or data[0:4] != IDPO:
+        return 0
+    return _HEADER.unpack_from(data, 0)[19]
 _TRIVERTX = struct.Struct("<4B")     # v[3], lightnormalindex
 
 

@@ -78,10 +78,17 @@ class Bsp:
         self.lightdata = lump(LIGHTING)        # 8-bit luxels, indexed by lightofs
 
         # models: model 0 is the world. keep headnode[0] + face range + bounds.
+        # Quake's Mod_LoadSubmodels spreads each submodel's mins/maxs by a pixel
+        # (-1 / +1). That closes the hairline seam where the two leaves of a
+        # double door abut, so EntitiesTouching sees them overlap and LinkDoors
+        # chains them -- without it each leaf is a singleton and only the side
+        # you touch opens. It also pads pickup/explobox brush-model boxes to the
+        # same size the engine uses.
         self.models = []
         for m in _S_MODEL.iter_unpack(lump(MODELS)):
             self.models.append({
-                "mins": m[0:3], "maxs": m[3:6], "origin": m[6:9],
+                "mins": (m[0] - 1, m[1] - 1, m[2] - 1),
+                "maxs": (m[3] + 1, m[4] + 1, m[5] + 1), "origin": m[6:9],
                 "headnode": m[9],              # hull 0 (visual BSP nodes)
                 "headnodes": (m[9], m[10], m[11], m[12]),  # all 4 hulls
                 "firstface": m[14], "numfaces": m[15],

@@ -44,6 +44,19 @@ CL_BOBCYCLE = 0.6
 CL_BOBUP = 0.5
 
 
+def view_origins(pos, view_height, forward, bob):
+    """Camera eye and first-person gun origin for the current head-bob, per
+    Quake's V_CalcRefdef (view.c). The bob is added to BOTH the view origin and
+    the gun, so they share the vertical motion: the camera (and the whole world
+    with it) bobs by `bob`, while the gun's only offset relative to the view is
+    forward*bob*0.4 -- a small nudge. Returns (eye, gun_origin)."""
+    eye = (pos[0], pos[1], pos[2] + view_height + bob)
+    gun = (eye[0] + forward[0] * bob * 0.4,
+           eye[1] + forward[1] * bob * 0.4,
+           eye[2] + forward[2] * bob * 0.4)
+    return eye, gun
+
+
 def spin_yaw(flags, angles, t):
     """Bonus items (EF_ROTATE models -- weapons, keys, powerups) spin in place:
     the client overrides their yaw each frame with anglemod(100*time), ignoring
@@ -424,8 +437,12 @@ class App:
         alias_ents = self._alias_ents()
         bsp_ents = self._bsp_ents()
 
-        eye = (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT)
-        view_model = self._view_model(eye)
+        # head-bob: shift both the view origin and the gun by it, as Quake does,
+        # so the weapon rides nearly still with the view instead of sloshing.
+        bob = self._calc_bob()
+        fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
+        eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
+        view_model = self._view_model(gun_org)
         if self.flat:
             polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
                                                   brush_ents, alias_ents, view_model,
@@ -543,10 +560,10 @@ class App:
         bob = bob * 0.3 + bob * 0.7 * math.sin(cycle)
         return max(-7.0, min(4.0, bob))
 
-    def _view_model(self, eye):
+    def _view_model(self, org):
         """The first-person weapon as (mdl, verts, origin, angles), or None.
-        Reads the QC's .weaponmodel/.weaponframe, bobs it with movement, and
-        fixes it to the camera. Negating pitch aligns model_axes with the view."""
+        Reads the QC's .weaponmodel/.weaponframe and fixes it to the (already
+        bob-shifted) gun origin. Negating pitch aligns model_axes with the view."""
         vw = self.sv.view_weapon()
         if not vw:
             return None
@@ -561,11 +578,6 @@ class App:
         mdl = self._vmodels[path]
         if mdl is None:
             return None
-        bob = self._calc_bob()
-        fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
-        org = (eye[0] + fwd[0] * bob * 0.4,
-               eye[1] + fwd[1] * bob * 0.4,
-               eye[2] + fwd[2] * bob * 0.4 + bob)
         ang = (-self.pitch, self.yaw, 0.0)
         return (mdl, mdl.frame_verts(frame, self.sv.time), org, ang)
 

@@ -8,9 +8,9 @@ interactive; then chase the wins; gate the expensive, uncertain work behind data
    on-screen HUD, not `cProfile` (its per-call overhead distorts the per-pixel loops).
    Keep `py-spy` as a dev-only sampling tool; don't add it as a dependency.
 
-2. **Console** — Quake-style console + command/cvar table. Cheap, low-risk, and a force
-   multiplier: toggle `ZBUF_SCALE`, noclip, map changes, surface the profiler HUD live.
-   Makes tuning the items below interactive instead of edit-rerun.
+2. **Console** — DONE. Quake-style console + command/cvar table (`quake/console.py`,
+   F1 to toggle, gdi32 frontend). Toggles the render modes, live `zbuf_scale` cvar,
+   noclip, map changes, surfaces the profiler HUD; god/give cheats; stdout capture.
 
 3. **Dynamic resolution, target 60fps** — textured z-buffer mode only (it already renders
    at `1/ZBUF_SCALE`). Closed loop: measure frametime → nudge scale toward a ~16.7ms
@@ -34,3 +34,15 @@ interactive; then chase the wins; gate the expensive, uncertain work behind data
 6. **Menu** — main/pause menu (tkinter UI + game-state machine: start/pause/map-select).
    User-facing polish, lowest technical priority. Sequence last unless the goal is
    shippable feel.
+
+
+
+qcc
+map tools, bsp, light, vis, quaked
+skip tkinter, use ctypes and gdi32
+headless mode for testing
+headless server mode
+bots
+review d3d9 on windows
+c compiled software renderer
+

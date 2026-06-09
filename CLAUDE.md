@@ -58,6 +58,10 @@ quake/perf.py       PROFILER singleton: always-on per-frame section timer (serve
                       EMA-smoothed; section()/begin()/end()/frame_end(); P-key HUD bar chart via bars().
                       The HUD font is Cascadia Mono (Win) / Menlo (mac) -- the stock GDI font and Consolas
                       lack the 1/8-block glyphs the bars draw; win_ui falls back to the stock font if absent
+quake/console.py    Quake-style console: command/cvar/alias registry, line editor, history,
+                      tab-completion, scrollback; pure (no OS/UI). Client owns one, registers
+                      built-ins (render toggles, map, zbuf_scale cvar, god/give, set/echo/clear/
+                      alias/exec/help/quit). gdi32 frontend (F1) routes keys + draws the panel.
 client.py           UI-agnostic Client: engine stack + camera/player/game state; frame(dt, input)→RenderFrame
 main.py             tkinter frontend (all platforms; default off-Windows, or --tk on Windows):
                       after() loop, Canvas/PhotoImage drawing, warp-based mouselook;

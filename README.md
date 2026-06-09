@@ -39,6 +39,7 @@ python main.py --tk e1m1      # force tkinter on Windows
 - `Space` / `C` swim/fly up/down, `Shift` faster.
 - `Tab` toggle mouse-look, `Esc` release / quit.
 - Render modes: `F` flat-shaded, `Z` textured z-buffer, `T` toggle texturing, `N` noclip.
+- `F1` open/close the console (`Esc` also closes).
 
 ## How it works
 
@@ -58,6 +59,7 @@ portable; only the output stream is platform code.
 | `quake/physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove`. Backs the collision builtins (`traceline`, `walkmove`, `movetogoal`, `droptofloor`) |
 | `quake/render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (perspective-correct texels modulated by baked lightmaps, per-pixel 1/z depth). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
 | `quake/snd.py` | Platform-agnostic software sound mixer — a port of `S_PaintChannels` / `SND_Spatialize`. Decodes/resamples once at precache; `mix(nframes)` sums active voices to 16-bit stereo with distance attenuation + stereo pan re-panned every frame. Touches no OS — a backend pulls from it |
+| `quake/console.py` | Quake-style console: command/cvar/alias registry, line editor, history, tab-completion, scrollback; pure (no OS/UI). The gdi32 frontend opens it with F1. |
 | `client.py` | UI-agnostic game client: the `Client` core holds the engine stack + all camera/player/game state and exposes `frame(dt, input) -> RenderFrame`; the `InputState` / `RenderFrame` dataclasses are the only contracts shared by the two frontends |
 | `main.py` | tkinter frontend (all platforms; default off-Windows and via `--tk` on Windows): `after()` game loop, Canvas/`PhotoImage` drawing, warp-based mouselook. `select_frontend(argv, platform)` decides which frontend to launch |
 | `win_gdi.py` | gdi32 Windows frontend (the default on Windows): owns a `PeekMessage` game loop and Win32 raw-input mouselook + cursor grab, draws via `win_ui.GdiBlitter` (StretchDIBits / Polyline / Polygon / FillRect / TextOut). Exists because tkinter owns the message pump and the software render blocks it, so raw mouse input backlogs — a dedicated loop that drains all input each frame fixes that |

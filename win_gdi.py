@@ -102,6 +102,7 @@ class GameWindow:
         self.running = True
         self.raw_events = 0             # cumulative WM_INPUT count (diagnostics only)
         self.console = None             # wired to client.con in run(); None until then
+        self.menu = None                # wired to client.menu in run(); None until then
         u = self.user32 = ctypes.WinDLL("user32")
         k = ctypes.WinDLL("kernel32")
         for name, restype, argtypes in (
@@ -204,9 +205,10 @@ class GameWindow:
                 self._toggle_console()
             elif self.console and self.console.active:
                 self._console_key(wparam)
+            elif self.menu and self.menu.active:
+                self._menu_key(wparam)
             elif wparam == VK_ESCAPE:
-                self.running = False
-                self.user32.PostQuitMessage(0)
+                self._open_menu()
             else:
                 self.keys.add(wparam)
         elif msg in (WM_KEYUP, WM_SYSKEYUP):
@@ -226,14 +228,46 @@ class GameWindow:
 
     def _toggle_console(self):
         """F1: open/close the console. Opening clears held movement keys and
-        ungrabs the mouse so the cursor is visible while typing."""
+        ungrabs the mouse so the cursor is visible while typing, and closes the
+        overlay menu so the two panels are never active at once."""
         con = self.console
         if con is None:
             return
         con.active = not con.active
         if con.active:
+            if self.menu:
+                self.menu.active = False
             self.keys.clear()
             self.ungrab()
+
+    def _open_menu(self):
+        """Esc (with the console closed): open the overlay menu. Clears held keys
+        and ungrabs the mouse so the cursor is visible, like opening the console.
+        Falls back to quitting if no menu is wired."""
+        if self.menu is None:
+            self.running = False
+            self.user32.PostQuitMessage(0)
+            return
+        self.menu.active = True
+        self.keys.clear()
+        self.ungrab()
+
+    def _menu_key(self, vk):
+        """Drive the overlay menu from a virtual-key while it is open. Everything
+        here is swallowed -- no game state is touched."""
+        m = self.menu
+        if vk == VK_ESCAPE:
+            m.key_escape()
+        elif vk == VK_UP:
+            m.key_up()
+        elif vk == VK_DOWN:
+            m.key_down()
+        elif vk == VK_LEFT:
+            m.key_left()
+        elif vk == VK_RIGHT:
+            m.key_right()
+        elif vk == VK_RETURN:
+            m.key_enter()
 
     def _console_key(self, vk):
         """Drive the console line editor from a virtual-key while it is open.
@@ -312,6 +346,10 @@ class GameWindow:
             # (keep mouselook flag only so the HUD prompt is right).
             self._prev_keys = set()
             return InputState(mouselook=self.mouselook)
+        if self.menu and self.menu.active:
+            # menu owns the keyboard; feed the Client a do-nothing frame
+            self._prev_keys = set()
+            return InputState(mouselook=self.mouselook)
         keys = self.keys
         newly = keys - self._prev_keys     # keys pressed since last frame
 
@@ -368,6 +406,7 @@ def run(mapname):
     real_stdout = sys.stdout            # restored in finally; safe even if Client() throws
     client = Client(mapname)
     win.console = client.con
+    win.menu = client.menu
     sys.stdout = TeeStdout(real_stdout, client.con.print)
     blitter = None
 
@@ -412,6 +451,8 @@ def run(mapname):
             if rf.console is not None:
                 lines, input_line, cursor_col = rf.console
                 blitter.draw_console(lines, input_line, cursor_col, cw, ch)
+            if rf.menu is not None:
+                blitter.draw_menu(rf.menu, cw, ch)
             PROFILER.frame_end()     # roll this frame's section times into the HUD readout
     finally:
         sys.stdout = real_stdout

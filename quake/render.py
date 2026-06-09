@@ -94,19 +94,29 @@ def poly_spans(sx, sy, width, height):
                     xx += slope
         ax, ay = bx, by
     spans = []
+    append = spans.append
+    int_ = int
     for r in range(nr):
         lf = xl[r]
         rf = xr[r]
         if lf > rf:                          # row never crossed (clipped away)
-            spans.append((0, 0))
+            append((0, 0))
             continue
-        xli = ceil(lf - 0.5)                 # centres in [lf, rf)
+        # exact ceil(x - 0.5) without a math.ceil call: int() truncates toward
+        # zero (= ceil for negatives, floor for positives), bump when below.
+        t = lf - 0.5                         # centres in [lf, rf)
+        xli = int_(t)
+        if xli < t:
+            xli += 1
         if xli < 0:
             xli = 0
-        xri = ceil(rf - 0.5)
+        t = rf - 0.5
+        xri = int_(t)
+        if xri < t:
+            xri += 1
         if xri > width:
             xri = width
-        spans.append((xli, xri))
+        append((xli, xri))
     return y0, spans
 
 
@@ -1593,6 +1603,8 @@ class Renderer:
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
             y, spans = poly_spans(sx, sy, iw, ih)
             zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
+            flat_lm = lmw == 1 and lmh == 1            # sky / alias / pickups:
+            sh0 = lux[0]                               # shade constant per poly
             for xli, xri in spans:
                 if xli < xri:
                     xc = xli + 0.5; yc = y + 0.5
@@ -1601,6 +1613,22 @@ class Renderer:
                     voz = v00 + vdx * xc + vdy * yc
                     row = y * iwl
                     fo = (row + xli) * 3
+                    if flat_lm:
+                        for idx in range(row + xli, row + xri):
+                            if iz > zbl[idx]:
+                                z = 1.0 / iz
+                                o = (int_(voz * z) % th * tw
+                                     + int_(uoz * z) % tw) * 3
+                                zbl[idx] = iz
+                                fbl[fo] = (tex[o] * sh0) >> 8
+                                fbl[fo + 1] = (tex[o + 1] * sh0) >> 8
+                                fbl[fo + 2] = (tex[o + 2] * sh0) >> 8
+                            iz += zdx
+                            uoz += udx
+                            voz += vdx
+                            fo += 3
+                        y += 1
+                        continue
                     for idx in range(row + xli, row + xri):
                         if iz > zbl[idx]:
                             z = 1.0 / iz
@@ -1630,6 +1658,9 @@ class Renderer:
             # the pixel body is one perspective divide, one fetch, one store.
             # UVs are rebased to the cache origin (csmin, ctmin) up front; the
             # cache spans the face's whole extent, so no wrap or clamp needed.
+            # (16-px affine subdivision a la D_DrawSpans16 was tried and was a
+            # wash: spans here average under 10 pixels, so the per-segment
+            # setup costs what the cheaper pixel body saves.)
             cw, ch, cache = surf[0], surf[1], surf[2]
             out = []
             A = cam[-1]; da = A[2] - NEAR

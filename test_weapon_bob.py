@@ -17,7 +17,7 @@ view_origins() reproduces Quake's relationship: camera eye carries +bob, and
 the gun is eye + forward*bob*0.4.
 """
 
-from main import view_origins
+from client import view_origins
 
 
 def test_camera_carries_the_bob():

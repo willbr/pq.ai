@@ -16,7 +16,7 @@ Covers two seams of the fix:
 
 from quake.pak import Pak
 from quake.mdl import Mdl, EF_ROTATE
-from main import spin_yaw
+from client import spin_yaw
 from quake.sv import anglemod
 
 PAK = "quake-shareware/id1/pak0.pak"

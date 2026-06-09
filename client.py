@@ -399,7 +399,7 @@ class Client:
         try:
             with open(args[0], "r", encoding="utf-8") as fh:
                 text = fh.read()
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             self.con.print(f"exec: {e}")
             return
         for line in text.splitlines():

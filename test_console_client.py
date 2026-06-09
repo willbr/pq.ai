@@ -90,10 +90,60 @@ def test_client_map_command_persists_zbuf_scale():
     assert c.rend.zbuf_scale == 2             # ...but the chosen scale carries over
 
 
+def test_console_god_give_and_set():
+    from client import Client
+    c = Client("e1m1")
+    c.resize(640, 480)
+    # god toggles the player's FL_GODMODE flag through the bound command
+    from quake.sv import FL_GODMODE
+    f = c.sv.f["flags"]
+    base = int(c.sv.vm.fget_f(c.sv.player, f)) & FL_GODMODE
+    c.con.execute("god")
+    assert (int(c.sv.vm.fget_f(c.sv.player, f)) & FL_GODMODE) != base
+    # give sets an ammo pool
+    c.con.execute("give r 42")
+    assert int(c.sv.vm.fget_f(c.sv.player, c.sv.f["ammo_rockets"])) == 42
+    # set writes a float into the QuakeC cvar dict
+    c.con.execute("set teamplay 1")
+    assert c.sv.cvars["teamplay"] == 1.0
+
+
+def test_console_alias_expands_through_client():
+    from client import Client
+    c = Client("e1m1")
+    c.resize(640, 480)
+    before = c.noclip
+    c.con.execute("alias nc noclip")
+    c.con.execute("nc")
+    assert c.noclip != before
+
+
+def test_console_renderframe_payload_when_active():
+    from client import Client, InputState
+    c = Client("e1m1")
+    c.resize(800, 600)
+    c.con.active = True
+    for ch in "map":            # type into the console line
+        c.con.key_char(ch)
+    rf = c.frame(0.016, InputState())
+    assert rf.console is not None
+    lines, input_line, cursor_col = rf.console
+    assert isinstance(lines, list)
+    assert input_line == "]map"
+    assert cursor_col == c.con.cursor + 1
+    # closed -> no payload
+    c.con.active = False
+    rf2 = c.frame(0.016, InputState())
+    assert rf2.console is None
+
+
 if __name__ == "__main__":
     test_renderer_zbuf_scale_is_live()
     test_toggle_god_flips_flag()
     test_give_health_and_ammo()
     test_client_console_bindings()
     test_client_map_command_persists_zbuf_scale()
+    test_console_god_give_and_set()
+    test_console_alias_expands_through_client()
+    test_console_renderframe_payload_when_active()
     print("OK")

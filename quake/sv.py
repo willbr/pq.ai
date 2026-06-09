@@ -103,6 +103,7 @@ IT_NAILS = 512
 IT_ROCKETS = 1024
 IT_CELLS = 2048
 IT_AXE = 4096
+FL_GODMODE = 1                    # .flags bit (defs.qc): damage immunity
 _WEAPON_NAMES = {
     IT_AXE: "Axe", IT_SHOTGUN: "Shotgun", IT_SUPER_SHOTGUN: "Super Shotgun",
     IT_NAILGUN: "Nailgun", IT_SUPER_NAILGUN: "Super Nailgun",
@@ -1474,6 +1475,36 @@ class Server:
         if not self.player:
             return 0.0
         return self.vm.fget_f(self.player, self.f["health"])
+
+    def toggle_god(self):
+        """Flip FL_GODMODE on the player edict; returns the new state. No-op
+        (False) if there is no live player."""
+        if not self.player:
+            return False
+        vm, f, e = self.vm, self.f, self.player
+        flags = int(vm.fget_f(e, f["flags"])) ^ FL_GODMODE
+        vm.fset_f(e, f["flags"], float(flags))
+        return bool(flags & FL_GODMODE)
+
+    def give(self, what, amount=None):
+        """Cheat: set the player's health or one of the four ammo pools.
+        `what` is h/health or s/n/r/c; `amount` defaults to 100. Returns a
+        status string for the console."""
+        if not self.player:
+            return "no player"
+        vm, f, e = self.vm, self.f, self.player
+        amt = 100 if amount is None else amount
+        key = what.lower()
+        if key in ("h", "health"):
+            vm.fset_f(e, f["health"], float(amt))
+            return f"health {int(vm.fget_f(e, f['health']))}"
+        pools = {"s": "ammo_shells", "n": "ammo_nails",
+                 "r": "ammo_rockets", "c": "ammo_cells"}
+        if key in pools:
+            fld = pools[key]
+            vm.fset_f(e, f[fld], float(amt))
+            return f"{fld} {int(vm.fget_f(e, f[fld]))}"
+        return f"give: unknown item {what}"
 
     def player_origin(self):
         return self.vm.fget_v(self.player, self.f["origin"]) if self.player else None

@@ -100,6 +100,38 @@ def test_history_recall_up_and_down():
     con.key_down(); assert con.input == ""   # back to the live (empty) edit
 
 
+def test_key_char_filters_control_and_multichar():
+    con = Console()
+    con.key_char("\n")          # control char -> ignored
+    con.key_char("\x7f")        # DEL -> ignored
+    con.key_char("ab")          # multi-char -> ignored
+    con.key_char("\t")          # tab (control) -> ignored
+    assert con.input == "" and con.cursor == 0
+    con.key_char("x")           # a real char still works
+    assert con.input == "x"
+
+
+def test_recall_then_edit_reanchors_history():
+    con = Console()
+    con.register_command("map", lambda a: None)
+    con.input = "map e1m1"; con.cursor = len(con.input)
+    con.key_enter()
+    con.key_up()                        # recall "map e1m1"
+    assert con.input == "map e1m1"
+    con.key_char("x")                   # edit it -> "map e1m1x"
+    con.key_enter()
+    assert con.history[-1] == "map e1m1x"
+    assert con.hist_pos == len(con.history)
+    con.key_up()                        # next recall returns the edited line
+    assert con.input == "map e1m1x"
+
+
+def test_key_up_with_empty_history_is_noop():
+    con = Console()
+    con.key_up()
+    assert con.input == "" and con.cursor == 0
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

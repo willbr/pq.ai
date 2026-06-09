@@ -1,3 +1,14 @@
+things to fix in texture view
+* visible trigger volumes
+* platforms render as static and dont move, but the physics work
+* button textures dont change when you press them
+* sky texture is double layered
+* deathmax bits are rendered in e1m1
+
+review if we're using a palleted rendering like quake1
+review what's cached
+review D.CacheSurface
+
 # Ideas / backlog
 
 Ordered by recommended sequence. Rationale: measure before optimizing; make tuning
@@ -44,5 +55,4 @@ headless mode for testing
 headless server mode
 bots
 review d3d9 on windows
-c compiled software renderer
 

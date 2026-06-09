@@ -417,13 +417,17 @@ class GdiBlitter:
             g.GetTextExtentPoint32W(hdc, "X", 1, ctypes.byref(sz))
             lh = sz.cy or 16
             cw = sz.cx or 9
-            # scrollback fills from the top; the input line sits at the panel bottom
-            g.SetTextColor(hdc, colorref((200, 220, 200)))
-            y = 4
-            for line in lines:
-                g.TextOutW(hdc, 6, y, line, len(line))
-                y += lh
+            # input line sits at the panel bottom; scrollback fills UPWARD from
+            # just above it, clamped to the panel top -- so the real font height
+            # (not the Client's row estimate) decides what fits, with no overlap.
             iy = panel_h - lh - 4
+            g.SetTextColor(hdc, colorref((200, 220, 200)))
+            y = iy - lh
+            for line in reversed(lines):          # newest just above the input line
+                if y < 4:
+                    break                         # don't draw above the panel top
+                g.TextOutW(hdc, 6, y, line, len(line))
+                y -= lh
             g.SetTextColor(hdc, colorref((255, 255, 255)))
             g.TextOutW(hdc, 6, iy, input_line, len(input_line))
             # caret: a vertical bar at the cursor column

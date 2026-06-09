@@ -18,8 +18,8 @@ RenderFrame it returns -- entities, HUD, weapon, the works. Mouselook is togglea
 (Tab, or a left-click while the cursor is free, like main.py's click-to-capture);
 ungrabbed the cursor is visible and clicks work via legacy messages.
 
-Run: python win_gdi.py [map]   (Windows). Stage 2 draws only the textured (zbuf)
-path; wire/flat stay on the tkinter front-end for now.
+Run: python win_gdi.py [map]   (Windows). The frontend draws all three render
+modes (textured/wireframe/flat) via GdiBlitter.
 
 NOTE: the SpikeWindow-derived window class below is duplicated from spike_gdi.py on
 purpose -- Stage 4 deletes the spike and this stays self-contained. Sharing the
@@ -298,13 +298,13 @@ def run(mapname):
     win = GameWindow(f"pq.ai gdi — {mapname}", 800, 600)
     client = Client(mapname)
     blitter = None
-    blitter = win_ui.GdiBlitter(win.hwnd)
-    cw, ch = win.client_size()
-    client.resize(cw, ch)
-    last_wh = (cw, ch)
 
     last = time.perf_counter()
     try:
+        blitter = win_ui.GdiBlitter(win.hwnd)
+        cw, ch = win.client_size()
+        client.resize(cw, ch)
+        last_wh = (cw, ch)
         while win.running:
             win.pump()                       # drain ALL input first
             if not win.running:

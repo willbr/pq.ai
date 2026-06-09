@@ -20,6 +20,7 @@ paths are used.
 
 import ctypes
 import math
+import os
 import sys
 import time
 import tkinter as tk
@@ -207,6 +208,15 @@ class App:
         self.rawmouse = None
         self.gdi_present = True
         self._overlays_visible = True
+        # PQ_DIAG=1: per-second stderr report to locate the input-starvation
+        # culprit (tick rate, legacy <Motion> rate, raw event rate, key delivery).
+        self._diag = os.environ.get("PQ_DIAG") == "1"
+        self._diag_t = time.perf_counter()
+        self._diag_ticks = 0
+        self._diag_motion = 0
+        self._diag_look = 0.0
+        self._diag_work = 0.0
+        self._diag_raw0 = 0
         self.last_t = time.perf_counter()
         self.fps = 0.0
         # fire (button0) comes from two inputs -- the mouse and the Ctrl key --
@@ -432,6 +442,8 @@ class App:
         if self.rawmouse is None or not self.mouselook:
             return
         dx, dy = self.rawmouse.read()
+        if self._diag:
+            self._diag_look += (abs(dx) + abs(dy)) * LOOK_SENS
         if dx or dy:
             self.yaw -= dx * LOOK_SENS
             self.pitch += dy * LOOK_SENS
@@ -469,9 +481,11 @@ class App:
             _reassociate_cursor()
 
     def _motion(self, e):
-        # On Windows the raw-input path (_apply_rawlook) owns the view; the legacy
-        # WM_MOUSEMOVE still fires (no RIDEV_NOLEGACY), so ignore it here or the
-        # view would turn twice as fast.
+        if self._diag:
+            self._diag_motion += 1     # count <Motion> even on the raw path
+        # On Windows the raw-input path (_apply_rawlook) owns the view; with
+        # RIDEV_NOLEGACY the legacy WM_MOUSEMOVE should stop, so this should fall
+        # silent during a grab -- the diag counter above verifies that.
         if self.rawmouse is not None:
             return
         if not self.mouselook:
@@ -744,7 +758,37 @@ class App:
             self.canvas.tag_raise(self.statusbar)
         # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
         work_ms = (time.perf_counter() - now) * 1000
+        if self._diag:
+            self._diag_report(now, work_ms)
         self.root.after(max(1, int(16 - work_ms)), self.tick)
+
+    def _diag_report(self, now, work_ms):
+        """Per-second stderr line locating the input-starvation culprit:
+          tick/s    -> is the after() frame loop being starved?
+          motion/s  -> is legacy WM_MOUSEMOVE still flooding (NOLEGACY failed)?
+          raw/s     -> WM_INPUT rate hitting the WndProc
+          look/s    -> degrees of yaw+pitch actually applied (delta loss?)
+          w         -> did the W key reach self.keys during motion?
+        Read it while holding W and swinging the mouse vs. standing still."""
+        self._diag_ticks += 1
+        self._diag_work += work_ms
+        elapsed = now - self._diag_t
+        if elapsed < 1.0:
+            return
+        raw = self.rawmouse.events if self.rawmouse is not None else 0
+        print(f"[diag] tick/s={self._diag_ticks / elapsed:4.0f}  "
+              f"motion/s={self._diag_motion / elapsed:5.0f}  "
+              f"raw/s={(raw - self._diag_raw0) / elapsed:5.0f}  "
+              f"look/s={self._diag_look / elapsed:6.1f}deg  "
+              f"w={'w' in self.keys}  grab={self.mouselook}  "
+              f"avg_work={self._diag_work / self._diag_ticks:4.1f}ms",
+              file=sys.stderr)
+        self._diag_t = now
+        self._diag_ticks = 0
+        self._diag_motion = 0
+        self._diag_look = 0.0
+        self._diag_work = 0.0
+        self._diag_raw0 = raw
 
     def _sync_from_player(self):
         """A trigger (teleport) may have moved the player edict during the QC

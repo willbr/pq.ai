@@ -267,6 +267,7 @@ class RawMouse:
         self._dx = 0
         self._dy = 0
         self.left_down = False         # fire button, read from raw (legacy suppressed)
+        self.events = 0                # WM_INPUT count (diagnostics)
         self._grabbed = False
         u = self.user32 = ctypes.WinDLL("user32")
         u.RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE),
@@ -315,6 +316,7 @@ class RawMouse:
         got = self.user32.GetRawInputData(lparam, RID_INPUT, ctypes.byref(ri),
                                           ctypes.byref(size),
                                           ctypes.sizeof(RAWINPUTHEADER))
+        self.events += 1
         if got == 0xFFFFFFFF or ri.header.dwType != RIM_TYPEMOUSE:
             return
         dx, dy = raw_mouse_delta(ri.mouse.usFlags, ri.mouse.lLastX, ri.mouse.lLastY)

@@ -198,6 +198,10 @@ class Renderer:
         self.headnode = bsp.models[0]["headnode"]
         self.width = 800
         self.height = 600
+        # textured-mode resolution divisor: render at 1/zbuf_scale of the window.
+        # An instance attribute (not the module constant) so the console's
+        # zbuf_scale cvar can change it live; resize() reads it.
+        self.zbuf_scale = ZBUF_SCALE
         self.fov = 90.0
         self.backface = True
         self.brushmodels = True     # draw doors/lifts/buttons (submodels 1..N)
@@ -582,8 +586,8 @@ class Renderer:
         current window size. _bg_frame is a pre-coloured background to copy each
         frame; _zb_zero seeds the depth buffer to 0 (= infinitely far, since we
         store 1/z and keep the larger value)."""
-        self.zw = max(1, self.width // ZBUF_SCALE)
-        self.zh = max(1, self.height // ZBUF_SCALE)
+        self.zw = max(1, self.width // self.zbuf_scale)
+        self.zh = max(1, self.height // self.zbuf_scale)
         self._bg_frame = bytes(ZBUF_BG) * (self.zw * self.zh)
         self._zb_zero = bytes(4 * self.zw * self.zh)
 

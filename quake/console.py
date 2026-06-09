@@ -245,3 +245,37 @@ class Console:
             self.input = (self.history[self.hist_pos]
                           if self.hist_pos < len(self.history) else "")
             self.cursor = len(self.input)
+
+    # ---- tab-completion ----
+    def key_tab(self):
+        prefix = self.input
+        if not prefix:
+            return
+        names = sorted(set(self.commands) | set(self.cvars) | set(self.aliases))
+        matches = [n for n in names if n.startswith(prefix)]
+        if not matches:
+            return
+        if len(matches) == 1:
+            self.input = matches[0] + " "
+            self.cursor = len(self.input)
+            return
+        common = _common_prefix(matches)
+        if len(common) > len(prefix):
+            self.input = common
+            self.cursor = len(common)
+        self.print("  ".join(matches))
+
+    # ---- scrollback paging / view ----
+    def key_pageup(self):
+        top = max(0, len(self.lines) - 1)
+        self.scroll = min(top, self.scroll + self.PAGE)
+
+    def key_pagedown(self):
+        self.scroll = max(0, self.scroll - self.PAGE)
+
+    def view_lines(self, n):
+        total = len(self.lines)
+        self.scroll = max(0, min(self.scroll, max(0, total - 1)))
+        end = total - self.scroll
+        start = max(0, end - n)
+        return list(self.lines)[start:end]

@@ -381,6 +381,8 @@ class GdiBlitter:
         FillRect [x-half, y-half, x+half, y+half] with a brush of that colour.
         Brushes are grouped by colour so a run of same-colour particles reuses one
         brush; every created brush is DeleteObject'd before returning."""
+        if not particles:
+            return
         u, g = self.user32, self.gdi32
         brushes = {}
         try:

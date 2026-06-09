@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from quake.pak import Pak
 from quake.bsp import Bsp
 from quake.render import (Renderer, PickupModel, angle_vectors,
-                          lightstyle_values)
+                          lightstyle_values, ZBUF_SCALE)
+from quake.console import Console
 from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED
 from quake.progs import Progs
 from quake.sv import Server, anglemod
@@ -93,6 +94,7 @@ class RenderFrame:
     particles: list = field(default_factory=list)
     overlays: list = field(default_factory=list)
     crosshair: tuple = (0, 0)
+    console: tuple = None    # (lines, input_line, cursor_col) when open, else None
 
 
 class Client:
@@ -136,8 +138,13 @@ class Client:
         # mode derived from the renderer flags above
         self.mode = "zbuf" if self.zbuf else "flat" if self.flat else "wire"
 
+        self.quit_requested = False
+        self._zbuf_scale = ZBUF_SCALE     # desired textured divisor, persists across maps
+        self.con = Console()
+
         if not self._load_map(mapname):
             raise ValueError(f"no such map: maps/{mapname}.bsp")
+        self._register_console()
 
     # ---- level loading ----
     def _load_map(self, mapname, skill=1):
@@ -156,6 +163,7 @@ class Client:
 
         self.bsp = Bsp(self.pak.read(path))
         self.rend = Renderer(self.bsp, self.palette)
+        self.rend.zbuf_scale = self._zbuf_scale   # keep the console's chosen scale
         self.phys = Physics(self.bsp)
 
         # QuakeC server: spawn the level's entities and run their logic. Doors,
@@ -278,6 +286,152 @@ class Client:
             forward, right, fwd * speed, strafe * speed, upmove, speed,
             self.onground, jump, step)
 
+    # ---- render-state toggles (shared by the hotkeys and the console) ----
+    def _toggle_noclip(self):
+        self.noclip = not self.noclip
+        self.vel = [0.0, 0.0, 0.0]
+
+    def _toggle_flat(self):
+        self.flat = not self.flat
+
+    def _toggle_zbuf(self):
+        self.zbuf = not self.zbuf
+
+    def _toggle_texture(self):
+        self.textured = not self.textured
+
+    def _toggle_prof(self):
+        self.show_prof = not self.show_prof
+
+    def _apply_mode(self):
+        self.mode = "zbuf" if self.zbuf else "flat" if self.flat else "wire"
+
+    # ---- console registration / commands ----
+    def _register_console(self):
+        """Register the built-in commands and cvars that bind to this Client's
+        state. Called after the first _load_map so self.rend exists."""
+        con = self.con
+
+        def mode_cmd(toggle):
+            def run(args):
+                toggle()
+                self._apply_mode()
+            return run
+
+        con.register_command("noclip", mode_cmd(self._toggle_noclip), "toggle noclip flight")
+        con.register_command("flat", mode_cmd(self._toggle_flat), "toggle flat-shaded mode")
+        con.register_command("zbuf", mode_cmd(self._toggle_zbuf), "toggle textured z-buffer mode")
+        con.register_command("texture", mode_cmd(self._toggle_texture), "toggle texturing")
+        con.register_command("prof", mode_cmd(self._toggle_prof), "toggle the profiler HUD")
+        con.register_command("map", self._cmd_map, "map <name>: load a level")
+        con.register_command("god", self._cmd_god, "toggle god mode")
+        con.register_command("give", self._cmd_give, "give <h|s|n|r|c> [amount]")
+        con.register_command("set", self._cmd_set, "set <cvar> [value]: a QuakeC cvar")
+        con.register_command("echo", lambda a: con.print(" ".join(a)), "echo text")
+        con.register_command("clear", lambda a: con.lines.clear(), "clear the console")
+        con.register_command("alias", self._cmd_alias, "alias <name> <text...>")
+        con.register_command("exec", self._cmd_exec, "exec <file>: run console lines")
+        con.register_command("cmdlist", self._cmd_cmdlist, "list commands")
+        con.register_command("cvarlist", self._cmd_cvarlist, "list cvars")
+        con.register_command("help", self._cmd_help, "help [name]")
+        con.register_command("quit", self._cmd_quit, "quit the game")
+        con.register_command("exit", self._cmd_quit, "quit the game")
+        con.register_cvar("zbuf_scale", self._zbuf_scale,
+                          on_change=self._on_zbuf_scale,
+                          help="textured rasteriser resolution divisor (1-16)")
+
+    def _on_zbuf_scale(self, cv):
+        v = max(1, min(16, cv.as_int()))
+        cv.value = str(v)                         # write the clamped value back
+        self._zbuf_scale = v
+        self.rend.zbuf_scale = v
+        if self._view_wh != (0, 0):
+            self.rend.resize(*self._view_wh)
+        self.con.print(f"zbuf_scale {v}")
+
+    def _cmd_map(self, args):
+        if not args:
+            self.con.print("usage: map <name>")
+            return
+        if self._load_map(args[0]):               # rebuilds rend/sv; prints its own miss
+            self.con.print(f"loading {args[0]}")
+
+    def _cmd_god(self, args):
+        self.con.print("godmode " + ("ON" if self.sv.toggle_god() else "OFF"))
+
+    def _cmd_give(self, args):
+        if not args:
+            self.con.print("usage: give <h|s|n|r|c> [amount]")
+            return
+        amount = (int(args[1]) if len(args) > 1 and args[1].lstrip("-").isdigit()
+                  else None)
+        self.con.print(self.sv.give(args[0], amount))
+
+    def _cmd_set(self, args):
+        if not args:
+            self.con.print("usage: set <cvar> [value]")
+            return
+        name = args[0]
+        if len(args) >= 2:
+            try:
+                val = float(args[1])
+            except ValueError:
+                val = 0.0
+            self.sv.cvars[name] = val
+            self.con.print(f"{name} = {val:g}")
+        else:
+            self.con.print(f"{name} = {self.sv.cvars.get(name, 0.0):g}")
+
+    def _cmd_alias(self, args):
+        if not args:
+            for name, text in sorted(self.con.aliases.items()):
+                self.con.print(f"{name}: {text}")
+            return
+        if len(args) == 1:
+            self.con.print(f"usage: alias {args[0]} <text...>")
+            return
+        self.con.register_alias(args[0], " ".join(args[1:]))
+
+    def _cmd_exec(self, args):
+        if not args:
+            self.con.print("usage: exec <file>")
+            return
+        try:
+            with open(args[0], "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as e:
+            self.con.print(f"exec: {e}")
+            return
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("//"):
+                self.con.execute(line)
+
+    def _cmd_cmdlist(self, args):
+        for name in sorted(self.con.commands):
+            self.con.print(f"{name:<12}{self.con.commands[name].help}")
+
+    def _cmd_cvarlist(self, args):
+        for name in sorted(self.con.cvars):
+            cv = self.con.cvars[name]
+            self.con.print(f"{name:<14}{cv.value:<6}{cv.help}")
+
+    def _cmd_help(self, args):
+        if args:
+            name = args[0]
+            if name in self.con.commands:
+                self.con.print(f"{name}: {self.con.commands[name].help}")
+            elif name in self.con.cvars:
+                self.con.print(f"{name}: {self.con.cvars[name].help}")
+            else:
+                self.con.print(f"no such command or cvar: {name}")
+            return
+        self.con.print("commands: " + "  ".join(sorted(self.con.commands)))
+        self.con.print("cvars: " + "  ".join(sorted(self.con.cvars)))
+
+    def _cmd_quit(self, args):
+        self.quit_requested = True
+
     # ---- main loop ----
     def frame(self, dt, inp):
         """Advance one frame from `dt` seconds and `inp` intent, returning a
@@ -298,21 +452,16 @@ class Client:
         if inp.impulse:
             self.pending_impulse = inp.impulse
 
-        # one-shot edge-triggered toggles fired this frame
+        # one-shot edge-triggered toggles fired this frame (keyboard keys)
         if inp.commands:
+            dispatch = {"noclip": self._toggle_noclip, "flat": self._toggle_flat,
+                        "zbuf": self._toggle_zbuf, "texture": self._toggle_texture,
+                        "prof": self._toggle_prof}
             for cmd in inp.commands:
-                if cmd == "noclip":
-                    self.noclip = not self.noclip
-                    self.vel = [0.0, 0.0, 0.0]
-                elif cmd == "flat":
-                    self.flat = not self.flat
-                elif cmd == "zbuf":
-                    self.zbuf = not self.zbuf
-                elif cmd == "texture":
-                    self.textured = not self.textured
-                elif cmd == "prof":
-                    self.show_prof = not self.show_prof
-            self.mode = "zbuf" if self.zbuf else "flat" if self.flat else "wire"
+                fn = dispatch.get(cmd)
+                if fn:
+                    fn()
+            self._apply_mode()
 
         PROFILER.begin("server")     # QuakeC tick + physics for this frame
         dead = False                 # set below once health hits 0 (death cam)
@@ -482,9 +631,17 @@ class Client:
         if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
             overlays.append((w // 2, h // 3, cm[0], (255, 255, 0), "center"))
 
+        con = self.con
+        console = None
+        if con.active:
+            con.width = max(20, w // 9)           # ~9px per monospace cell at the HUD size
+            rows = max(1, (h * 2 // 5) // 16 - 1)  # panel is ~40% tall, ~16px lines
+            console = (con.view_lines(rows), "]" + con.input, con.cursor + 1)
+
         return RenderFrame(mode=self.mode, segs=segs, polys=polys,
                            framebuffer=framebuffer, particles=particles,
-                           overlays=overlays, crosshair=(w // 2, h // 2))
+                           overlays=overlays, crosshair=(w // 2, h // 2),
+                           console=console)
 
     def _particle_sprites(self, eye):
         """Project the live particles to screen and return a list of (x, y, half,

@@ -1,9 +1,6 @@
 things to fix in texture view
-* visible trigger volumes
-* platforms render as static and dont move, but the physics work
 * button textures dont change when you press them
 * sky texture is double layered
-* deathmax bits are rendered in e1m1
 
 review if we're using a palleted rendering like quake1
 review what's cached

@@ -22,7 +22,16 @@ def test_renderframe_holds_mode_and_overlays():
     assert rf.overlays[0][2] == "hi"
 
 
+def test_client_boots_e1m1_with_spawn_and_viewport():
+    c = client.Client("e1m1")
+    c.resize(800, 600)
+    assert len(c.pos) == 3                 # player origin from the spawn point
+    assert isinstance(c.yaw, float)
+    assert c.mode in ("wire", "flat", "zbuf")
+
+
 if __name__ == "__main__":
     test_inputstate_defaults_are_neutral()
     test_renderframe_holds_mode_and_overlays()
+    test_client_boots_e1m1_with_spawn_and_viewport()
     print("OK")

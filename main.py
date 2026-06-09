@@ -11,6 +11,11 @@ Controls:
     Space           jump (walk) / up (noclip)  Shift   move faster
     N               toggle noclip flight        Tab    toggle mouselook
     F               toggle flat shading         Esc    release mouse / quit
+    Z               toggle z-buffer (textured)  G      (Windows) GDI vs PPM present
+
+On Windows mouselook uses real raw input + a cursor grab (win_ui), and textured
+mode can present via GDI StretchDIBits; elsewhere the tkinter warp + PhotoImage
+paths are used.
 """
 
 import ctypes
@@ -194,6 +199,14 @@ class App:
         self.keys = set()
         self.mouselook = False
         self._last_mouse = None
+        # Windows front-end (win_ui): real raw-input mouselook (no warp) and a
+        # GDI StretchDIBits present for textured mode. Both hang off the Tk HWND;
+        # None elsewhere, where the tkinter warp + PhotoImage paths stay. The 'G'
+        # key A/Bs the GDI present against the PPM path (see _draw_fb).
+        self.gdi = None
+        self.rawmouse = None
+        self.gdi_present = True
+        self._overlays_visible = True
         self.last_t = time.perf_counter()
         self.fps = 0.0
         # fire (button0) comes from two inputs -- the mouse and the Ctrl key --
@@ -210,6 +223,12 @@ class App:
 
         self._bind()
         self.canvas.focus_set()
+        if sys.platform == "win32":
+            import win_ui
+            self.root.update_idletasks()         # realise the window -> HWND exists
+            hwnd = self.root.winfo_id()
+            self.gdi = win_ui.GdiBlitter(hwnd)
+            self.rawmouse = win_ui.RawMouse(hwnd)
         self.root.after(16, self.tick)
 
     # ---- level loading ----
@@ -358,15 +377,23 @@ class App:
             return
         if k == "z":
             self.zbuf = not self.zbuf
-            if self.zbuf:                        # park both vector pools, show fb
+            # show the Tk fb image only on the PPM path; the GDI present blits
+            # straight to the window, so its fb_item stays hidden.
+            show_fb = self.zbuf and not (self.gdi is not None and self.gdi_present)
+            if self.zbuf:                        # park both vector pools
                 self._park(self.pool, self.prev_n, 4); self.prev_n = 0
                 self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
-                self.canvas.itemconfig(self.fb_item, state="normal")
-            else:                                # hide fb; flat/wire redraws next
-                self.canvas.itemconfig(self.fb_item, state="hidden")
+            self.canvas.itemconfig(self.fb_item,
+                                   state="normal" if show_fb else "hidden")
             return
         if k == "t":                             # texturing on/off (z-buffer mode)
             self.textured = not self.textured
+            return
+        if k == "g" and self.gdi is not None:    # A/B the GDI present vs the PPM path
+            self.gdi_present = not self.gdi_present
+            self.canvas.itemconfig(
+                self.fb_item,
+                state="normal" if self.zbuf and not self.gdi_present else "hidden")
             return
         if len(k) == 1 and "1" <= k <= "8":   # select a weapon (Quake impulse 1-8)
             self.pending_impulse = int(k)
@@ -391,9 +418,36 @@ class App:
             self.fire_mouse = False       # releasing the mouse stops mouse-firing
             self._set_attack()
         self.canvas.config(cursor="none" if on else "")
-        if on:
+        if self.rawmouse is not None:
+            # real OS grab: raw relative input + confined/hidden cursor, no warp
+            self.rawmouse.grab() if on else self.rawmouse.ungrab()
+        elif on:
             self._last_mouse = None
             self._warp_center()
+
+    def _apply_rawlook(self):
+        """Fold this frame's accumulated raw-mouse deltas into yaw/pitch (Windows).
+        Replaces the warp/look_delta path: deltas come straight from the HID via
+        win_ui.RawMouse, so there is no recenter and no straddle to guard against."""
+        if self.rawmouse is None or not self.mouselook:
+            return
+        dx, dy = self.rawmouse.read()
+        if dx or dy:
+            self.yaw -= dx * LOOK_SENS
+            self.pitch += dy * LOOK_SENS
+            self.pitch = max(-89.0, min(89.0, self.pitch))
+
+    def _set_tk_overlays(self, visible):
+        """Show/hide the Tk HUD canvas items. The GDI present path hides them and
+        draws the HUD with GDI text instead; every other path keeps them. (fb_item
+        is left out -- the Z toggle owns its visibility.) Guarded so it only churns
+        item state on an actual transition."""
+        if self._overlays_visible == visible:
+            return
+        self._overlays_visible = visible
+        state = "normal" if visible else "hidden"
+        for item in (self.hud, self.crosshair, self.center_text, self.statusbar):
+            self.canvas.itemconfig(item, state=state)
 
     def _warp_center(self):
         w = self.canvas.winfo_width()
@@ -411,6 +465,11 @@ class App:
             _reassociate_cursor()
 
     def _motion(self, e):
+        # On Windows the raw-input path (_apply_rawlook) owns the view; the legacy
+        # WM_MOUSEMOVE still fires (no RIDEV_NOLEGACY), so ignore it here or the
+        # view would turn twice as fast.
+        if self.rawmouse is not None:
+            return
         if not self.mouselook:
             return
         # Accumulate deltas from the previous cursor position rather than from the
@@ -491,6 +550,7 @@ class App:
         self.last_t = now
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+        self._apply_rawlook()        # Windows raw mouselook -> yaw/pitch (no warp)
         dead = False                 # set below once health hits 0 (death cam)
         # Intermission: the QC has frozen the player at the end-of-level camera
         # spot. Don't move or camera-drive them -- just advance the QC and let
@@ -592,6 +652,10 @@ class App:
             fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
             eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
             view_model = self._view_model(gun_org)
+        # GDI present owns the whole client area, so it can't coexist with Tk
+        # canvas overlays (they'd repaint black boxes through the blit). On that
+        # path the HUD is drawn with GDI text and Tk particles are skipped.
+        use_gdi = self.gdi is not None and self.zbuf and self.gdi_present
         if self.zbuf:
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
             fbdata, leaf = self.rend.render_zbuffer(eye, self.yaw, self.pitch,
@@ -600,7 +664,8 @@ class App:
                                                     textured=self.textured,
                                                     lightstyles=styles,
                                                     time=self.sv.time)
-            self._draw_fb(fbdata)
+            if not use_gdi:
+                self._draw_fb(fbdata)
             nprim = fbdata[1] * fbdata[2]
         elif self.flat:
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
@@ -616,7 +681,8 @@ class App:
             self._draw(segs)
             nprim = len(segs)
 
-        self._draw_particles(eye)
+        if not use_gdi:
+            self._draw_particles(eye)
 
         spd = math.hypot(self.vel[0], self.vel[1])
         mode = ("NOCLIP" if self.noclip else
@@ -625,38 +691,53 @@ class App:
         hp = self.sv.player_health()
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
-        self.canvas.coords(self.crosshair, w // 2, h // 2)
-        # centred message (centerprint): skill choice, the registered notice, ...
+
+        # build the HUD strings once, then route them to GDI text or Tk items
         cm = self.sv.center_msg
-        if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
-            self.canvas.coords(self.center_text, w // 2, h // 3)
-            self.canvas.itemconfig(self.center_text, text=cm[0])
-        else:
-            self.canvas.itemconfig(self.center_text, text="")
-        self.canvas.itemconfig(
-            self.hud,
-            text=(f"{self.fps:5.1f} fps   "
-                  f"{'pixels' if self.zbuf else 'polys' if self.flat else 'segs'} {nprim}   "
-                  f"leaf {leaf}   {mode}   health {hp:.0f}\n"
-                  f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
-                  f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
-                  f"{'MOUSELOOK — mouse/Ctrl fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
-                  f"[N]oclip [F]lat [Z]buffer [T]exture"))
+        center_str = (cm[0] if cm and self.sv.time - cm[1] < CENTER_MSG_TIME else "")
+        hud_str = (f"{self.fps:5.1f} fps   "
+                   f"{'pixels' if self.zbuf else 'polys' if self.flat else 'segs'} {nprim}   "
+                   f"leaf {leaf}   {mode}   health {hp:.0f}\n"
+                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
+                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
+                   f"{'MOUSELOOK — mouse/Ctrl fire, 1-8 weapons' if self.mouselook else 'click to capture mouse'} "
+                   f"[N]oclip [F]lat [Z]buffer [T]exture")
         # bottom status bar: health / armor / current-weapon ammo, plus the four
         # ammo pools. Health reddens when low so it reads at a glance.
         st = self.sv.hud_status()
+        status_str = ""
+        status_rgb = (255, 204, 0)
         if st:
-            self.canvas.coords(self.statusbar, 10, h - 8)
-            self.canvas.itemconfig(
-                self.statusbar, fill="#ff4040" if st["health"] <= 25 else "#ffcc00",
-                text=(f"HEALTH {st['health']:3d}    ARMOR {st['armor']:3d}    "
-                      f"{st['weapon']}: {st['ammo']:3d}\n"
-                      f"shells {st['shells']:3d}  nails {st['nails']:3d}  "
-                      f"rockets {st['rockets']:3d}  cells {st['cells']:3d}"))
-        self.canvas.tag_raise(self.hud)
-        self.canvas.tag_raise(self.crosshair)
-        self.canvas.tag_raise(self.center_text)
-        self.canvas.tag_raise(self.statusbar)
+            status_rgb = (255, 64, 64) if st["health"] <= 25 else (255, 204, 0)
+            status_str = (f"HEALTH {st['health']:3d}    ARMOR {st['armor']:3d}    "
+                          f"{st['weapon']}: {st['ammo']:3d}\n"
+                          f"shells {st['shells']:3d}  nails {st['nails']:3d}  "
+                          f"rockets {st['rockets']:3d}  cells {st['cells']:3d}")
+
+        if use_gdi:
+            self._set_tk_overlays(False)
+            texts = [(8, 8, hud_str, (0, 255, 102), "nw"),
+                     (w // 2, h // 2, "+", (0, 255, 102), "center")]
+            if center_str:
+                texts.append((w // 2, h // 3, center_str, (255, 255, 0), "center"))
+            if status_str:
+                texts.append((10, h - 8, status_str, status_rgb, "sw"))
+            self.gdi.present(fbdata[0], fbdata[1], fbdata[2], w, h, texts)
+        else:
+            self._set_tk_overlays(True)
+            self.canvas.coords(self.crosshair, w // 2, h // 2)
+            if center_str:
+                self.canvas.coords(self.center_text, w // 2, h // 3)
+            self.canvas.itemconfig(self.center_text, text=center_str)
+            self.canvas.itemconfig(self.hud, text=hud_str)
+            if status_str:
+                self.canvas.coords(self.statusbar, 10, h - 8)
+                self.canvas.itemconfig(self.statusbar, text=status_str,
+                                       fill="#%02x%02x%02x" % status_rgb)
+            self.canvas.tag_raise(self.hud)
+            self.canvas.tag_raise(self.crosshair)
+            self.canvas.tag_raise(self.center_text)
+            self.canvas.tag_raise(self.statusbar)
         # target ~60 fps: cap fast maps (saves CPU), never throttle slow ones
         work_ms = (time.perf_counter() - now) * 1000
         self.root.after(max(1, int(16 - work_ms)), self.tick)
@@ -850,7 +931,13 @@ class App:
             coords(pool[i], *off)
 
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            # restore the window's original WndProc and release the cursor grab,
+            # whether we left via Esc/destroy or an exception.
+            if self.rawmouse is not None:
+                self.rawmouse.shutdown()
 
 
 if __name__ == "__main__":

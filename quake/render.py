@@ -202,6 +202,11 @@ class Renderer:
         # An instance attribute (not the module constant) so the console's
         # zbuf_scale cvar can change it live; resize() reads it.
         self.zbuf_scale = ZBUF_SCALE
+        # Fixed textured render resolution: when set to (w, h) the z-buffer
+        # framebuffer is exactly that size (stretched to the window on present),
+        # overriding the zbuf_scale-derived size. None = derive from the window
+        # (today's behaviour); the video-options menu sets a fixed mode.
+        self.video_res = None
         self.fov = 90.0
         self.backface = True
         self.brushmodels = True     # draw doors/lifts/buttons (submodels 1..N)
@@ -586,8 +591,11 @@ class Renderer:
         current window size. _bg_frame is a pre-coloured background to copy each
         frame; _zb_zero seeds the depth buffer to 0 (= infinitely far, since we
         store 1/z and keep the larger value)."""
-        self.zw = max(1, self.width // self.zbuf_scale)
-        self.zh = max(1, self.height // self.zbuf_scale)
+        if self.video_res is not None:
+            self.zw, self.zh = self.video_res        # fixed mode (video menu)
+        else:
+            self.zw = max(1, self.width // self.zbuf_scale)
+            self.zh = max(1, self.height // self.zbuf_scale)
         self._bg_frame = bytes(ZBUF_BG) * (self.zw * self.zh)
         self._zb_zero = bytes(4 * self.zw * self.zh)
 

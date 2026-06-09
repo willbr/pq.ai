@@ -42,6 +42,33 @@ def test_to_dib_bgr_pads_each_row_to_dword_boundary():
     assert out == b"\x03\x02\x01\x00\x0c\x0b\x0a\x00"
 
 
+def test_letterbox_matched_aspect_fills_window():
+    """A framebuffer whose aspect already matches the window fills it edge-to-edge
+    with no bars: 320x240 (4:3) into 800x600 (4:3) -> full window, ox=oy=0."""
+    import win_ui
+    assert win_ui.letterbox_rect(320, 240, 800, 600) == (0, 0, 800, 600)
+
+
+def test_letterbox_wide_framebuffer_gets_top_bottom_bars():
+    """An off-ratio framebuffer is centered with bars: 80x40 (2:1) into 800x600
+    fills the width (800) but only 400 tall, centered with 100px bars top/bottom."""
+    import win_ui
+    assert win_ui.letterbox_rect(80, 40, 800, 600) == (0, 100, 800, 400)
+
+
+def test_letterbox_tall_window_pillarboxes():
+    """A 4:3 framebuffer in a wider window pillarboxes: 320x240 into 1000x600
+    fills the height (600) at 800 wide, centered with 100px bars left/right."""
+    import win_ui
+    assert win_ui.letterbox_rect(320, 240, 1000, 600) == (100, 0, 800, 600)
+
+
+def test_letterbox_degenerate_sizes_fall_back_to_window():
+    """Zero/negative sizes can't define a ratio; fall back to filling the window."""
+    import win_ui
+    assert win_ui.letterbox_rect(0, 40, 800, 600) == (0, 0, 800, 600)
+
+
 def test_raw_mouse_delta_relative_is_passed_through():
     """A MOUSE_MOVE_RELATIVE event (usFlags bit 0 clear) carries deltas directly."""
     import win_ui
@@ -106,6 +133,10 @@ if __name__ == "__main__":
     test_bgr_swap_multi_pixel_keeps_green_and_length()
     test_to_dib_bgr_no_padding_when_row_already_aligned()
     test_to_dib_bgr_pads_each_row_to_dword_boundary()
+    test_letterbox_matched_aspect_fills_window()
+    test_letterbox_wide_framebuffer_gets_top_bottom_bars()
+    test_letterbox_tall_window_pillarboxes()
+    test_letterbox_degenerate_sizes_fall_back_to_window()
     test_raw_mouse_delta_relative_is_passed_through()
     test_raw_mouse_delta_absolute_yields_no_motion()
     test_left_button_press_and_release_track_held_state()

@@ -87,6 +87,21 @@ def to_dib_bgr(rgb, w, h):
     return out
 
 
+def letterbox_rect(src_w, src_h, dst_w, dst_h):
+    """Largest (ox, oy, w, h) rect inside the dst window that preserves the src
+    framebuffer's aspect ratio, centered -- the destination for an aspect-correct
+    StretchDIBits, with the leftover margin left for black bars. Uniform (float)
+    scale, so a src whose aspect matches dst fills it edge-to-edge (ox=oy=0),
+    while an off-ratio src is letterboxed (bars top/bottom) or pillarboxed (bars
+    left/right). Degenerate sizes fall back to filling the window."""
+    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
+        return (0, 0, max(0, dst_w), max(0, dst_h))
+    scale = min(dst_w / src_w, dst_h / src_h)
+    out_w = max(1, round(src_w * scale))
+    out_h = max(1, round(src_h * scale))
+    return ((dst_w - out_w) // 2, (dst_h - out_h) // 2, out_w, out_h)
+
+
 def raw_mouse_delta(usflags, last_x, last_y):
     """Relative mouse motion (dx, dy) from a RAWMOUSE's fields. Absolute-mode
     events (touchpad / remote desktop set MOUSE_MOVE_ABSOLUTE) carry screen
@@ -261,22 +276,58 @@ class GdiBlitter:
         self._wire_pen = g.CreatePen(PS_SOLID, 1, colorref(WIRE_RGB))  # del in close()
 
     def present(self, fb, w, h, dst_w, dst_h, texts=(), particles=()):
-        g, u, hdc = self.gdi32, self.user32, None
+        g, u = self.gdi32, self.user32
         self._buf = to_dib_bgr(fb, w, h)
         self._bmi.biWidth = w
         self._bmi.biHeight = -h                 # negative => top-down (our row order)
         cbuf = (ctypes.c_char * len(self._buf)).from_buffer(self._buf)
+        # scale the framebuffer into the largest aspect-correct rect; an off-ratio
+        # mode (e.g. 80x40 in a 4:3 window) gets centered with black bars rather
+        # than stretched, so pixels stay square.
+        ox, oy, ow, oh = letterbox_rect(w, h, dst_w, dst_h)
         hdc = u.GetDC(self.hwnd)
         if not hdc:
             return
         try:
-            g.StretchDIBits(hdc, 0, 0, dst_w, dst_h, 0, 0, w, h,
+            g.StretchDIBits(hdc, ox, oy, ow, oh, 0, 0, w, h,
                             cbuf, ctypes.byref(self._bmi),
                             DIB_RGB_COLORS, SRCCOPY)
+            if ox or oy:                        # letterboxed: fill bars + fit sprites
+                self._fill_bars(hdc, ox, oy, ow, oh, dst_w, dst_h)
+                particles = self._fit_particles(particles, ox, oy, ow, oh,
+                                                 dst_w, dst_h)
             self._draw_particles_gdi(hdc, particles)
             self._draw_texts(hdc, texts)
         finally:
             u.ReleaseDC(self.hwnd, hdc)
+
+    def _fill_bars(self, hdc, ox, oy, ow, oh, dst_w, dst_h):
+        """Black-fill the letterbox margins around the (ox, oy, ow, oh) image rect,
+        so an off-ratio framebuffer shows bars instead of stale pixels. Only the
+        margins are filled (not the image area), so the world image never flashes
+        black under itself on this single-buffered window DC."""
+        u = self.user32
+        bars = []
+        if oy > 0:                              # top + bottom bands (full width)
+            bars.append((0, 0, dst_w, oy))
+            bars.append((0, oy + oh, dst_w, dst_h))
+        if ox > 0:                              # left + right (within the image band)
+            bars.append((0, oy, ox, oy + oh))
+            bars.append((ox + ow, oy, dst_w, oy + oh))
+        for l, t, r, b in bars:
+            rect = wintypes.RECT(l, t, r, b)
+            u.FillRect(hdc, ctypes.byref(rect), self._black_brush)
+
+    def _fit_particles(self, particles, ox, oy, ow, oh, dst_w, dst_h):
+        """Remap window-space particle sprites into the letterbox image rect so the
+        world sprites stay aligned with the (now-smaller) world image. Sprites are
+        scaled by the smaller axis ratio so each stays a square within the bars."""
+        if not particles:
+            return particles
+        sx, sy = ow / dst_w, oh / dst_h
+        s = min(sx, sy)
+        return [(ox + x * sx, oy + y * sy, max(1.0, half * s), rgb)
+                for (x, y, half, rgb) in particles]
 
     def _hud_font(self):
         """Create the Cascadia Mono HUD font, verifying it actually carries the

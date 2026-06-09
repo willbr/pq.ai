@@ -127,9 +127,12 @@ under the current default would be unusable. If you'd rather drop Auto entirely 
 
 ## Aspect ratio
 
-240x160 is 3:2; stretched into the 4:3 (default 800x600) window it is slightly
-vertically stretched — the classic non-square-pixel retro look. 320x240 and 640x480 are 4:3
-and match. Letterboxing is intentionally **out of scope** (YAGNI).
+Off-ratio modes (240x160 is 3:2; the later-added 80x40 / 160x80 are 2:1) are
+**letterboxed** rather than stretched: `present()` scales the framebuffer into the largest
+aspect-correct centered rect (`win_ui.letterbox_rect`), black-fills the margin bars, and
+remaps world-space particle sprites through the same transform so they stay aligned. 320x240
+and 640x480 are 4:3 and fill a 4:3 window edge-to-edge with no bars. (Originally deferred as
+YAGNI; added when the wide modes looked squished.)
 
 ## Data flow (one frame, menu open)
 
@@ -160,7 +163,7 @@ run(): blitter.present(fb=zw x zh, ...) stretches to window; then blitter.draw_m
 
 - tkinter frontend (`main.py`).
 - Mouse navigation in the menu.
-- Window resizing to the chosen resolution.
-- Letterboxing / pillarboxing for non-4:3 modes.
+- Window resizing to the chosen resolution (the framebuffer is letterboxed into the
+  window instead).
 - Any menu section other than Video Options (the model is general, but only this section is
   built now).

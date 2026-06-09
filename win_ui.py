@@ -389,6 +389,52 @@ class GdiBlitter:
         finally:
             u.ReleaseDC(self.hwnd, hdc)
 
+    def draw_console(self, lines, input_line, cursor_col, dst_w, dst_h):
+        """Draw the drop-down console panel on top of the current frame: a dark
+        rectangle across the top ~40% of the window, the scrollback `lines`
+        top-to-bottom, then the `] input` line with a caret, in the monospace
+        HUD font. Called after the world present, straight onto the window DC."""
+        g, u = self.gdi32, self.user32
+        hdc = u.GetDC(self.hwnd)
+        if not hdc:
+            return
+        try:
+            panel_h = dst_h * 2 // 5
+            rect = wintypes.RECT(0, 0, dst_w, panel_h)
+            brush = g.CreateSolidBrush(colorref((16, 16, 24)))   # dark panel
+            u.FillRect(hdc, ctypes.byref(rect), brush)
+            g.DeleteObject(brush)
+            # 1px brighter bottom edge so the panel reads as an object
+            edge = wintypes.RECT(0, panel_h - 1, dst_w, panel_h)
+            ebrush = g.CreateSolidBrush(colorref((0, 160, 70)))
+            u.FillRect(hdc, ctypes.byref(edge), ebrush)
+            g.DeleteObject(ebrush)
+
+            g.SetBkMode(hdc, TRANSPARENT)
+            g.SelectObject(hdc, self._font)
+            # line height from the font
+            sz = SIZE()
+            g.GetTextExtentPoint32W(hdc, "X", 1, ctypes.byref(sz))
+            lh = sz.cy or 16
+            cw = sz.cx or 9
+            # scrollback fills from the top; the input line sits at the panel bottom
+            g.SetTextColor(hdc, colorref((200, 220, 200)))
+            y = 4
+            for line in lines:
+                g.TextOutW(hdc, 6, y, line, len(line))
+                y += lh
+            iy = panel_h - lh - 4
+            g.SetTextColor(hdc, colorref((255, 255, 255)))
+            g.TextOutW(hdc, 6, iy, input_line, len(input_line))
+            # caret: a vertical bar at the cursor column
+            cx = 6 + cursor_col * cw
+            caret = wintypes.RECT(cx, iy, cx + 1, iy + lh)
+            cbrush = g.CreateSolidBrush(colorref((255, 255, 255)))
+            u.FillRect(hdc, ctypes.byref(caret), cbrush)
+            g.DeleteObject(cbrush)
+        finally:
+            u.ReleaseDC(self.hwnd, hdc)
+
     def _draw_segs(self, hdc, segs):
         """Draw wireframe line segments (flat (x0, y0, x1, y1) tuples) in green.
         Selects the cached wire pen, draws each as MoveToEx + LineTo, then restores

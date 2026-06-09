@@ -48,6 +48,102 @@ DEFAULT_LIGHT = 180
 FLAT_LIGHT_GAIN = 2.2 / 255.0
 
 
+def poly_spans(sx, sy, width, height):
+    """Scanline x-intervals of a convex screen-space polygon, sampled at pixel
+    centres (x+0.5, y+0.5). Returns (y0, spans) where spans[r] = (xl, xr)
+    covers row y0+r: pixels xl..xr-1 have their centre inside. Rows clamp to
+    [0, height), x bounds to [0, width); a row crossed only outside the window
+    yields xl >= xr. The half-open rule (top/left in, bottom/right out) makes
+    polygons sharing an edge tile exactly: no cracks, no double-drawn pixels."""
+    ceil = math.ceil
+    ymin = min(sy)
+    ymax = max(sy)
+    y0 = ceil(ymin - 0.5)
+    if y0 < 0:
+        y0 = 0
+    y1 = ceil(ymax - 0.5)
+    if y1 > height:
+        y1 = height
+    if y0 >= y1:
+        return 0, []
+    nr = y1 - y0
+    xl = [1e30] * nr
+    xr = [-1e30] * nr
+    n = len(sx)
+    ax, ay = sx[n - 1], sy[n - 1]
+    for i in range(n):
+        bx, by = sx[i], sy[i]
+        if ay != by:
+            if ay < by:
+                ex0, ey0, ex1, ey1 = ax, ay, bx, by
+            else:
+                ex0, ey0, ex1, ey1 = bx, by, ax, ay
+            ys = ceil(ey0 - 0.5)            # rows whose centre is in [ey0, ey1)
+            if ys < y0:
+                ys = y0
+            ye = ceil(ey1 - 0.5)
+            if ye > y1:
+                ye = y1
+            if ys < ye:
+                slope = (ex1 - ex0) / (ey1 - ey0)
+                xx = ex0 + (ys + 0.5 - ey0) * slope
+                for r in range(ys - y0, ye - y0):
+                    if xx < xl[r]:
+                        xl[r] = xx
+                    if xx > xr[r]:
+                        xr[r] = xx
+                    xx += slope
+        ax, ay = bx, by
+    spans = []
+    for r in range(nr):
+        lf = xl[r]
+        rf = xr[r]
+        if lf > rf:                          # row never crossed (clipped away)
+            spans.append((0, 0))
+            continue
+        xli = ceil(lf - 0.5)                 # centres in [lf, rf)
+        if xli < 0:
+            xli = 0
+        xri = ceil(rf - 0.5)
+        if xri > width:
+            xri = width
+        spans.append((xli, xri))
+    return y0, spans
+
+
+def plane_gradients(sx, sy, attrs):
+    """Screen-space gradients of per-vertex attributes that are linear across
+    the projected plane (1/z, u/z, v/z all are). Picks the widest vertex
+    triple for numeric stability; returns [(a00, dadx, dady), ...] aligned to
+    `attrs` (each a per-vertex list) with attr(x, y) = a00 + dadx*x + dady*y,
+    or None when the polygon is degenerate (collinear: spans no plane)."""
+    n = len(sx)
+    x0, y0 = sx[0], sy[0]
+    best = 0.0
+    bi = 1
+    for k in range(1, n - 1):
+        d = (sx[k] - x0) * (sy[k + 1] - y0) - (sx[k + 1] - x0) * (sy[k] - y0)
+        if d > best or -d > best:
+            best = d if d > 0.0 else -d
+            bi = k
+    if best < 1e-9:
+        return None
+    x1, y1 = sx[bi], sy[bi]
+    x2, y2 = sx[bi + 1], sy[bi + 1]
+    e1x, e1y = x1 - x0, y1 - y0
+    e2x, e2y = x2 - x0, y2 - y0
+    inv = 1.0 / (e1x * e2y - e1y * e2x)
+    out = []
+    for a in attrs:
+        a0 = a[0]
+        d1 = a[bi] - a0
+        d2 = a[bi + 1] - a0
+        dadx = (d1 * e2y - d2 * e1y) * inv
+        dady = (d2 * e1x - d1 * e2x) * inv
+        out.append((a0 - dadx * x0 - dady * y0, dadx, dady))
+    return out
+
+
 def lightstyle_values(styles, t):
     """Current brightness (0..550, 256 = normal) for light styles 0..63 from
     {index: animation_string} at time t. Quake cycles the string at 10 Hz and
@@ -1352,63 +1448,10 @@ class Renderer:
             vert_frame[vi] = frame
             return c
 
-        def raster_tri(ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b):
-            # a,b,c are screen-space (x, y, invz). Edge-function fill over the
-            # triangle's pixel bounding box, clamped to the framebuffer; depth is
-            # the perspective-correct 1/z interpolated from the vertices.
-            x0 = ax if ax < bx else bx
-            if cx < x0: x0 = cx
-            x1 = ax if ax > bx else bx
-            if cx > x1: x1 = cx
-            y0 = ay if ay < by else by
-            if cy < y0: y0 = cy
-            y1 = ay if ay > by else by
-            if cy > y1: y1 = cy
-            x0 = int(x0)
-            if x0 < 0: x0 = 0
-            x1 = int(x1) + 1
-            if x1 > iw: x1 = iw
-            y0 = int(y0)
-            if y0 < 0: y0 = 0
-            y1 = int(y1) + 1
-            if y1 > ih: y1 = ih
-            if x0 >= x1 or y0 >= y1:
-                return
-            area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-            if area == 0.0:
-                return
-            # barycentric edge weights (orient2d): w_i / area is vertex i's weight,
-            # stepping A in +x and B in +y. Sign convention must match `area`.
-            A0 = by - cy; B0 = cx - bx          # weight for vertex a (edge b->c)
-            A1 = cy - ay; B1 = ax - cx          # weight for vertex b (edge c->a)
-            A2 = ay - by; B2 = bx - ax          # weight for vertex c (edge a->b)
-            px = x0 + 0.5; py = y0 + 0.5
-            w0r = (cx - bx) * (py - by) - (cy - by) * (px - bx)
-            w1r = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
-            w2r = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-            if area < 0.0:                       # normalise winding -> test w >= 0
-                A0 = -A0; A1 = -A1; A2 = -A2
-                B0 = -B0; B1 = -B1; B2 = -B2
-                w0r = -w0r; w1r = -w1r; w2r = -w2r
-                area = -area
-            inv = 1.0 / area                     # fold into depths: izp = sum(w*z)
-            za = az * inv; zbb = bz * inv; zc = cz * inv
-            for y in range(y0, y1):
-                w0 = w0r; w1 = w1r; w2 = w2r
-                row = y * iw
-                for x in range(x0, x1):
-                    if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
-                        iz = w0 * za + w1 * zbb + w2 * zc
-                        idx = row + x
-                        if iz > zb[idx]:
-                            zb[idx] = iz
-                            o = idx * 3
-                            fb[o] = r; fb[o + 1] = g; fb[o + 2] = b
-                    w0 += A0; w1 += A1; w2 += A2
-                w0r += B0; w1r += B1; w2r += B2
-
         def raster_poly(cam, r, g, b):
-            # near-plane clip (z >= NEAR), project to the small fb, fan-triangulate
+            # flat-shaded convex polygon: near-plane clip (z >= NEAR), project,
+            # then scanline spans -- 1/z is linear in screen space, so each row
+            # steps it with one add per pixel (no per-pixel edge tests).
             out = []
             A = cam[-1]; da = A[2] - NEAR
             for B in cam:
@@ -1421,94 +1464,40 @@ class Renderer:
                                 A[1] + (B[1] - A[1]) * t,
                                 A[2] + (B[2] - A[2]) * t))
                 A, da = B, db
-            n = len(out)
-            if n < 3:
+            if len(out) < 3:
                 return
-            sx = []; sy = []; sz = []
+            sx = []; sy = []; siz = []
             for vx, vy, vz in out:
                 iz = 1.0 / vz
                 sx.append(hw + vx * focal * iz)
                 sy.append(hh - vy * focal * iz)
-                sz.append(iz)
-            for k in range(1, n - 1):
-                raster_tri(sx[0], sy[0], sz[0], sx[k], sy[k], sz[k],
-                           sx[k + 1], sy[k + 1], sz[k + 1], r, g, b)
-
-        def raster_tri_tex(ax, ay, az, au, av, bx, by, bz, bu, bv,
-                           cx, cy, cz, cu, cv, tw, th, tex,
-                           lmw, lmh, lsmin, ltmin, lux):
-            # textured z-buffered triangle. Vertices carry (x, y, invz, u*invz,
-            # v*invz); invz/u*invz/v*invz interpolate linearly in screen space,
-            # so per pixel u,v = (interp)/invz recovers perspective-correct texels.
-            # The texel is then modulated by the lightmap luxel covering it.
-            x0 = ax if ax < bx else bx
-            if cx < x0: x0 = cx
-            x1 = ax if ax > bx else bx
-            if cx > x1: x1 = cx
-            y0 = ay if ay < by else by
-            if cy < y0: y0 = cy
-            y1 = ay if ay > by else by
-            if cy > y1: y1 = cy
-            x0 = int(x0)
-            if x0 < 0: x0 = 0
-            x1 = int(x1) + 1
-            if x1 > iw: x1 = iw
-            y0 = int(y0)
-            if y0 < 0: y0 = 0
-            y1 = int(y1) + 1
-            if y1 > ih: y1 = ih
-            if x0 >= x1 or y0 >= y1:
-                return
-            area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-            if area == 0.0:
-                return
-            A0 = by - cy; B0 = cx - bx
-            A1 = cy - ay; B1 = ax - cx
-            A2 = ay - by; B2 = bx - ax
-            px = x0 + 0.5; py = y0 + 0.5
-            w0r = (cx - bx) * (py - by) - (cy - by) * (px - bx)
-            w1r = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
-            w2r = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-            if area < 0.0:
-                A0 = -A0; A1 = -A1; A2 = -A2
-                B0 = -B0; B1 = -B1; B2 = -B2
-                w0r = -w0r; w1r = -w1r; w2r = -w2r
-                area = -area
-            inv = 1.0 / area
-            za = az * inv; zbb = bz * inv; zc = cz * inv
-            ua = au * inv; ub = bu * inv; uc = cu * inv
-            va = av * inv; vb = bv * inv; vc = cv * inv
-            for y in range(y0, y1):
-                w0 = w0r; w1 = w1r; w2 = w2r
-                row = y * iw
-                for x in range(x0, x1):
-                    if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
-                        iz = w0 * za + w1 * zbb + w2 * zc
-                        idx = row + x
-                        if iz > zb[idx]:
-                            z = 1.0 / iz
-                            u = (w0 * ua + w1 * ub + w2 * uc) * z
-                            v = (w0 * va + w1 * vb + w2 * vc) * z
-                            lc = int((u - lsmin) * 0.0625)
-                            if lc < 0: lc = 0
-                            elif lc >= lmw: lc = lmw - 1
-                            lr = int((v - ltmin) * 0.0625)
-                            if lr < 0: lr = 0
-                            elif lr >= lmh: lr = lmh - 1
-                            sh = lux[lr * lmw + lc]      # lightmap luxel 0..255
-                            o = (int(v) % th * tw + int(u) % tw) * 3
-                            zb[idx] = iz
-                            fo = idx * 3
-                            fb[fo] = (tex[o] * sh) >> 8
-                            fb[fo + 1] = (tex[o + 1] * sh) >> 8
-                            fb[fo + 2] = (tex[o + 2] * sh) >> 8
-                    w0 += A0; w1 += A1; w2 += A2
-                w0r += B0; w1r += B1; w2r += B2
+                siz.append(iz)
+            grads = plane_gradients(sx, sy, (siz,))
+            if grads is None:
+                return                          # degenerate sliver: invisible
+            z00, zdx, zdy = grads[0]
+            y, spans = poly_spans(sx, sy, iw, ih)
+            zbl = zb; fbl = fb; iwl = iw        # locals: avoid LOAD_DEREF per px
+            for xli, xri in spans:
+                if xli < xri:
+                    iz = z00 + zdx * (xli + 0.5) + zdy * (y + 0.5)
+                    row = y * iwl
+                    fo = (row + xli) * 3
+                    for idx in range(row + xli, row + xri):
+                        if iz > zbl[idx]:
+                            zbl[idx] = iz
+                            fbl[fo] = r; fbl[fo + 1] = g; fbl[fo + 2] = b
+                        iz += zdx
+                        fo += 3
+                y += 1
 
         def raster_poly_tex(cam, rec, lm):
-            # cam: list of (cx, cy, cz, u, v). Near-clip (z >= NEAR) interpolating
-            # u,v too, project, fan-triangulate into textured triangles. lm is the
-            # face's lightmap (lmw, lmh, smin, tmin, luxels) sampled per pixel.
+            # textured convex polygon. cam: list of (cx, cy, cz, u, v). Near-clip
+            # (z >= NEAR) interpolating u,v too, project, then scanline spans:
+            # 1/z, u/z, v/z are linear in screen space, so each row steps them
+            # with one add per pixel and recovers perspective-correct texels via
+            # u,v = (u/z)/(1/z). The texel is modulated by the lightmap luxel
+            # covering it (lm = (lmw, lmh, smin, tmin, luxels), sampled per px).
             tw, th, tex = rec[0], rec[1], rec[2]
             lmw, lmh, lsmin, ltmin, lux = lm[0], lm[1], lm[2], lm[3], lm[4]
             out = []
@@ -1525,93 +1514,61 @@ class Renderer:
                                 A[3] + (B[3] - A[3]) * t,
                                 A[4] + (B[4] - A[4]) * t))
                 A, da = B, db
-            n = len(out)
-            if n < 3:
+            if len(out) < 3:
                 return
-            sx = []; sy = []; sz = []; su = []; sv = []
+            sx = []; sy = []; siz = []; suz = []; svz = []
             for cx, cy, cz, u, v in out:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)
                 sy.append(hh - cy * focal * iz)
-                sz.append(iz)
-                su.append(u * iz)              # u/z, linear in screen space
-                sv.append(v * iz)
-            for k in range(1, n - 1):
-                raster_tri_tex(sx[0], sy[0], sz[0], su[0], sv[0],
-                               sx[k], sy[k], sz[k], su[k], sv[k],
-                               sx[k + 1], sy[k + 1], sz[k + 1], su[k + 1], sv[k + 1],
-                               tw, th, tex, lmw, lmh, lsmin, ltmin, lux)
-
-        def raster_tri_tex_turb(ax, ay, az, au, av, bx, by, bz, bu, bv,
-                                cx, cy, cz, cu, cv, tw, th, tex):
-            # Turbulent (liquid/teleport) triangle: same perspective-correct
-            # setup as raster_tri_tex, but each pixel's texel is sine-warped in
-            # both axes and drawn full-bright (no lightmap -- these are special
-            # surfaces). Hot but only over liquid/sky area, so kept separate
-            # from the common path rather than branching per pixel there.
-            sintab = _TURBSIN; scale = _TURBSCALE; tt = time
-            x0 = ax if ax < bx else bx
-            if cx < x0: x0 = cx
-            x1 = ax if ax > bx else bx
-            if cx > x1: x1 = cx
-            y0 = ay if ay < by else by
-            if cy < y0: y0 = cy
-            y1 = ay if ay > by else by
-            if cy > y1: y1 = cy
-            x0 = int(x0)
-            if x0 < 0: x0 = 0
-            x1 = int(x1) + 1
-            if x1 > iw: x1 = iw
-            y0 = int(y0)
-            if y0 < 0: y0 = 0
-            y1 = int(y1) + 1
-            if y1 > ih: y1 = ih
-            if x0 >= x1 or y0 >= y1:
-                return
-            area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-            if area == 0.0:
-                return
-            A0 = by - cy; B0 = cx - bx
-            A1 = cy - ay; B1 = ax - cx
-            A2 = ay - by; B2 = bx - ax
-            px = x0 + 0.5; py = y0 + 0.5
-            w0r = (cx - bx) * (py - by) - (cy - by) * (px - bx)
-            w1r = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
-            w2r = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-            if area < 0.0:
-                A0 = -A0; A1 = -A1; A2 = -A2
-                B0 = -B0; B1 = -B1; B2 = -B2
-                w0r = -w0r; w1r = -w1r; w2r = -w2r
-                area = -area
-            inv = 1.0 / area
-            za = az * inv; zbb = bz * inv; zc = cz * inv
-            ua = au * inv; ub = bu * inv; uc = cu * inv
-            va = av * inv; vb = bv * inv; vc = cv * inv
-            for y in range(y0, y1):
-                w0 = w0r; w1 = w1r; w2 = w2r
-                row = y * iw
-                for x in range(x0, x1):
-                    if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
-                        iz = w0 * za + w1 * zbb + w2 * zc
-                        idx = row + x
-                        if iz > zb[idx]:
+                siz.append(iz)
+                suz.append(u * iz)             # u/z, linear in screen space
+                svz.append(v * iz)
+            grads = plane_gradients(sx, sy, (siz, suz, svz))
+            if grads is None:
+                return                          # degenerate sliver: invisible
+            (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
+            y, spans = poly_spans(sx, sy, iw, ih)
+            zbl = zb; fbl = fb; iwl = iw        # locals: avoid LOAD_DEREF per px
+            for xli, xri in spans:
+                if xli < xri:
+                    xc = xli + 0.5; yc = y + 0.5
+                    iz = z00 + zdx * xc + zdy * yc
+                    uoz = u00 + udx * xc + udy * yc
+                    voz = v00 + vdx * xc + vdy * yc
+                    row = y * iwl
+                    fo = (row + xli) * 3
+                    for idx in range(row + xli, row + xri):
+                        if iz > zbl[idx]:
                             z = 1.0 / iz
-                            u = (w0 * ua + w1 * ub + w2 * uc) * z
-                            v = (w0 * va + w1 * vb + w2 * vc) * z
-                            su2 = u + sintab[int((v * 0.125 + tt) * scale) & 255]
-                            sv2 = v + sintab[int((u * 0.125 + tt) * scale) & 255]
-                            o = (int(sv2) % th * tw + int(su2) % tw) * 3
-                            zb[idx] = iz
-                            fo = idx * 3
-                            fb[fo] = tex[o]
-                            fb[fo + 1] = tex[o + 1]
-                            fb[fo + 2] = tex[o + 2]
-                    w0 += A0; w1 += A1; w2 += A2
-                w0r += B0; w1r += B1; w2r += B2
+                            u = uoz * z
+                            v = voz * z
+                            lc = int((u - lsmin) * 0.0625)
+                            if lc < 0: lc = 0
+                            elif lc >= lmw: lc = lmw - 1
+                            lr = int((v - ltmin) * 0.0625)
+                            if lr < 0: lr = 0
+                            elif lr >= lmh: lr = lmh - 1
+                            sh = lux[lr * lmw + lc]      # lightmap luxel 0..255
+                            o = (int(v) % th * tw + int(u) % tw) * 3
+                            zbl[idx] = iz
+                            fbl[fo] = (tex[o] * sh) >> 8
+                            fbl[fo + 1] = (tex[o + 1] * sh) >> 8
+                            fbl[fo + 2] = (tex[o + 2] * sh) >> 8
+                        iz += zdx
+                        uoz += udx
+                        voz += vdx
+                        fo += 3
+                y += 1
 
         def raster_poly_tex_turb(cam, rec):
-            # near-clip + project + fan, like raster_poly_tex, into warped tris
+            # Turbulent (liquid/teleport) polygon: same span setup as
+            # raster_poly_tex, but each pixel's texel is sine-warped in both
+            # axes and drawn full-bright (no lightmap -- special surfaces).
+            # Hot but only over liquid/sky area, so kept separate from the
+            # common path rather than branching per pixel there.
             tw, th, tex = rec[0], rec[1], rec[2]
+            sintab = _TURBSIN; scale = _TURBSCALE; tt = time
             out = []
             A = cam[-1]; da = A[2] - NEAR
             for B in cam:
@@ -1626,22 +1583,47 @@ class Renderer:
                                 A[3] + (B[3] - A[3]) * t,
                                 A[4] + (B[4] - A[4]) * t))
                 A, da = B, db
-            n = len(out)
-            if n < 3:
+            if len(out) < 3:
                 return
-            sx = []; sy = []; sz = []; su = []; sv = []
+            sx = []; sy = []; siz = []; suz = []; svz = []
             for cx, cy, cz, u, v in out:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)
                 sy.append(hh - cy * focal * iz)
-                sz.append(iz)
-                su.append(u * iz)
-                sv.append(v * iz)
-            for k in range(1, n - 1):
-                raster_tri_tex_turb(sx[0], sy[0], sz[0], su[0], sv[0],
-                                    sx[k], sy[k], sz[k], su[k], sv[k],
-                                    sx[k + 1], sy[k + 1], sz[k + 1],
-                                    su[k + 1], sv[k + 1], tw, th, tex)
+                siz.append(iz)
+                suz.append(u * iz)
+                svz.append(v * iz)
+            grads = plane_gradients(sx, sy, (siz, suz, svz))
+            if grads is None:
+                return
+            (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
+            y, spans = poly_spans(sx, sy, iw, ih)
+            zbl = zb; fbl = fb; iwl = iw
+            for xli, xri in spans:
+                if xli < xri:
+                    xc = xli + 0.5; yc = y + 0.5
+                    iz = z00 + zdx * xc + zdy * yc
+                    uoz = u00 + udx * xc + udy * yc
+                    voz = v00 + vdx * xc + vdy * yc
+                    row = y * iwl
+                    fo = (row + xli) * 3
+                    for idx in range(row + xli, row + xri):
+                        if iz > zbl[idx]:
+                            z = 1.0 / iz
+                            u = uoz * z
+                            v = voz * z
+                            su2 = u + sintab[int((v * 0.125 + tt) * scale) & 255]
+                            sv2 = v + sintab[int((u * 0.125 + tt) * scale) & 255]
+                            o = (int(sv2) % th * tw + int(su2) % tw) * 3
+                            zbl[idx] = iz
+                            fbl[fo] = tex[o]
+                            fbl[fo + 1] = tex[o + 1]
+                            fbl[fo + 2] = tex[o + 2]
+                        iz += zdx
+                        uoz += udx
+                        voz += vdx
+                        fo += 3
+                y += 1
 
         def emit_face(fi, pts, rec):
             # dispatch a world/brush face to the right sampler: warped liquid,

@@ -19,7 +19,6 @@ RenderFrame each tick that this draws. The Client is UI-agnostic (no tkinter).
 """
 
 import ctypes
-import math
 import sys
 import time
 import tkinter as tk
@@ -381,7 +380,6 @@ class App:
         for i in range(n, self.poly_prev):   # park surplus (degenerate triangle)
             coords(pool[i], -10, -10, -10, -10, -10, -10)
         self.poly_prev = n
-        c.tag_raise(self.hud)
 
     def _draw_fb(self, fbdata):
         """Wrap the renderer's raw RGB framebuffer in a PPM PhotoImage, scale it

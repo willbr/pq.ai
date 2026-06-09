@@ -406,6 +406,16 @@ class Renderer:
         self.anim_faces = [fi for fi in range(nfaces)
                            if self.face_anim[fi] is not None]
 
+        # lit-surface cache (Quake's surface cache, r_surf.c): per face, its
+        # texture tiled over the face's extent premultiplied by the lightmap,
+        # built lazily on first draw and dropped when the lightmap recombines
+        # or a +N animation swaps the texture. _shade_tables holds one 256-byte
+        # translate table per seen luxel value ((i*sh)>>8), so cache rows build
+        # at C speed via bytes.translate.
+        self._surf_cache_map = {}
+        self._surf_cache_bytes = 0
+        self._shade_tables = {}
+
         # per-face lightmaps from the LIGHTING lump (baked static light). Each
         # entry: (lmw, lmh, smin, tmin, luxels, has_real). For surfaces with a
         # lightmap the luxels come from the BSP (one per 16 texels, the active
@@ -619,6 +629,7 @@ class Renderer:
             buf[i] = v
             tot += v
         self.face_light_avg[fi] = tot / n        # flat mode reads this per face
+        self._surf_cache_map.pop(fi, None)       # lit surface is now stale
 
     def _animate_lightmaps(self, styleval):
         """Rebuild only the faces whose light-style brightness changed this frame
@@ -632,6 +643,55 @@ class Renderer:
                 dirty.update(faces)
         for fi in dirty:
             self._combine_face(fi, styleval)
+
+    def _surface_cache(self, fi, rec):
+        """Lit surface for face fi (Quake's D_CacheSurface, r_surf.c): the
+        texture tiled over the face's full s/t extent, premultiplied by the
+        lightmap luxel covering each texel. The rasteriser then needs one
+        fetch per pixel -- no lightmap sampling, wrap or shade math. Cached
+        until the lightmap recombines (_combine_face drops the entry) or the
+        +N animation swaps the texture (the `is` check below). Returns
+        (cw, ch, rgb_bytearray, tex); index with (t - tmin, s - smin).
+
+        Rows are built with C-level ops: the texture row is tiled across the
+        extent by bytes repeat/slice, then each 16-texel luxel cell is shade-
+        modulated in one bytes.translate using a per-shade lookup table."""
+        tw, th, tex = rec[0], rec[1], rec[2]
+        ent = self._surf_cache_map.get(fi)
+        if ent is not None and ent[3] is tex:
+            return ent
+        lmw, lmh, smin, tmin, lux, _ = self.face_lm[fi]
+        cw = lmw << 4
+        ch = lmh << 4
+        out = bytearray(cw * ch * 3)
+        tabs = self._shade_tables
+        tw3 = tw * 3
+        cw3 = cw * 3
+        smin_i = int(smin)
+        tmin_i = int(tmin)
+        soff3 = (smin_i % tw) * 3
+        reps = (soff3 + cw3 + tw3 - 1) // tw3
+        for tc in range(ch):
+            trow = ((tmin_i + tc) % th) * tw3
+            tiled = (tex[trow:trow + tw3] * reps)[soff3:soff3 + cw3]
+            lr = (tc >> 4) * lmw
+            obase = tc * cw3
+            for lc in range(lmw):
+                sh = lux[lr + lc]
+                tab = tabs.get(sh)
+                if tab is None:
+                    tab = bytes((i * sh) >> 8 for i in range(256))
+                    tabs[sh] = tab
+                s3 = lc * 48                      # 16 texels * 3 bytes per cell
+                out[obase + s3:obase + s3 + 48] = \
+                    tiled[s3:s3 + 48].translate(tab)
+        ent = (cw, ch, out, tex)
+        self._surf_cache_bytes += len(out)
+        if self._surf_cache_bytes > 96 * 1024 * 1024:   # crude bound: flush all
+            self._surf_cache_map.clear()
+            self._surf_cache_bytes = len(out)
+        self._surf_cache_map[fi] = ent
+        return ent
 
     def light_point(self, p):
         """Baked light at world point p: trace straight down to the nearest lit
@@ -1561,6 +1621,65 @@ class Renderer:
                         fo += 3
                 y += 1
 
+        def raster_poly_cached(cam, surf, csmin, ctmin):
+            # lit-surface-cached convex polygon: like raster_poly_tex but the
+            # texture x lightmap product was precomputed by _surface_cache, so
+            # the pixel body is one perspective divide, one fetch, one store.
+            # UVs are rebased to the cache origin (csmin, ctmin) up front; the
+            # cache spans the face's whole extent, so no wrap or clamp needed.
+            cw, ch, cache = surf[0], surf[1], surf[2]
+            out = []
+            A = cam[-1]; da = A[2] - NEAR
+            for B in cam:
+                db = B[2] - NEAR
+                if da >= 0.0:
+                    out.append(A)
+                if (da >= 0.0) != (db >= 0.0):
+                    t = da / (da - db)
+                    out.append((A[0] + (B[0] - A[0]) * t,
+                                A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t,
+                                A[3] + (B[3] - A[3]) * t,
+                                A[4] + (B[4] - A[4]) * t))
+                A, da = B, db
+            if len(out) < 3:
+                return
+            sx = []; sy = []; siz = []; suz = []; svz = []
+            for cx, cy, cz, u, v in out:
+                iz = 1.0 / cz
+                sx.append(hw + cx * focal * iz)
+                sy.append(hh - cy * focal * iz)
+                siz.append(iz)
+                suz.append((u - csmin) * iz)   # cache-space u/z
+                svz.append((v - ctmin) * iz)
+            grads = plane_gradients(sx, sy, (siz, suz, svz))
+            if grads is None:
+                return
+            (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
+            y, spans = poly_spans(sx, sy, iw, ih)
+            zbl = zb; fbl = fb; iwl = iw
+            for xli, xri in spans:
+                if xli < xri:
+                    xc = xli + 0.5; yc = y + 0.5
+                    iz = z00 + zdx * xc + zdy * yc
+                    uoz = u00 + udx * xc + udy * yc
+                    voz = v00 + vdx * xc + vdy * yc
+                    row = y * iwl
+                    fo = (row + xli) * 3
+                    for idx in range(row + xli, row + xri):
+                        if iz > zbl[idx]:
+                            z = 1.0 / iz
+                            o = (int(voz * z) * cw + int(uoz * z)) * 3
+                            zbl[idx] = iz
+                            fbl[fo] = cache[o]
+                            fbl[fo + 1] = cache[o + 1]
+                            fbl[fo + 2] = cache[o + 2]
+                        iz += zdx
+                        uoz += udx
+                        voz += vdx
+                        fo += 3
+                y += 1
+
         def raster_poly_tex_turb(cam, rec):
             # Turbulent (liquid/teleport) polygon: same span setup as
             # raster_poly_tex, but each pixel's texel is sine-warped in both
@@ -1627,14 +1746,20 @@ class Renderer:
 
         def emit_face(fi, pts, rec):
             # dispatch a world/brush face to the right sampler: warped liquid,
-            # scrolled sky, or the plain lightmapped path.
+            # scrolled sky, the lit-surface cache (real lightmaps -- nearly all
+            # world geometry), or per-pixel lightmap sampling as the fallback.
             if face_turb[fi]:
                 raster_poly_tex_turb(pts, rec)
             elif face_sky[fi]:
                 raster_poly_tex([(p[0], p[1], p[2], p[3] + sky_off, p[4])
                                  for p in pts], rec, face_lm[fi])
             else:
-                raster_poly_tex(pts, rec, face_lm[fi])
+                lm = face_lm[fi]
+                if lm[5]:
+                    raster_poly_cached(pts, self._surface_cache(fi, rec),
+                                       lm[2], lm[3])
+                else:
+                    raster_poly_tex(pts, rec, lm)
 
         def raster_alias(mdl, verts, org, ang):
             # rotate model verts into world, transform to camera, flat-shade each

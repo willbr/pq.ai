@@ -155,6 +155,52 @@ def test_plane_gradients_degenerate_returns_none():
     assert plane_gradients(sx, sy, [[0.0, 1.0, 2.0, 3.0]]) is None
 
 
+# ---- surface cache ----
+
+def _real_lm_face(r):
+    """First world face with a real lightmap and a texture."""
+    for fi in range(len(r.face_lm)):
+        if r.face_lm[fi][5] and r.face_tex[fi] is not None:
+            return fi
+    raise AssertionError("no lightmapped textured face on e1m1?")
+
+
+def test_surface_cache_matches_direct_math():
+    # cache texel (sc, tc) must equal the rasteriser's old per-pixel formula:
+    # texture wrapped at (smin+sc, tmin+tc), modulated by the luxel covering it.
+    _b, r = _renderer()
+    fi = _real_lm_face(r)
+    rec = r.face_tex[fi]
+    tw, th, tex = rec[0], rec[1], rec[2]
+    lmw, lmh, smin, tmin, lux, _ = r.face_lm[fi]
+    cw, ch, cache, _tex = r._surface_cache(fi, rec)
+    assert cw == lmw * 16 and ch == lmh * 16, (cw, ch, lmw, lmh)
+    smin_i, tmin_i = int(smin), int(tmin)
+    for sc, tc in ((0, 0), (1, 0), (15, 0), (16, 0), (cw - 1, ch - 1),
+                   (cw // 2, ch // 2), (3, ch - 1)):
+        sh = lux[(tc >> 4) * lmw + (sc >> 4)]
+        o = (((tmin_i + tc) % th) * tw + ((smin_i + sc) % tw)) * 3
+        co = (tc * cw + sc) * 3
+        for k in range(3):
+            assert cache[co + k] == (tex[o + k] * sh) >> 8, (sc, tc, k)
+
+
+def test_surface_cache_reuse_and_invalidation():
+    _b, r = _renderer()
+    fi = _real_lm_face(r)
+    rec = r.face_tex[fi]
+    c1 = r._surface_cache(fi, rec)
+    assert r._surface_cache(fi, rec) is c1, "same inputs must hit the cache"
+    # a lightmap recombine (style animation) must drop the entry
+    r._combine_face(fi, [256] * 64)
+    c2 = r._surface_cache(fi, rec)
+    assert c2 is not c1, "lightmap recombine must invalidate"
+    # a texture swap (+N animation) must rebuild too
+    swapped = (rec[0], rec[1], bytes(rec[2]), rec[3], rec[4])
+    c3 = r._surface_cache(fi, swapped)
+    assert c3 is not c2, "texture swap must invalidate"
+
+
 # ---- golden-frame characterisation ----
 
 def _renderer():
@@ -241,5 +287,7 @@ if __name__ == "__main__":
     test_poly_spans_no_cracks_or_overlap()
     test_plane_gradients_recovers_linear_attr()
     test_plane_gradients_degenerate_returns_none()
+    test_surface_cache_matches_direct_math()
+    test_surface_cache_reuse_and_invalidation()
     test_golden_frames()
     print("OK")

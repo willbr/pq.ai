@@ -22,7 +22,7 @@ def test_renderer_zbuf_scale_is_live():
     rend.zbuf_scale = 8                            # change it...
     rend.resize(800, 600)                          # ...and re-size
     assert rend.zw == 800 // 8 and rend.zh == 600 // 8
-    assert len(rend._zb_zero) == rend.zw * rend.zh * 4
+    assert len(rend._zb_far) == rend.zw * rend.zh
 
 
 def _boot_server():

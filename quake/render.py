@@ -13,7 +13,6 @@ Quake world space is Z-up, right-handed. Camera space: x=right, y=up, z=forward.
 
 import math
 import sys
-from array import array
 
 from .perf import PROFILER
 
@@ -427,6 +426,7 @@ class Renderer:
         # per-frame staleness markers (avoid clearing big arrays every frame)
         self.frame = 0
         self.face_frame = [0] * nfaces
+        self.face_visframe = [0] * nfaces   # marked from visible leaves (zbuf walk)
         self.edge_frame = [0] * nedges
         self.vert_frame = [0] * nverts
         self.vcache = [None] * nverts
@@ -745,7 +745,7 @@ class Renderer:
     def _setup_zbuf(self):
         """(Re)allocate the z-buffer mode's framebuffer + depth templates for the
         current window size. _bg_frame is a pre-coloured background to copy each
-        frame; _zb_zero seeds the depth buffer to 0 (= infinitely far, since we
+        frame; _zb_far seeds the depth buffer to 0 (= infinitely far, since we
         store 1/z and keep the larger value)."""
         if self.video_res is not None:
             self.zw, self.zh = self.video_res        # fixed mode (video menu)
@@ -753,7 +753,10 @@ class Renderer:
             self.zw = max(1, self.width // self.zbuf_scale)
             self.zh = max(1, self.height // self.zbuf_scale)
         self._bg_frame = bytes(ZBUF_BG) * (self.zw * self.zh)
-        self._zb_zero = bytes(4 * self.zw * self.zh)
+        # a plain list, not array('f'): list reads hand back the stored float
+        # object, while array('f') boxes a fresh float on every read -- one
+        # allocation per depth test in the rasteriser's hot loop.
+        self._zb_far = [0.0] * (self.zw * self.zh)
 
     def resize(self, w, h):
         self.width, self.height = w, h
@@ -1478,7 +1481,7 @@ class Renderer:
         hw = iw * 0.5
         hh = ih * 0.5
         fb = bytearray(self._bg_frame)                # fresh background to draw over
-        zb = array('f', self._zb_zero)                # depth = 1/z, 0 == far away
+        zb = self._zb_far[:]                          # depth = 1/z, 0 == far away
 
         if lightstyles is not None:                   # animate flickering lights
             self._animate_lightmaps(lightstyles)
@@ -1589,7 +1592,7 @@ class Renderer:
                 return                          # degenerate sliver: invisible
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
             y, spans = poly_spans(sx, sy, iw, ih)
-            zbl = zb; fbl = fb; iwl = iw        # locals: avoid LOAD_DEREF per px
+            zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
             for xli, xri in spans:
                 if xli < xri:
                     xc = xli + 0.5; yc = y + 0.5
@@ -1603,14 +1606,14 @@ class Renderer:
                             z = 1.0 / iz
                             u = uoz * z
                             v = voz * z
-                            lc = int((u - lsmin) * 0.0625)
+                            lc = int_((u - lsmin) * 0.0625)
                             if lc < 0: lc = 0
                             elif lc >= lmw: lc = lmw - 1
-                            lr = int((v - ltmin) * 0.0625)
+                            lr = int_((v - ltmin) * 0.0625)
                             if lr < 0: lr = 0
                             elif lr >= lmh: lr = lmh - 1
                             sh = lux[lr * lmw + lc]      # lightmap luxel 0..255
-                            o = (int(v) % th * tw + int(u) % tw) * 3
+                            o = (int_(v) % th * tw + int_(u) % tw) * 3
                             zbl[idx] = iz
                             fbl[fo] = (tex[o] * sh) >> 8
                             fbl[fo + 1] = (tex[o + 1] * sh) >> 8
@@ -1657,7 +1660,7 @@ class Renderer:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
             y, spans = poly_spans(sx, sy, iw, ih)
-            zbl = zb; fbl = fb; iwl = iw
+            zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
             for xli, xri in spans:
                 if xli < xri:
                     xc = xli + 0.5; yc = y + 0.5
@@ -1669,7 +1672,7 @@ class Renderer:
                     for idx in range(row + xli, row + xri):
                         if iz > zbl[idx]:
                             z = 1.0 / iz
-                            o = (int(voz * z) * cw + int(uoz * z)) * 3
+                            o = (int_(voz * z) * cw + int_(uoz * z)) * 3
                             zbl[idx] = iz
                             fbl[fo] = cache[o]
                             fbl[fo + 1] = cache[o + 1]
@@ -1717,7 +1720,7 @@ class Renderer:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
             y, spans = poly_spans(sx, sy, iw, ih)
-            zbl = zb; fbl = fb; iwl = iw
+            zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
             for xli, xri in spans:
                 if xli < xri:
                     xc = xli + 0.5; yc = y + 0.5
@@ -1731,9 +1734,9 @@ class Renderer:
                             z = 1.0 / iz
                             u = uoz * z
                             v = voz * z
-                            su2 = u + sintab[int((v * 0.125 + tt) * scale) & 255]
-                            sv2 = v + sintab[int((u * 0.125 + tt) * scale) & 255]
-                            o = (int(sv2) % th * tw + int(su2) % tw) * 3
+                            su2 = u + sintab[int_((v * 0.125 + tt) * scale) & 255]
+                            sv2 = v + sintab[int_((u * 0.125 + tt) * scale) & 255]
+                            o = (int_(sv2) % th * tw + int_(su2) % tw) * 3
                             zbl[idx] = iz
                             fbl[fo] = tex[o]
                             fbl[fo + 1] = tex[o + 1]
@@ -1841,33 +1844,65 @@ class Renderer:
                                  (cb[0], cb[1], cb[2], s1, t1),
                                  (cc[0], cc[1], cc[2], s2, t2)], rec, lm)
 
+        def emit_world_face(fi):
+            nx, ny, nz, dist = face_plane[fi]
+            if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
+                return
+            rec = face_tex[fi] if textured else None
+            if rec is not None:
+                (s0, s1, s2, s3) = rec[3]
+                (t0, t1, t2, t3) = rec[4]
+                cam = []
+                for vi in face_verts[fi]:
+                    c = transform(vi)
+                    vx, vy, vz = vertexes[vi]
+                    cam.append((c[0], c[1], c[2],
+                                vx * s0 + vy * s1 + vz * s2 + s3,
+                                vx * t0 + vy * t1 + vz * t2 + t3))
+                emit_face(fi, cam, rec)
+            else:
+                r, g, b = face_color_rgb[fi]
+                raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
+
         PROFILER.begin("raster")        # per-pixel fill of all visible geometry
-        # world (model 0): PVS-visible leaves' faces, backface-culled
+        # world (model 0): mark the visible leaves' surfaces and their ancestor
+        # nodes, then walk the BSP near-side-first drawing marked faces (id's
+        # R_MarkLeaves + R_RecursiveWorldNode, gl_rsurf.c -- glquake is the
+        # z-buffered renderer). Drawing front-to-back doesn't change the image
+        # (the depth test resolves either way); it makes occluded pixels fail
+        # the test on the cheap path instead of being textured then overdrawn.
+        face_visframe = self.face_visframe
+        node_visframe = self.node_visframe
+        node_parent = self.node_parent
+        leaf_parent = self.leaf_parent
         for li in visible_leaves:
             _, _, firstmark, nummark = leafs[li]
             for m in range(firstmark, firstmark + nummark):
-                fi = marks[m]
-                if face_frame[fi] == frame:
-                    continue
-                face_frame[fi] = frame
-                nx, ny, nz, dist = face_plane[fi]
-                if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
-                    continue
-                rec = face_tex[fi] if textured else None
-                if rec is not None:
-                    (s0, s1, s2, s3) = rec[3]
-                    (t0, t1, t2, t3) = rec[4]
-                    cam = []
-                    for vi in face_verts[fi]:
-                        c = transform(vi)
-                        vx, vy, vz = vertexes[vi]
-                        cam.append((c[0], c[1], c[2],
-                                    vx * s0 + vy * s1 + vz * s2 + s3,
-                                    vx * t0 + vy * t1 + vz * t2 + t3))
-                    emit_face(fi, cam, rec)
+                face_visframe[marks[m]] = frame
+            p = leaf_parent[li]
+            while p >= 0 and node_visframe[p] != frame:
+                node_visframe[p] = frame
+                p = node_parent[p]
+
+        nodes = bsp.nodes
+        planes = bsp.planes
+
+        def walk_front(num):
+            while num >= 0 and node_visframe[num] == frame:
+                planenum, children, ff, nf = nodes[num]
+                (nx, ny, nz), dist, _ = planes[planenum]
+                if ox * nx + oy * ny + oz * nz - dist >= 0:
+                    near, far = children
                 else:
-                    r, g, b = face_color_rgb[fi]
-                    raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
+                    far, near = children
+                walk_front(near)
+                for fi in range(ff, ff + nf):
+                    if face_visframe[fi] == frame and face_frame[fi] != frame:
+                        face_frame[fi] = frame
+                        emit_world_face(fi)
+                num = far                   # tail-iterate down the far side
+
+        walk_front(self.headnode)
 
         # brush-model entities (doors, lifts, buttons), each offset to its origin
         if self.brushmodels:

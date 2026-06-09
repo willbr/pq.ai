@@ -25,7 +25,7 @@ def test_renderer_video_res_fixes_framebuffer():
     rend.video_res = (320, 240)
     rend.resize(800, 600)
     assert rend.zw == 320 and rend.zh == 240
-    assert len(rend._zb_zero) == 320 * 240 * 4
+    assert len(rend._zb_far) == 320 * 240
     # a different window size keeps the fixed buffer
     rend.resize(1024, 768)
     assert rend.zw == 320 and rend.zh == 240

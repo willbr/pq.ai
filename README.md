@@ -57,7 +57,7 @@ portable; only the output stream is platform code.
 | `quake/pr_exec.py` | The QuakeC bytecode interpreter — `PR_ExecuteProgram`'s opcode loop, call frames, and a flat integer-indexed edict store (all edict fields in one buffer, edict *N* at *N·edict_size*) |
 | `quake/sv.py` | Server layer: the ~70 builtins (`pr_cmds.c`), entity spawning from the BSP string (`ED_LoadFromFile`), the think/movetype frame loop, the player edict, weapon firing, combat/damage, monster movement, and the death→respawn path. Runs id's **actual compiled game code** |
 | `quake/physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove`. Backs the collision builtins (`traceline`, `walkmove`, `movetogoal`, `droptofloor`) |
-| `quake/render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (perspective-correct texels modulated by baked lightmaps, per-pixel 1/z depth). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
+| `quake/render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (scanline spans, perspective-correct texels from a lit-surface cache — texture × lightmap, à la `D_CacheSurface` — per-pixel 1/z depth, front-to-back BSP walk). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
 | `quake/snd.py` | Platform-agnostic software sound mixer — a port of `S_PaintChannels` / `SND_Spatialize`. Decodes/resamples once at precache; `mix(nframes)` sums active voices to 16-bit stereo with distance attenuation + stereo pan re-panned every frame. Touches no OS — a backend pulls from it |
 | `quake/console.py` | Quake-style console: command/cvar/alias registry, line editor, history, tab-completion, scrollback; pure (no OS/UI). The gdi32 frontend opens it with F1. |
 | `client.py` | UI-agnostic game client: the `Client` core holds the engine stack + all camera/player/game state and exposes `frame(dt, input) -> RenderFrame`; the `InputState` / `RenderFrame` dataclasses are the only contracts shared by the two frontends |
@@ -72,9 +72,13 @@ edges go straight to `Canvas.create_line` (C-implemented), and PVS + backface cu
 cut a ~5,500-face level to a few hundred visible edges per frame. Flat shading fills
 `create_polygon`s back-to-front via the BSP (no z-buffer needed). The textured mode is a
 real per-pixel software rasteriser: it owns a 1/z depth buffer (so intersecting geometry
-sorts correctly), samples each face's texture perspective-correctly, and modulates it by
-the baked lightmap luxel covering each pixel. Pure-Python per-pixel fill is slow, so it
-renders at **1/4 window resolution** into a packed-RGB buffer the UI scales up.
+sorts correctly), rasterises each convex face by scanline spans (1/z, u/z, v/z are linear
+in screen space, so a span steps each with one add per pixel), and fetches lit texels
+from a **surface cache** — the face's texture premultiplied by its lightmap, rebuilt only
+when a light style flickers (id's `D_CacheSurface`). The world walks the BSP front-to-back
+(`R_RecursiveWorldNode`) so occluded pixels fail the depth test before any texture work.
+Pure-Python per-pixel fill is still slow, so it renders at **1/4 window resolution** into
+a packed-RGB buffer the UI scales up.
 
 **Where the time goes (wireframe):** the Python render math is only ~2 ms/frame — the
 bottleneck is tkinter rasterizing the lines. So the optimizations that matter all reduce

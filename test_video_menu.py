@@ -65,10 +65,21 @@ def test_menu_resolution_item_drives_client():
     assert c.rend.zw == 640 and c.rend.zh == 480
 
 
+def test_tiny_resolutions_are_selectable():
+    from client import VIDEO_MODES
+    assert ("80x40", (80, 40)) in VIDEO_MODES
+    assert ("160x80", (160, 80)) in VIDEO_MODES
+    c = Client("e1m1")
+    c.resize(800, 600)
+    c.set_video_res((80, 40))                      # smallest mode
+    assert c.rend.zw == 80 and c.rend.zh == 40
+
+
 if __name__ == "__main__":
     test_renderer_video_res_fixes_framebuffer()
     test_client_default_video_res_is_320x240()
     test_set_video_res_rebuilds_buffer_immediately()
     test_video_res_persists_across_map_change()
     test_menu_resolution_item_drives_client()
+    test_tiny_resolutions_are_selectable()
     print("OK")

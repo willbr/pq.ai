@@ -43,8 +43,9 @@ CL_BOBUP = 0.5
 # Selectable textured-mode render resolutions for the video-options menu.
 # "Auto" = derive from the window via zbuf_scale (today's behaviour, keeps the
 # zbuf_scale cvar meaningful); the fixed modes set the framebuffer exactly.
-VIDEO_MODES = [("Auto", None), ("240x160", (240, 160)),
-               ("320x240", (320, 240)), ("640x480", (640, 480))]
+VIDEO_MODES = [("Auto", None), ("80x40", (80, 40)), ("160x80", (160, 80)),
+               ("240x160", (240, 160)), ("320x240", (320, 240)),
+               ("640x480", (640, 480))]
 DEFAULT_VIDEO_RES = (320, 240)
 
 

@@ -294,24 +294,14 @@ class GameWindow:
         self.user32.ClipCursor(None)
 
 
-def _force_zbuf(client):
-    """Stage 2 draws only the textured (zbuf) path. The Client boots in 'flat';
-    one 'zbuf' command flips it. Drive frames with the toggle until mode is 'zbuf'
-    (guards against any future default change -- a no-op if already there)."""
-    guard = 0
-    while client.mode != "zbuf" and guard < 4:
-        client.frame(0.0, InputState(commands=frozenset({"zbuf"})))
-        guard += 1
-
-
 def run(mapname):
     win = GameWindow(f"pq.ai gdi — {mapname}", 800, 600)
     client = Client(mapname)
+    blitter = None
     blitter = win_ui.GdiBlitter(win.hwnd)
     cw, ch = win.client_size()
     client.resize(cw, ch)
     last_wh = (cw, ch)
-    _force_zbuf(client)
 
     last = time.perf_counter()
     try:
@@ -330,12 +320,22 @@ def run(mapname):
             if (cw, ch) != last_wh:
                 client.resize(cw, ch)
                 last_wh = (cw, ch)
-            fb, w, h = rf.framebuffer
             texts = list(rf.overlays) + [
                 (rf.crosshair[0], rf.crosshair[1], "+", (0, 255, 102), "center")]
-            # no sleep: StretchDIBits/present provides implicit back-pressure; a sleep would add input latency
-            blitter.present(fb, w, h, cw, ch, texts=texts)
+            # no sleep: present/present_vector provide implicit back-pressure
+            if rf.mode == "zbuf":
+                fb, fw, fh = rf.framebuffer
+                blitter.present(fb, fw, fh, cw, ch, texts=texts,
+                                particles=rf.particles)
+            elif rf.mode == "wire":
+                blitter.present_vector(rf.segs, None, rf.particles, cw, ch,
+                                       texts=texts)
+            else:   # "flat"
+                blitter.present_vector(None, rf.polys, rf.particles, cw, ch,
+                                       texts=texts)
     finally:
+        if blitter is not None:
+            blitter.close()
         win.shutdown()
 
 

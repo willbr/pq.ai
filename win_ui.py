@@ -246,7 +246,7 @@ class GdiBlitter:
         self._null_pen = g.GetStockObject(NULL_PEN)         # stock: never delete
         self._wire_pen = g.CreatePen(PS_SOLID, 1, colorref(WIRE_RGB))  # del in close()
 
-    def present(self, fb, w, h, dst_w, dst_h, texts=()):
+    def present(self, fb, w, h, dst_w, dst_h, texts=(), particles=()):
         g, u, hdc = self.gdi32, self.user32, None
         self._buf = to_dib_bgr(fb, w, h)
         self._bmi.biWidth = w
@@ -259,6 +259,7 @@ class GdiBlitter:
             g.StretchDIBits(hdc, 0, 0, dst_w, dst_h, 0, 0, w, h,
                             cbuf, ctypes.byref(self._bmi),
                             DIB_RGB_COLORS, SRCCOPY)
+            self._draw_particles_gdi(hdc, particles)
             self._draw_texts(hdc, texts)
         finally:
             u.ReleaseDC(self.hwnd, hdc)

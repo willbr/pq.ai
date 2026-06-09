@@ -15,6 +15,7 @@ from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED
 from quake.progs import Progs
 from quake.sv import Server, anglemod
 from quake.mdl import Mdl, EF_ROTATE
+from quake.perf import PROFILER
 from quake import snd
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
@@ -130,6 +131,7 @@ class Client:
         self.attacking = False
         self.pending_impulse = 0     # weapon-select keypress, sent once to the QC
         self.intermission = False    # frozen at the end-of-level camera spot
+        self.show_prof = False       # append the profiler section breakdown to the HUD
 
         # mode derived from the renderer flags above
         self.mode = "zbuf" if self.zbuf else "flat" if self.flat else "wire"
@@ -308,8 +310,11 @@ class Client:
                     self.zbuf = not self.zbuf
                 elif cmd == "texture":
                     self.textured = not self.textured
+                elif cmd == "prof":
+                    self.show_prof = not self.show_prof
             self.mode = "zbuf" if self.zbuf else "flat" if self.flat else "wire"
 
+        PROFILER.begin("server")     # QuakeC tick + physics for this frame
         dead = False                 # set below once health hits 0 (death cam)
         # Intermission: the QC has frozen the player at the end-of-level camera
         # spot. Don't move or camera-drive them -- just advance the QC and let
@@ -380,6 +385,7 @@ class Client:
             self._change_level(self.sv.changelevel)
             self.intermission = False
             # sv/bsp just swapped; render the new map's current state below
+        PROFILER.end("server")
         brush_ents = self.sv.brush_models()
         alias_ents = self._alias_ents()
         bsp_ents = self._bsp_ents()
@@ -411,6 +417,7 @@ class Client:
             eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
             view_model = self._view_model(gun_org)
 
+        PROFILER.begin("render")
         segs = polys = framebuffer = None
         if self.mode == "zbuf":
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
@@ -433,6 +440,7 @@ class Client:
                                           brush_ents, alias_ents, view_model,
                                           bsp_ents)
             nprim = len(segs)
+        PROFILER.end("render")
 
         particles = self._particle_sprites(eye)
 
@@ -450,7 +458,12 @@ class Client:
                    f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                    f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
                    f"{'MOUSELOOK — mouse/Ctrl fire, 1-8 weapons' if inp.mouselook else 'click to capture mouse'} "
-                   f"[N]oclip [F]lat [Z]buffer [T]exture")
+                   f"[N]oclip [F]lat [Z]buffer [T]exture [P]rofile")
+        if self.show_prof:
+            # previous completed frame's smoothed section ms (server/render/
+            # raster/present). present is timed in the frontend and frame_end()
+            # rolls the buckets, so the figures lag one frame uniformly.
+            hud_str += "\n" + PROFILER.report()
         overlays.append((8, 8, hud_str, (0, 255, 102), "nw"))
 
         # bottom status bar: health / armor / current-weapon ammo, plus the four

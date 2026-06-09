@@ -12,6 +12,7 @@ Controls:
     N               toggle noclip flight        Tab    toggle mouselook
     F               toggle flat shading         Esc    release mouse / quit
     Z               toggle z-buffer (textured)  T      toggle texturing
+    P               toggle profiler HUD (per-frame section ms)
 
 This is a THIN tkinter frontend: it owns the window, the Tk canvas item pools and
 the WARP-based mouselook; all game logic lives in client.Client, which returns a
@@ -24,6 +25,7 @@ import time
 import tkinter as tk
 
 from quake.render import ZBUF_SCALE
+from quake.perf import PROFILER
 
 from client import Client, InputState
 
@@ -212,6 +214,9 @@ class App:
         if k == "t":
             self._cmd_queue.add("texture")
             return
+        if k == "p":
+            self._cmd_queue.add("prof")
+            return
         if len(k) == 1 and "1" <= k <= "8":   # select a weapon (Quake impulse 1-8)
             self._pending_impulse = int(k)
             return
@@ -276,7 +281,9 @@ class App:
         self.last_t = now
         self.client.resize(self.canvas.winfo_width(), self.canvas.winfo_height())
         rf = self.client.frame(dt, self._input())
-        self._draw_frame(rf)
+        with PROFILER.section("present"):
+            self._draw_frame(rf)
+        PROFILER.frame_end()         # roll this frame's section times into the HUD readout
         work_ms = (time.perf_counter() - now) * 1000
         self.root.after(max(1, int(16 - work_ms)), self.tick)
 

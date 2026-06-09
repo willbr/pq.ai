@@ -15,6 +15,8 @@ import math
 import sys
 from array import array
 
+from .perf import PROFILER
+
 sys.setrecursionlimit(20000)   # BSP back-to-front walk can recurse deep
 
 NEAR = 1.0
@@ -1258,6 +1260,7 @@ class Renderer:
                     emit_face_poly(fi)
                 walk(children[1], back)
 
+        PROFILER.begin("raster")        # projection/clip of the visible geometry
         walk(self.headnode, pending)
 
         # first-person weapon view model: drawn last (no z-buffer -> draw order
@@ -1265,6 +1268,7 @@ class Renderer:
         if view_model:
             mdl, verts, org, ang = view_model
             emit_alias({"mdl": mdl, "verts": verts, "origin": org, "angles": ang})
+        PROFILER.end("raster")
 
         return polys, leaf
 
@@ -1718,6 +1722,7 @@ class Renderer:
                                  (cb[0], cb[1], cb[2], s1, t1),
                                  (cc[0], cc[1], cc[2], s2, t2)], rec, lm)
 
+        PROFILER.begin("raster")        # per-pixel fill of all visible geometry
         # world (model 0): PVS-visible leaves' faces, backface-culled
         for li in visible_leaves:
             _, _, firstmark, nummark = leafs[li]
@@ -1854,5 +1859,6 @@ class Renderer:
                 raster_alias_tex(mdl, verts, org, ang)
             else:
                 raster_alias(mdl, verts, org, ang)
+        PROFILER.end("raster")
 
         return (fb, iw, ih), leaf

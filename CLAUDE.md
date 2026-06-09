@@ -54,6 +54,8 @@ quake/sv.py         server: ~70 builtins (pr_cmds.c port), entity spawning, thin
 quake/physics.py    clip-hull tracing + player/monster movement; backs the collision builtins
 quake/render.py     three renderers (wireframe, flat, textured z-buffer); lightmaps, light styles, animated surfaces
 quake/snd.py        platform-agnostic mixer: decode/spatialize/mix(nframes)→int16 stereo; no OS calls
+quake/perf.py       PROFILER singleton: always-on per-frame section timer (server/render/raster/present),
+                      EMA-smoothed; section()/begin()/end()/frame_end(); shown on the HUD via the P key
 client.py           UI-agnostic Client: engine stack + camera/player/game state; frame(dt, input)→RenderFrame
 main.py             tkinter frontend (all platforms; default off-Windows, or --tk on Windows):
                       after() loop, Canvas/PhotoImage drawing, warp-based mouselook;

@@ -32,6 +32,7 @@ import time
 from ctypes import wintypes
 
 from client import Client, InputState
+from quake.perf import PROFILER
 import win_ui
 
 # ---- Win32 window constants -------------------------------------------------
@@ -51,8 +52,10 @@ VK_TAB, VK_SHIFT, VK_CONTROL, VK_ESCAPE, VK_SPACE = 0x09, 0x10, 0x11, 0x1B, 0x20
 VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN = 0x25, 0x26, 0x27, 0x28
 VK_W, VK_A, VK_S, VK_D = 0x57, 0x41, 0x53, 0x44
 VK_C, VK_N, VK_F, VK_Z, VK_T = 0x43, 0x4E, 0x46, 0x5A, 0x54
+VK_P = 0x50
 # one-shot toggle keys -> the Client command they fire (edge-triggered)
-COMMAND_KEYS = {VK_N: "noclip", VK_F: "flat", VK_Z: "zbuf", VK_T: "texture"}
+COMMAND_KEYS = {VK_N: "noclip", VK_F: "flat", VK_Z: "zbuf", VK_T: "texture",
+                VK_P: "prof"}
 
 GetRawInputData = ctypes.WinDLL("user32").GetRawInputData
 GetRawInputData.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p,
@@ -323,6 +326,7 @@ def run(mapname):
             texts = list(rf.overlays) + [
                 (rf.crosshair[0], rf.crosshair[1], "+", (0, 255, 102), "center")]
             # no sleep: present/present_vector provide implicit back-pressure
+            PROFILER.begin("present")
             if rf.mode == "zbuf":
                 fb, fw, fh = rf.framebuffer
                 blitter.present(fb, fw, fh, cw, ch, texts=texts,
@@ -333,6 +337,8 @@ def run(mapname):
             else:   # "flat"
                 blitter.present_vector(None, rf.polys, rf.particles, cw, ch,
                                        texts=texts)
+            PROFILER.end("present")
+            PROFILER.frame_end()     # roll this frame's section times into the HUD readout
     finally:
         if blitter is not None:
             blitter.close()

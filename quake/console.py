@@ -193,3 +193,55 @@ class Console:
                 self.print(f'"{name}" is "{cv.value}"')
             return
         self.print(f'Unknown command "{name}"')
+
+    # ---- line editor ----
+    def key_char(self, ch):
+        if len(ch) != 1 or ch < " " or ch == "\x7f":
+            return
+        self.input = self.input[:self.cursor] + ch + self.input[self.cursor:]
+        self.cursor += 1
+
+    def key_backspace(self):
+        if self.cursor > 0:
+            self.input = self.input[:self.cursor - 1] + self.input[self.cursor:]
+            self.cursor -= 1
+
+    def key_delete(self):
+        if self.cursor < len(self.input):
+            self.input = self.input[:self.cursor] + self.input[self.cursor + 1:]
+
+    def key_left(self):
+        self.cursor = max(0, self.cursor - 1)
+
+    def key_right(self):
+        self.cursor = min(len(self.input), self.cursor + 1)
+
+    def key_home(self):
+        self.cursor = 0
+
+    def key_end(self):
+        self.cursor = len(self.input)
+
+    def key_enter(self):
+        line = self.input
+        self.print("]" + line)
+        self.input = ""
+        self.cursor = 0
+        if line.strip():
+            self.history.append(line)
+            self.execute(line)
+        self.hist_pos = len(self.history)
+
+    # ---- history ----
+    def key_up(self):
+        if self.hist_pos > 0:
+            self.hist_pos -= 1
+            self.input = self.history[self.hist_pos]
+            self.cursor = len(self.input)
+
+    def key_down(self):
+        if self.hist_pos < len(self.history):
+            self.hist_pos += 1
+            self.input = (self.history[self.hist_pos]
+                          if self.hist_pos < len(self.history) else "")
+            self.cursor = len(self.input)

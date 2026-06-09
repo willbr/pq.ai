@@ -60,6 +60,46 @@ def test_cvar_numeric_views_tolerate_junk():
     assert junk.as_bool() is False
 
 
+def test_line_editor_insert_and_delete():
+    con = Console()
+    for ch in "mp":
+        con.key_char(ch)
+    con.key_left()
+    con.key_char("a")                       # "map"
+    assert con.input == "map" and con.cursor == 2
+    con.key_home(); assert con.cursor == 0
+    con.key_end(); assert con.cursor == 3
+    con.key_backspace(); assert con.input == "ma"
+    con.key_home(); con.key_delete(); assert con.input == "a"
+
+
+def test_enter_executes_and_records_history():
+    con = Console()
+    ran = []
+    con.register_command("go", lambda a: ran.append(True))
+    for ch in "go":
+        con.key_char(ch)
+    con.key_enter()
+    assert ran == [True]
+    assert con.input == "" and con.cursor == 0
+    assert con.history == ["go"]
+    assert any(ln == "]go" for ln in con.lines)
+
+
+def test_history_recall_up_and_down():
+    con = Console()
+    con.register_command("a", lambda x: None)
+    con.register_command("b", lambda x: None)
+    for line in ("a", "b"):
+        con.input = line
+        con.cursor = len(line)
+        con.key_enter()
+    con.key_up(); assert con.input == "b"
+    con.key_up(); assert con.input == "a"
+    con.key_down(); assert con.input == "b"
+    con.key_down(); assert con.input == ""   # back to the live (empty) edit
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

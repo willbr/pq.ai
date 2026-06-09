@@ -77,7 +77,7 @@ class InputState:
     fire: bool = False
     impulse: int = 0
     commands: frozenset = frozenset()
-    mouselook: bool = False
+    mouselook: bool = False  # frontend hint: only used to pick the HUD prompt string
 
 
 @dataclass

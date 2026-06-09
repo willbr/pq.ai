@@ -1,26 +1,19 @@
-"""Windows UI front-end (outside the `quake` engine package): fast GDI framebuffer
-blit + raw-input mouselook, both hung off the Tk window's HWND.
+"""Windows GDI helpers (outside the `quake` engine package): GdiBlitter and the
+raw-input ctypes structs/helpers used by win_gdi.py for its own WndProc.
 
-Why this exists: tkinter's z-buffer present path encodes a PPM and builds a fresh,
-upscaled PhotoImage every frame; and tkinter offers no OS mouse grab, so mouselook
-fakes relative motion by warping the cursor and measuring deltas (fragile -- see
-main.look_delta's warp-straddle guard). Both are Windows pain points this module
-removes with ctypes against user32/gdi32:
-
-  GdiBlitter   StretchDIBits a raw framebuffer straight to the window DC, doing the
+  GdiBlitter   StretchDIBits a raw framebuffer straight to a window DC, doing the
                1/ZBUF_SCALE upscale in GDI (no PPM, no PhotoImage, no .zoom()).
-  RawMouse     RegisterRawInputDevices + a subclassed WndProc reading WM_INPUT, for
-               acceleration-free relative deltas with no warp -- plus ClipCursor /
-               ShowCursor for a real grab.
+               Also handles double-buffered vector (wireframe/flat) frames and GDI
+               HUD text, so both render paths share one presenter.
 
-main.py owns the Tk window and picks this front-end on sys.platform == "win32";
-elsewhere the existing tkinter warp path stays. Like win.py / mac.py, the engine
-imports none of this.
+  Raw-input    RAWINPUT / RAWINPUTHEADER / RAWMOUSE / RAWINPUTDEVICE structs plus
+  structs &    the WNDPROC / LRESULT types and the WM_INPUT / RID_INPUT / RIDEV_*
+  helpers      / HID_USAGE_* constants. win_gdi.py's own WndProc uses these to
+               decode WM_INPUT packets for acceleration-free mouselook.
 
-The pure, OS-independent core (bgr_swap, raw_mouse_delta, the RAWINPUT structs)
-is unit-tested in test_win_ui.py; the live window/grab glue is verified by running
-the game. DLL loading is deferred into the classes so importing this module is
-side-effect free (the tests import it on any Windows box, no window required).
+The pure, OS-independent helpers (bgr_swap, raw_mouse_delta, apply_left_button,
+the RAWINPUT struct layout) are unit-tested in test_win_ui.py. DLL loading is
+deferred into GdiBlitter.__init__ so importing this module is side-effect free.
 """
 
 import ctypes
@@ -427,125 +420,3 @@ class RAWINPUTDEVICE(ctypes.Structure):
     _fields_ = [("usUsagePage", wintypes.USHORT), ("usUsage", wintypes.USHORT),
                 ("dwFlags", wintypes.DWORD), ("hwndTarget", wintypes.HWND)]
 
-
-class RawMouse:
-    """Acceleration-free relative mouselook via Win32 Raw Input, with a real
-    cursor grab. Subclasses the (Tk) window's WndProc to catch WM_INPUT, decodes
-    each RAWMOUSE, and accumulates deltas; the game reads and clears them once per
-    frame with read(). grab()/ungrab() register/unregister the raw device and
-    confine + hide the cursor (ClipCursor + ShowCursor). No warp, so none of
-    main.look_delta's straddle machinery is needed on this path.
-
-    The WndProc runs on Tk's own thread during its message pump, so accumulation
-    and read() share a thread -- no locking. Keep this object alive: it holds the
-    WNDPROC trampoline GDI must not garbage-collect, and restores the original
-    proc on shutdown()."""
-
-    def __init__(self, hwnd):
-        self.hwnd = wintypes.HWND(hwnd)
-        self._dx = 0
-        self._dy = 0
-        self.left_down = False         # fire button, read from raw (legacy suppressed)
-        self.events = 0                # WM_INPUT count (diagnostics)
-        self._grabbed = False
-        u = self.user32 = ctypes.WinDLL("user32")
-        u.RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE),
-                                              wintypes.UINT, wintypes.UINT]
-        u.RegisterRawInputDevices.restype = wintypes.BOOL
-        u.GetRawInputData.argtypes = [wintypes.HANDLE, wintypes.UINT,
-                                      ctypes.c_void_p,
-                                      ctypes.POINTER(wintypes.UINT), wintypes.UINT]
-        u.GetRawInputData.restype = wintypes.UINT
-        u.ClipCursor.argtypes = [ctypes.POINTER(wintypes.RECT)]
-        u.ClipCursor.restype = wintypes.BOOL
-        u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        u.GetWindowRect.restype = wintypes.BOOL
-        u.ShowCursor.argtypes = [wintypes.BOOL]
-        u.ShowCursor.restype = ctypes.c_int
-        u.CallWindowProcW.argtypes = [LRESULT, wintypes.HWND, wintypes.UINT,
-                                      wintypes.WPARAM, wintypes.LPARAM]
-        u.CallWindowProcW.restype = LRESULT
-        # SetWindowLongPtrW only exists on 64-bit user32; 32-bit uses SetWindowLongW
-        setwl = (u.SetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8
-                 else u.SetWindowLongW)
-        # third arg typed as c_void_p so the same function installs the callback
-        # (cast from WNDPROC) and later restores the original proc (a raw int).
-        setwl.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
-        setwl.restype = LRESULT
-        self._setwl = setwl
-        self._wndproc = WNDPROC(self._proc)        # keep a ref (anti-GC)
-        self._old_proc = setwl(self.hwnd, GWLP_WNDPROC,
-                               ctypes.cast(self._wndproc, ctypes.c_void_p))
-        self._ri = RAWINPUTDEVICE(HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE,
-                                  0, self.hwnd)
-
-    # -- the subclassed window procedure: pick off WM_INPUT, chain the rest -----
-    def _proc(self, hwnd, msg, wparam, lparam):
-        if msg == WM_INPUT:
-            try:
-                self._read_raw(lparam)
-            except Exception:
-                pass                              # never break Tk's message pump
-        return self.user32.CallWindowProcW(self._old_proc, hwnd, msg,
-                                           wparam, lparam)
-
-    def _read_raw(self, lparam):
-        ri = RAWINPUT()
-        size = wintypes.UINT(ctypes.sizeof(RAWINPUT))
-        got = self.user32.GetRawInputData(lparam, RID_INPUT, ctypes.byref(ri),
-                                          ctypes.byref(size),
-                                          ctypes.sizeof(RAWINPUTHEADER))
-        self.events += 1
-        if got == 0xFFFFFFFF or ri.header.dwType != RIM_TYPEMOUSE:
-            return
-        dx, dy = raw_mouse_delta(ri.mouse.usFlags, ri.mouse.lLastX, ri.mouse.lLastY)
-        self._dx += dx
-        self._dy += dy
-        # low word of the button union is usButtonFlags (the transition bits)
-        self.left_down = apply_left_button(self.left_down,
-                                           ri.mouse.ulButtons & 0xFFFF)
-
-    def read(self):
-        """Accumulated (dx, dy) since the last call; resets to zero."""
-        dx, dy = self._dx, self._dy
-        self._dx = self._dy = 0
-        return dx, dy
-
-    def grab(self):
-        if self._grabbed:
-            return
-        # RIDEV_NOLEGACY: while grabbed the mouse emits only WM_INPUT, so the Tk
-        # event loop is no longer flooded with WM_MOUSEMOVE -> <Motion> events
-        # (which starved the after()-driven tick and delayed keypresses). Motion
-        # AND the fire button are read from the raw stream instead.
-        self._ri.dwFlags = RIDEV_NOLEGACY
-        self._ri.hwndTarget = self.hwnd
-        self.user32.RegisterRawInputDevices(ctypes.byref(self._ri), 1,
-                                            ctypes.sizeof(RAWINPUTDEVICE))
-        self._clip()
-        self.user32.ShowCursor(False)
-        self._dx = self._dy = 0
-        self.left_down = False
-        self._grabbed = True
-
-    def ungrab(self):
-        if not self._grabbed:
-            return
-        rm = RAWINPUTDEVICE(HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE,
-                            RIDEV_REMOVE, None)
-        self.user32.RegisterRawInputDevices(ctypes.byref(rm), 1,
-                                            ctypes.sizeof(RAWINPUTDEVICE))
-        self.user32.ClipCursor(None)
-        self.user32.ShowCursor(True)
-        self._grabbed = False
-
-    def _clip(self):
-        r = wintypes.RECT()
-        if self.user32.GetWindowRect(self.hwnd, ctypes.byref(r)):
-            self.user32.ClipCursor(ctypes.byref(r))
-
-    def shutdown(self):
-        try:
-            self.ungrab()
-        finally:
-            self._setwl(self.hwnd, GWLP_WNDPROC, self._old_proc)

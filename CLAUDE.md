@@ -59,8 +59,10 @@ main.py             tkinter frontend (all platforms; default off-Windows, or --t
                       select_frontend(argv, platform) dispatches to gdi or tk at startup
 win_gdi.py          gdi32 Windows frontend (default on Windows): PeekMessage loop, Win32 raw-input
                       mouselook + cursor grab, GdiBlitter (StretchDIBits/Polyline/Polygon/TextOut)
-win_ui.py           Windows GDI + raw-input ctypes helpers (GdiBlitter, RawMouse, RAWINPUT);
-                      pure helpers unit-tested in test_win_ui.py
+win_ui.py           Windows GDI helpers: GdiBlitter (fast blit + vector/text drawing) plus the
+                      raw-input ctypes structs/helpers (RAWINPUT, RAWINPUTDEVICE, raw_mouse_delta,
+                      etc.) that win_gdi.py uses for its own WndProc; pure helpers unit-tested in
+                      test_win_ui.py
 mac.py              macOS audio backend (outside pkg): CoreAudio AudioQueue pulling from the mixer
 win.py              Windows audio backend (outside pkg): winmm waveOut buffers, feeder thread pulling from the mixer
 ```

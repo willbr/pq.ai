@@ -32,6 +32,7 @@ import time
 from ctypes import wintypes
 
 from client import Client, InputState
+from quake.console import TeeStdout
 from quake.perf import PROFILER
 import win_ui
 
@@ -53,6 +54,11 @@ VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN = 0x25, 0x26, 0x27, 0x28
 VK_W, VK_A, VK_S, VK_D = 0x57, 0x41, 0x53, 0x44
 VK_C, VK_N, VK_F, VK_Z, VK_T = 0x43, 0x4E, 0x46, 0x5A, 0x54
 VK_P = 0x50
+VK_F1 = 0x70
+VK_RETURN, VK_BACK, VK_DELETE = 0x0D, 0x08, 0x2E
+VK_HOME, VK_END = 0x24, 0x23
+VK_PRIOR, VK_NEXT = 0x21, 0x22        # PageUp / PageDown
+WM_CHAR = 0x0102
 # one-shot toggle keys -> the Client command they fire (edge-triggered)
 COMMAND_KEYS = {VK_N: "noclip", VK_F: "flat", VK_Z: "zbuf", VK_T: "texture",
                 VK_P: "prof"}
@@ -95,6 +101,7 @@ class GameWindow:
         self.mouselook = False          # raw grab engaged?
         self.running = True
         self.raw_events = 0             # cumulative WM_INPUT count (diagnostics only)
+        self.console = None             # wired to client.con in run(); None until then
         u = self.user32 = ctypes.WinDLL("user32")
         k = ctypes.WinDLL("kernel32")
         for name, restype, argtypes in (
@@ -185,11 +192,22 @@ class GameWindow:
     def _proc(self, hwnd, msg, wparam, lparam):
         if msg == win_ui.WM_INPUT:
             self._read_raw(lparam)
+        elif msg == WM_CHAR:
+            if self.console and self.console.active:
+                ch = chr(wparam) if 0x20 <= wparam <= 0x7E else ""
+                if ch:
+                    self.console.key_char(ch)
+                # swallow; control chars (CR/BS/TAB) are handled via WM_KEYDOWN
         elif msg in (WM_KEYDOWN, WM_SYSKEYDOWN):
-            if wparam == VK_ESCAPE:
+            if wparam == VK_F1:
+                self._toggle_console()
+            elif self.console and self.console.active:
+                self._console_key(wparam)
+            elif wparam == VK_ESCAPE:
                 self.running = False
                 self.user32.PostQuitMessage(0)
-            self.keys.add(wparam)
+            else:
+                self.keys.add(wparam)
         elif msg in (WM_KEYUP, WM_SYSKEYUP):
             self.keys.discard(wparam)
         elif msg == WM_LBUTTONDOWN:
@@ -204,6 +222,48 @@ class GameWindow:
             self.user32.PostQuitMessage(0)
             return 0
         return self.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _toggle_console(self):
+        """F1: open/close the console. Opening clears held movement keys and
+        ungrabs the mouse so the cursor is visible while typing."""
+        con = self.console
+        if con is None:
+            return
+        con.active = not con.active
+        if con.active:
+            self.keys.clear()
+            self.ungrab()
+
+    def _console_key(self, vk):
+        """Drive the console line editor from a virtual-key while it is open.
+        Everything here is swallowed -- no game state is touched."""
+        con = self.console
+        if vk == VK_ESCAPE:
+            con.active = False
+        elif vk == VK_RETURN:
+            con.key_enter()
+        elif vk == VK_BACK:
+            con.key_backspace()
+        elif vk == VK_DELETE:
+            con.key_delete()
+        elif vk == VK_TAB:
+            con.key_tab()
+        elif vk == VK_LEFT:
+            con.key_left()
+        elif vk == VK_RIGHT:
+            con.key_right()
+        elif vk == VK_HOME:
+            con.key_home()
+        elif vk == VK_END:
+            con.key_end()
+        elif vk == VK_UP:
+            con.key_up()
+        elif vk == VK_DOWN:
+            con.key_down()
+        elif vk == VK_PRIOR:
+            con.key_pageup()
+        elif vk == VK_NEXT:
+            con.key_pagedown()
 
     def _read_raw(self, lparam):
         ri = win_ui.RAWINPUT()
@@ -246,6 +306,11 @@ class GameWindow:
         Client consumes. Edge detection (newly-pressed since last frame) drives the
         one-shot intents: impulse (weapon select 1-8), commands (N/F/Z/T toggles),
         Tab (mouselook toggle) and click-to-capture. Held keys drive movement."""
+        if self.console and self.console.active:
+            # console owns the keyboard; feed the Client a do-nothing frame
+            # (keep mouselook flag only so the HUD prompt is right).
+            self._prev_keys = set()
+            return InputState(mouselook=self.mouselook)
         keys = self.keys
         newly = keys - self._prev_keys     # keys pressed since last frame
 
@@ -299,7 +364,10 @@ class GameWindow:
 
 def run(mapname):
     win = GameWindow(f"pq.ai gdi — {mapname}", 800, 600)
+    real_stdout = sys.stdout            # restored in finally; safe even if Client() throws
     client = Client(mapname)
+    win.console = client.con
+    sys.stdout = TeeStdout(real_stdout, client.con.print)
     blitter = None
 
     last = time.perf_counter()
@@ -318,6 +386,8 @@ def run(mapname):
 
             inp = win.build_input(dt)
             rf = client.frame(dt, inp)
+            if client.quit_requested:
+                win.running = False
 
             cw, ch = win.client_size()
             if (cw, ch) != last_wh:
@@ -338,8 +408,12 @@ def run(mapname):
                 blitter.present_vector(None, rf.polys, rf.particles, cw, ch,
                                        texts=texts)
             PROFILER.end("present")
+            if rf.console is not None:
+                lines, input_line, cursor_col = rf.console
+                blitter.draw_console(lines, input_line, cursor_col, cw, ch)
             PROFILER.frame_end()     # roll this frame's section times into the HUD readout
     finally:
+        sys.stdout = real_stdout
         if blitter is not None:
             blitter.close()
         win.shutdown()

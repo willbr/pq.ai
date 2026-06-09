@@ -91,7 +91,7 @@ class GameWindow:
         self._prev_keys = set()         # last frame's keys, for edge detection
         self.mouselook = False          # raw grab engaged?
         self.running = True
-        self.raw_events = 0
+        self.raw_events = 0             # cumulative WM_INPUT count (diagnostics only)
         u = self.user32 = ctypes.WinDLL("user32")
         k = ctypes.WinDLL("kernel32")
         for name, restype, argtypes in (
@@ -280,6 +280,7 @@ class GameWindow:
 
         if VK_ESCAPE in keys:
             self.running = False
+            # Esc is also handled in _proc; both paths agree
 
         self._prev_keys = set(keys)
         return InputState(move_forward=move_forward, move_strafe=move_strafe,
@@ -289,8 +290,8 @@ class GameWindow:
 
     def shutdown(self):
         self.ungrab()
+        # ungrab() restores the cursor if it was hidden; ClipCursor(None) is a harmless re-unclip
         self.user32.ClipCursor(None)
-        self.user32.ShowCursor(True)
 
 
 def _force_zbuf(client):
@@ -309,6 +310,7 @@ def run(mapname):
     blitter = win_ui.GdiBlitter(win.hwnd)
     cw, ch = win.client_size()
     client.resize(cw, ch)
+    last_wh = (cw, ch)
     _force_zbuf(client)
 
     last = time.perf_counter()
@@ -325,11 +327,13 @@ def run(mapname):
             rf = client.frame(dt, inp)
 
             cw, ch = win.client_size()
-            if (cw, ch) != client._view_wh:
+            if (cw, ch) != last_wh:
                 client.resize(cw, ch)
+                last_wh = (cw, ch)
             fb, w, h = rf.framebuffer
             texts = list(rf.overlays) + [
                 (rf.crosshair[0], rf.crosshair[1], "+", (0, 255, 102), "center")]
+            # no sleep: StretchDIBits/present provides implicit back-pressure; a sleep would add input latency
             blitter.present(fb, w, h, cw, ch, texts=texts)
     finally:
         win.shutdown()

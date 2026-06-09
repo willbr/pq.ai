@@ -56,6 +56,30 @@ def test_raw_mouse_delta_absolute_yields_no_motion():
     assert win_ui.raw_mouse_delta(win_ui.MOUSE_MOVE_ABSOLUTE, 1234, 5678) == (0, 0)
 
 
+def test_left_button_press_and_release_track_held_state():
+    """With RIDEV_NOLEGACY the mouse stops emitting WM_LBUTTONDOWN/UP, so fire is
+    read from RAWMOUSE button flags: a DOWN flag holds the button, an UP flag
+    releases it."""
+    import win_ui
+    assert win_ui.apply_left_button(False, win_ui.RI_MOUSE_LEFT_BUTTON_DOWN) is True
+    assert win_ui.apply_left_button(True, win_ui.RI_MOUSE_LEFT_BUTTON_UP) is False
+
+
+def test_left_button_unchanged_when_no_transition():
+    """Button flags only report transitions; a packet with neither flag (pure
+    motion, or a held button) leaves the held state as it was."""
+    import win_ui
+    assert win_ui.apply_left_button(True, 0) is True       # held across motion
+    assert win_ui.apply_left_button(False, 0) is False
+
+
+def test_left_button_down_and_up_in_one_packet_ends_released():
+    """A down+up coalesced into one packet ends released (no stuck fire)."""
+    import win_ui
+    flags = win_ui.RI_MOUSE_LEFT_BUTTON_DOWN | win_ui.RI_MOUSE_LEFT_BUTTON_UP
+    assert win_ui.apply_left_button(False, flags) is False
+
+
 def test_rawmouse_layout_matches_win32_abi():
     """RAWMOUSE is 24 bytes with lLastX at offset 12 -- a wrong layout silently
     reads garbage deltas, so pin it down."""
@@ -84,6 +108,9 @@ if __name__ == "__main__":
     test_to_dib_bgr_pads_each_row_to_dword_boundary()
     test_raw_mouse_delta_relative_is_passed_through()
     test_raw_mouse_delta_absolute_yields_no_motion()
+    test_left_button_press_and_release_track_held_state()
+    test_left_button_unchanged_when_no_transition()
+    test_left_button_down_and_up_in_one_packet_ends_released()
     test_rawmouse_layout_matches_win32_abi()
     test_rawinput_layout_matches_win32_abi()
     print("OK")

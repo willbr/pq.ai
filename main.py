@@ -436,6 +436,10 @@ class App:
             self.yaw -= dx * LOOK_SENS
             self.pitch += dy * LOOK_SENS
             self.pitch = max(-89.0, min(89.0, self.pitch))
+        # RIDEV_NOLEGACY suppresses Tk's <Button-1> while grabbed, so the fire
+        # button is polled from the raw stream (the QC weapon frame paces shots).
+        self.fire_mouse = self.rawmouse.left_down
+        self._set_attack()
 
     def _set_tk_overlays(self, visible):
         """Show/hide the Tk HUD canvas items. The GDI present path hides them and

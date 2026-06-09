@@ -30,6 +30,9 @@ from ctypes import wintypes
 # RI_MOUSE / RAWMOUSE.usFlags: bit 0 distinguishes relative from absolute motion.
 MOUSE_MOVE_RELATIVE = 0x00       # lLastX/Y are deltas (a normal mouse)
 MOUSE_MOVE_ABSOLUTE = 0x01       # lLastX/Y are screen coords (touchpad / RDP)
+# RAWMOUSE button transition flags (low word of the button union)
+RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001
+RI_MOUSE_LEFT_BUTTON_UP = 0x0002
 
 
 # ---- RAWINPUT structures (winuser.h), pinned by test_win_ui ------------------
@@ -99,6 +102,18 @@ def raw_mouse_delta(usflags, last_x, last_y):
     if usflags & MOUSE_MOVE_ABSOLUTE:
         return 0, 0
     return last_x, last_y
+
+
+def apply_left_button(held, usbuttonflags):
+    """Updated left-button held state from a RAWMOUSE button-flag word. Flags only
+    report transitions, so no flag leaves `held` unchanged (a held button across a
+    motion packet); a coalesced down+up ends released (up wins -> no stuck fire).
+    Needed because RIDEV_NOLEGACY suppresses the WM_LBUTTONDOWN Tk fires on."""
+    if usbuttonflags & RI_MOUSE_LEFT_BUTTON_UP:
+        return False
+    if usbuttonflags & RI_MOUSE_LEFT_BUTTON_DOWN:
+        return True
+    return held
 
 
 # ============================================================================
@@ -219,6 +234,7 @@ WM_INPUT = 0x00FF
 RID_INPUT = 0x10000003
 RIM_TYPEMOUSE = 0
 RIDEV_REMOVE = 0x00000001
+RIDEV_NOLEGACY = 0x00000030      # mouse emits only WM_INPUT (no WM_MOUSEMOVE/clicks)
 GWLP_WNDPROC = -4
 HID_USAGE_PAGE_GENERIC = 0x01
 HID_USAGE_GENERIC_MOUSE = 0x02
@@ -250,6 +266,7 @@ class RawMouse:
         self.hwnd = wintypes.HWND(hwnd)
         self._dx = 0
         self._dy = 0
+        self.left_down = False         # fire button, read from raw (legacy suppressed)
         self._grabbed = False
         u = self.user32 = ctypes.WinDLL("user32")
         u.RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE),
@@ -303,6 +320,9 @@ class RawMouse:
         dx, dy = raw_mouse_delta(ri.mouse.usFlags, ri.mouse.lLastX, ri.mouse.lLastY)
         self._dx += dx
         self._dy += dy
+        # low word of the button union is usButtonFlags (the transition bits)
+        self.left_down = apply_left_button(self.left_down,
+                                           ri.mouse.ulButtons & 0xFFFF)
 
     def read(self):
         """Accumulated (dx, dy) since the last call; resets to zero."""
@@ -313,13 +333,18 @@ class RawMouse:
     def grab(self):
         if self._grabbed:
             return
-        self._ri.dwFlags = 0                       # foreground-only raw input
+        # RIDEV_NOLEGACY: while grabbed the mouse emits only WM_INPUT, so the Tk
+        # event loop is no longer flooded with WM_MOUSEMOVE -> <Motion> events
+        # (which starved the after()-driven tick and delayed keypresses). Motion
+        # AND the fire button are read from the raw stream instead.
+        self._ri.dwFlags = RIDEV_NOLEGACY
         self._ri.hwndTarget = self.hwnd
         self.user32.RegisterRawInputDevices(ctypes.byref(self._ri), 1,
                                             ctypes.sizeof(RAWINPUTDEVICE))
         self._clip()
         self.user32.ShowCursor(False)
         self._dx = self._dy = 0
+        self.left_down = False
         self._grabbed = True
 
     def ungrab(self):

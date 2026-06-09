@@ -88,8 +88,19 @@ win.py              Windows audio backend (outside pkg): winmm waveOut buffers, 
 
 ## Reference source
 
-`quake-source/` is id Software's GPL release kept locally as a read-only port reference —
-`WinQuake/` (C engine) and `qw-qc/` (QuakeC). Ports cite their origin (e.g.
-`SV_RecursiveHullCheck`, `S_PaintChannels`). When porting more behaviour, match these
-sources rather than inventing; it is the standing convention in commit messages and
-docstrings.
+`quake-source/` is id Software's GPL release kept locally as a read-only port reference
+(gitignored — clone separately). Ports cite their origin (e.g. `SV_RecursiveHullCheck`,
+`S_PaintChannels`). When porting more behaviour, match these sources rather than
+inventing; it is the standing convention in commit messages and docstrings.
+
+- `WinQuake/` — C engine (the runtime: server, physics, sound, client, renderer).
+- `qw-qc/` — QuakeWorld QuakeC (`defs.qc`, `client.qc`, `combat.qc`, `items.qc`,
+  `triggers.qc`, …): the *rules* the VM runs. The `.qc` citations in `sv.py` point here.
+- `quake-tools/` — id's GPL tool sources (`id-Software/Quake-Tools`), the authoritative
+  spec for the data formats the `quake/` parsers read: `qcc/` (QuakeC compiler →
+  `progs.dat` bytecode, mirrors `progs.py`/`pr_exec.py`), `qutils/QBSP` (BSP v29 →
+  `bsp.py`), `qutils/LIGHT` (lightmaps), `qutils/VIS` (PVS), `qutils/MODELGEN` (`.mdl` →
+  `mdl.py`). `QuakeEd/` is the NeXTSTEP map editor, included for completeness.
+
+The two repos: `WinQuake/` + `qw-qc/` come from `id-Software/Quake`; `quake-tools/` from
+`id-Software/Quake-Tools`.

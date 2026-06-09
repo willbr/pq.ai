@@ -192,9 +192,9 @@ class Client:
         for name in self.sv.sound_precache:
             # QC precaches bare names ("weapons/sgun1.wav"); the pak stores them
             # under "sound/". Key the mixer by the bare name the QC will pass.
-            path = "sound/" + name
-            if name and path in self.pak.files:
-                self.mixer.precache(name, self.pak.read(path))
+            snd_path = "sound/" + name
+            if name and snd_path in self.pak.files:
+                self.mixer.precache(name, self.pak.read(snd_path))
         for name, pos, vol, atten in self.sv.ambients:
             self.mixer.start_sound(0, 0, name, vol, atten, pos, loop=True)
         self.sv.snd = self.mixer
@@ -229,25 +229,20 @@ class Client:
             self.sv.changelevel = None      # missing map: don't retry every frame
 
     # ---- movement ----
-    def _wishmove(self):
-        """Forward/strafe intent from keys, as -1..1 each."""
-        fwd = (("w" in self.keys or "up" in self.keys) -
-               ("s" in self.keys or "down" in self.keys))
-        strafe = ("d" in self.keys) - ("a" in self.keys)
+    def _wishmove(self, inp):
+        """Forward/strafe intent from input, as -1..1 each."""
+        fwd = inp.move_forward
+        strafe = inp.move_strafe
         return fwd, strafe
 
-    def _move(self, dt):
-        # left/right arrows turn (yaw)
-        turn = ("right" in self.keys) - ("left" in self.keys)
-        self.yaw -= turn * YAW_SPEED * dt
-
-        fwd, strafe = self._wishmove()
-        fast = "shift_l" in self.keys or "shift_r" in self.keys
+    def _move(self, dt, inp):
+        fwd, strafe = self._wishmove(inp)
+        fast = bool(inp.run)
 
         if self.noclip:
             # free fly along the full view direction (pitch included), no gravity
             forward, right, up = angle_vectors(self.yaw, self.pitch)
-            rise = ("space" in self.keys) - ("c" in self.keys)
+            rise = inp.move_up
             speed = NOCLIP_SPEED * (3.0 if fast else 1.0) * dt
             for i in range(3):
                 self.pos[i] += (forward[i] * fwd + right[i] * strafe +
@@ -270,15 +265,243 @@ class Client:
 
         # swimming (and wall friction) use the full 3D view; space/ctrl swim up/down
         forward, right, _ = angle_vectors(self.yaw, self.pitch)
-        down = "c" in self.keys
-        upmove = (("space" in self.keys) - down) * speed
+        jump = inp.move_up > 0.0
+        upmove = inp.move_up * speed
 
         # clamp dt so a hitch can't tunnel the player through a wall
         step = min(dt, 0.05)
         self.onground, self.waterlevel = self.phys.player_move(
             self.pos, self.vel, wishdir, wishspeed,
             forward, right, fwd * speed, strafe * speed, upmove, speed,
-            self.onground, "space" in self.keys, step)
+            self.onground, jump, step)
+
+    # ---- main loop ----
+    def frame(self, dt, inp):
+        """Advance one frame from `dt` seconds and `inp` intent, returning a
+        RenderFrame the frontend draws. Ports main.py's App.tick minus drawing,
+        timing/after scheduling and diagnostics."""
+        if dt > 0:
+            self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+
+        # apply input -> view angles
+        self.yaw -= inp.look_dx * LOOK_SENS
+        self.pitch = max(-89.0, min(89.0, self.pitch + inp.look_dy * LOOK_SENS))
+        self.yaw -= inp.turn * YAW_SPEED * dt
+
+        # fire (button0) is mouse OR Ctrl key; combine into the attacking state
+        # the QC weapon frame reads.
+        self.fire_mouse = bool(inp.fire)
+        self.attacking = self.fire_mouse or self.fire_key
+        if inp.impulse:
+            self.pending_impulse = inp.impulse
+
+        # one-shot edge-triggered toggles fired this frame
+        if inp.commands:
+            for cmd in inp.commands:
+                if cmd == "noclip":
+                    self.noclip = not self.noclip
+                    self.vel = [0.0, 0.0, 0.0]
+                elif cmd == "flat":
+                    self.flat = not self.flat
+                elif cmd == "zbuf":
+                    self.zbuf = not self.zbuf
+                elif cmd == "texture":
+                    self.textured = not self.textured
+            self.mode = "zbuf" if self.zbuf else "flat" if self.flat else "wire"
+
+        dead = False                 # set below once health hits 0 (death cam)
+        # Intermission: the QC has frozen the player at the end-of-level camera
+        # spot. Don't move or camera-drive them -- just advance the QC and let
+        # IntermissionThink load the next map on a fire press after the delay.
+        if self.intermission or self.sv.intermission_active():
+            self.intermission = True
+            self.sv.run_frame(dt if dt < SV_MAXFRAME else SV_MAXFRAME)
+            self.sv.run_intermission(self.attacking)
+        else:
+            # Dead: PlayerDie turned the player into a MOVETYPE_TOSS corpse the
+            # QC now owns. Stop driving it from input -- no movement, and don't
+            # push the camera into the edict (that would fight the body's fall).
+            # We just feed the fire button through and follow the corpse, while
+            # PlayerDeathThink runs the respawn FSM server-side.
+            dead = self.sv.player_health() <= 0
+            self.bobtime += dt          # phase for the weapon bob
+
+            if not dead:
+                # refresh the brush models the player collides with (doors,
+                # func_walls, gates), at the positions last set by the QC tick
+                self.phys.set_brush_entities(self.sv.solid_brush_models())
+                self._move(dt, inp)
+
+            # listener for 3D sound: ear at the eye, right-vector for the stereo
+            # pan. Set before the QC tick so sounds fired this frame spatialize
+            # against the current view.
+            _f, right, _u = angle_vectors(self.yaw, self.pitch)
+            self.mixer.set_listener(
+                (self.pos[0], self.pos[1], self.pos[2] + VIEW_HEIGHT), right)
+
+            if not dead:
+                # push the camera into the client edict so monsters target the
+                # player and shots originate from the current view
+                self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
+                                      (self.pitch, self.yaw, 0.0))
+                # SV_Impact: fire touch on the solid movers the move just bumped,
+                # so walking into a button presses it / into a key door opens it
+                self.sv.touch_impacts(self.phys.touched)
+
+            # advance the QC server, then read back entity positions. The impulse
+            # is one-shot (a keypress switches weapon once).
+            self.sv.set_input(self.attacking, self.pending_impulse)
+            self.pending_impulse = 0
+            # one server frame per rendered frame (Quake's model): movers and
+            # missiles step every frame so they read smooth, while nextthink keeps
+            # AI on its own cadence. Clamp the frametime so a hitch can't tunnel.
+            self.sv.run_frame(dt if dt < SV_MAXFRAME else SV_MAXFRAME)
+            if dead:
+                # follow the falling/sliding body so the death cam stays on it
+                org = self.sv.player_origin()
+                if org is not None:
+                    self.pos = [org[0], org[1], org[2]]
+            else:
+                # ride lifts/doors: fold the pusher's carry into the camera
+                cx, cy, cz = self.sv.player_carry
+                if cx or cy or cz:
+                    self.pos[0] += cx
+                    self.pos[1] += cy
+                    self.pos[2] += cz
+                    self.onground = True           # still standing on the mover
+                self._sync_from_player()           # adopt teleports / trigger moves
+            # the exit may have started intermission during this frame's QC tick
+            self.intermission = self.sv.intermission_active()
+
+        # a changelevel can be queued by a slipgate (normal play) or by
+        # GotoNextMap (intermission). Load it and render the new map this frame.
+        if self.sv.changelevel:
+            self._change_level(self.sv.changelevel)
+            self.intermission = False
+            # sv/bsp just swapped; render the new map's current state below
+        brush_ents = self.sv.brush_models()
+        alias_ents = self._alias_ents()
+        bsp_ents = self._bsp_ents()
+
+        if self.intermission:
+            # V_CalcIntermissionRefdef: camera sits at the spot origin (no view
+            # height, no bob) looking along its mangle, and the gun is hidden.
+            org = self.sv.player_origin()
+            ang = self.sv.player_angles()
+            if org:
+                self.pos = [org[0], org[1], org[2]]
+            if ang:
+                self.pitch = max(-89.0, min(89.0, ang[0]))
+                self.yaw = ang[1]
+            eye = (self.pos[0], self.pos[1], self.pos[2])
+            view_model = None
+        elif dead:
+            # death cam: the eye sinks to the corpse on the floor (PlayerDie set
+            # view_ofs z = -8), with no head-bob and no weapon model.
+            vofs = self.sv.player_view_ofs()
+            vz = vofs[2] if vofs else -8.0
+            eye = (self.pos[0], self.pos[1], self.pos[2] + vz)
+            view_model = None
+        else:
+            # head-bob: shift both the view origin and the gun by it, as Quake
+            # does, so the weapon rides nearly still instead of sloshing.
+            bob = self._calc_bob()
+            fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
+            eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
+            view_model = self._view_model(gun_org)
+
+        segs = polys = framebuffer = None
+        if self.mode == "zbuf":
+            styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
+            fbdata, leaf = self.rend.render_zbuffer(eye, self.yaw, self.pitch,
+                                                    brush_ents, alias_ents,
+                                                    view_model, bsp_ents,
+                                                    textured=self.textured,
+                                                    lightstyles=styles,
+                                                    time=self.sv.time)
+            framebuffer = fbdata
+            nprim = fbdata[1] * fbdata[2]
+        elif self.mode == "flat":
+            styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
+            polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
+                                                  brush_ents, alias_ents, view_model,
+                                                  bsp_ents, lightstyles=styles)
+            nprim = len(polys)
+        else:
+            segs, leaf = self.rend.render(eye, self.yaw, self.pitch,
+                                          brush_ents, alias_ents, view_model,
+                                          bsp_ents)
+            nprim = len(segs)
+
+        particles = self._particle_sprites(eye)
+
+        spd = math.hypot(self.vel[0], self.vel[1])
+        movemode = ("NOCLIP" if self.noclip else
+                    "water" if self.waterlevel >= 2 else
+                    "ground" if self.onground else "air")
+        hp = self.sv.player_health()
+        w, h = self._view_wh
+
+        overlays = []
+        hud_str = (f"{self.fps:5.1f} fps   "
+                   f"{'pixels' if self.zbuf else 'polys' if self.flat else 'segs'} {nprim}   "
+                   f"leaf {leaf}   {movemode}   health {hp:.0f}\n"
+                   f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
+                   f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
+                   f"[N]oclip [F]lat [Z]buffer [T]exture")
+        overlays.append((8, 8, hud_str, (0, 255, 102), "nw"))
+
+        # bottom status bar: health / armor / current-weapon ammo, plus the four
+        # ammo pools. Health reddens when low so it reads at a glance.
+        st = self.sv.hud_status()
+        if st:
+            status_rgb = (255, 64, 64) if st["health"] <= 25 else (255, 204, 0)
+            status_str = (f"HEALTH {st['health']:3d}    ARMOR {st['armor']:3d}    "
+                          f"{st['weapon']}: {st['ammo']:3d}\n"
+                          f"shells {st['shells']:3d}  nails {st['nails']:3d}  "
+                          f"rockets {st['rockets']:3d}  cells {st['cells']:3d}")
+            overlays.append((10, h - 8, status_str, status_rgb, "sw"))
+
+        cm = self.sv.center_msg
+        if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
+            overlays.append((w // 2, h // 3, cm[0], (255, 255, 0), "center"))
+
+        return RenderFrame(mode=self.mode, segs=segs, polys=polys,
+                           framebuffer=framebuffer, particles=particles,
+                           overlays=overlays, crosshair=(w // 2, h // 2))
+
+    def _particle_sprites(self, eye):
+        """Project the live particles to screen and return a list of (x, y, half,
+        (r,g,b)) sprite tuples (teleport fog, rocket/blood trails). Each sprite is
+        sized by distance -- focal * radius / depth -- with a floor so far ones
+        stay visible, and occluded against the world (no depth test in the
+        overlay). Ports main.py's App._draw_particles minus the drawing."""
+        out = []
+        project = self.rend.project_point
+        trace_point = self.phys.trace_point
+        focal_r = self.rend.focal * PARTICLE_RADIUS
+        pal = self.palette
+        W, H = self._view_wh
+        for p in self.sv.particles:
+            sp = project(eye, self.yaw, self.pitch, (p[0], p[1], p[2]))
+            if sp is None:
+                continue
+            x, y, cz = sp
+            if x < 0 or y < 0 or x > W or y > H:
+                continue
+            # occlude against the world: the sprites are a flat overlay with no
+            # depth test, so without this they'd show through walls. A clear
+            # line of sight from the eye means trace_point reaches the particle
+            # (fraction 1.0); anything less means a wall is in front of it.
+            if trace_point(eye, (p[0], p[1], p[2])).fraction < 1.0:
+                continue
+            half = focal_r / cz                      # sprite half-size in pixels
+            if half < PARTICLE_MIN_HALF:
+                half = PARTICLE_MIN_HALF
+            elif half > PARTICLE_MAX_HALF:
+                half = PARTICLE_MAX_HALF
+            out.append((x, y, half, pal[p[6] & 255]))
+        return out
 
     def _sync_from_player(self):
         """A trigger (teleport) may have moved the player edict during the QC

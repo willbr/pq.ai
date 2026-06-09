@@ -29,8 +29,26 @@ try:
         texts = list(rf.overlays) + [
             (rf.crosshair[0], rf.crosshair[1], "+", (0, 255, 102), "center")]
         blitter.present(fb, w, h, cw, ch, texts=texts)
+
+    # Exercise the double-buffered vector path: wireframe then flat-shaded.
+    # mode is only recomputed by client.frame when commands are present, so
+    # setting it directly + framing with no commands keeps the chosen mode.
+    client.mode = "wire"
+    rf = client.frame(0.016, InputState())
+    blitter.present_vector(rf.segs, None, rf.particles, cw, ch, rf.overlays)
+    assert rf.segs is not None, "wire frame should produce segs"
+
+    client.mode = "flat"
+    rf = client.frame(0.016, InputState())
+    blitter.present_vector(None, rf.polys, rf.particles, cw, ch, rf.overlays)
+    assert rf.polys is not None, "flat frame should produce polys"
+
     print(f"mode={client.mode} raw_events={win.raw_events} running={win.running}")
 finally:
+    try:
+        blitter.close()
+    except NameError:
+        pass
     win.shutdown()
 
 print("OK")

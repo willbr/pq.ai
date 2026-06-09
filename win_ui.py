@@ -128,6 +128,11 @@ DIB_RGB_COLORS = 0
 SRCCOPY = 0x00CC0020
 TRANSPARENT = 1
 SYSTEM_FIXED_FONT = 16            # a stock monospace font (no CreateFont needed)
+BLACK_BRUSH = 4                   # GetStockObject id: solid black brush
+NULL_PEN = 8                      # GetStockObject id: no outline (for Polygon)
+PS_SOLID = 0                      # CreatePen style: solid line
+
+WIRE_RGB = (0, 255, 102)         # wireframe segment colour ("#00ff66" in main.py)
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -147,6 +152,16 @@ def colorref(rgb):
     """Pack an (r, g, b) tuple into GDI's 0x00BBGGRR COLORREF."""
     r, g, b = rgb
     return r | (g << 8) | (b << 16)
+
+
+def _hex_to_rgb(color):
+    """Convert render_shaded's fill colour to an (r, g, b) int tuple. It emits a
+    Tk hex string '#rrggbb'; tolerate an already-(r,g,b) tuple too, so the same
+    helper serves either source without guessing wrong."""
+    if isinstance(color, str):
+        s = color.lstrip("#")
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    return tuple(color)
 
 
 class GdiBlitter:
@@ -186,11 +201,50 @@ class GdiBlitter:
         g.GetStockObject.restype = wintypes.HANDLE
         g.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
         g.SelectObject.restype = wintypes.HANDLE
+        # -- double-buffered vector drawing (wireframe / flat / particles) -------
+        # A cached memory DC + compatible bitmap is drawn into off-screen, then
+        # BitBlt'd to the window in one shot, so vector frames never flicker.
+        g.CreateCompatibleDC.argtypes = [wintypes.HDC]
+        g.CreateCompatibleDC.restype = wintypes.HDC
+        g.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int,
+                                             ctypes.c_int]
+        g.CreateCompatibleBitmap.restype = wintypes.HANDLE
+        g.DeleteDC.argtypes = [wintypes.HDC]
+        g.DeleteDC.restype = wintypes.BOOL
+        g.DeleteObject.argtypes = [wintypes.HANDLE]
+        g.DeleteObject.restype = wintypes.BOOL
+        g.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, wintypes.HDC,
+                             ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+        g.BitBlt.restype = wintypes.BOOL
+        g.CreatePen.argtypes = [ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+        g.CreatePen.restype = wintypes.HANDLE
+        g.CreateSolidBrush.argtypes = [wintypes.DWORD]
+        g.CreateSolidBrush.restype = wintypes.HANDLE
+        g.MoveToEx.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_void_p]
+        g.MoveToEx.restype = wintypes.BOOL
+        g.LineTo.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+        g.LineTo.restype = wintypes.BOOL
+        g.Polygon.argtypes = [wintypes.HDC, ctypes.c_void_p, ctypes.c_int]
+        g.Polygon.restype = wintypes.BOOL
+        u.FillRect.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.RECT),
+                               wintypes.HANDLE]
+        u.FillRect.restype = ctypes.c_int
         self._font = g.GetStockObject(SYSTEM_FIXED_FONT)
         self._bmi = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER),
                                      biPlanes=1, biBitCount=24,
                                      biCompression=BI_RGB)
         self._buf = None             # keep the live DIB bytes alive across the call
+        # cached double-buffer for present_vector (recreated on size change), and
+        # cached stock/created objects reused every frame (freed in close()).
+        self._mem_dc = None          # memory HDC the vector frame is drawn into
+        self._mem_bmp = None         # bitmap selected into _mem_dc
+        self._mem_wh = (0, 0)        # current backing-store size
+        self._mem_oldbmp = None      # bitmap that was in _mem_dc before ours
+        self._black_brush = g.GetStockObject(BLACK_BRUSH)   # stock: never delete
+        self._null_pen = g.GetStockObject(NULL_PEN)         # stock: never delete
+        self._wire_pen = g.CreatePen(PS_SOLID, 1, colorref(WIRE_RGB))  # del in close()
 
     def present(self, fb, w, h, dst_w, dst_h, texts=()):
         g, u, hdc = self.gdi32, self.user32, None
@@ -205,13 +259,21 @@ class GdiBlitter:
             g.StretchDIBits(hdc, 0, 0, dst_w, dst_h, 0, 0, w, h,
                             cbuf, ctypes.byref(self._bmi),
                             DIB_RGB_COLORS, SRCCOPY)
-            if texts:
-                g.SetBkMode(hdc, TRANSPARENT)
-                g.SelectObject(hdc, self._font)
-                for x, y, s, rgb, anchor in texts:
-                    self._text_block(hdc, x, y, s, rgb, anchor)
+            self._draw_texts(hdc, texts)
         finally:
             u.ReleaseDC(self.hwnd, hdc)
+
+    def _draw_texts(self, hdc, texts):
+        """Draw the HUD/overlay text list on `hdc` (window or memory DC). Shared by
+        present (textured) and present_vector (wireframe/flat). texts is a list of
+        (x, y, string, (r,g,b), anchor); transparent background, stock fixed font."""
+        if not texts:
+            return
+        g = self.gdi32
+        g.SetBkMode(hdc, TRANSPARENT)
+        g.SelectObject(hdc, self._font)
+        for x, y, s, rgb, anchor in texts:
+            self._text_block(hdc, x, y, s, rgb, anchor)
 
     def _text_block(self, hdc, x, y, s, rgb, anchor):
         g = self.gdi32
@@ -227,6 +289,120 @@ class GdiBlitter:
             g.GetTextExtentPoint32W(hdc, line, len(line), ctypes.byref(sz))
             lx = x - sz.cx // 2 if anchor == "center" else x
             g.TextOutW(hdc, lx, top + i * lh, line, len(line))
+
+    # ---- double-buffered vector drawing (wireframe / flat / particles) --------
+    def _memory_dc(self, hdc, w, h):
+        """Lazily create (and recreate on size change) a cached memory DC backed by
+        a window-compatible bitmap, returning the memory DC ready to draw into.
+        GDI objects (handles) are scarce, so this is created once and reused; it is
+        freed in close(). The previously-selected (default 1x1) bitmap is remembered
+        so it can be reselected before we DeleteObject ours."""
+        g = self.gdi32
+        if self._mem_dc and self._mem_wh == (w, h):
+            return self._mem_dc
+        # size changed (or first call): tear down the old backing store first.
+        self._free_memory_dc()
+        self._mem_dc = g.CreateCompatibleDC(hdc)
+        self._mem_bmp = g.CreateCompatibleBitmap(hdc, w, h)
+        self._mem_oldbmp = g.SelectObject(self._mem_dc, self._mem_bmp)
+        self._mem_wh = (w, h)
+        return self._mem_dc
+
+    def _free_memory_dc(self):
+        g = self.gdi32
+        if self._mem_dc:
+            if self._mem_oldbmp:                 # restore default bmp before delete
+                g.SelectObject(self._mem_dc, self._mem_oldbmp)
+            g.DeleteDC(self._mem_dc)
+        if self._mem_bmp:
+            g.DeleteObject(self._mem_bmp)
+        self._mem_dc = self._mem_bmp = self._mem_oldbmp = None
+        self._mem_wh = (0, 0)
+
+    def present_vector(self, segs, polys, particles, dst_w, dst_h, texts=()):
+        """Draw one wireframe ('segs') or flat-shaded ('polys') frame, plus
+        particles and HUD text, into an off-screen memory DC, then BitBlt it to the
+        window in one shot (no flicker). Exactly one of segs/polys is non-None."""
+        g, u = self.gdi32, self.user32
+        hdc = u.GetDC(self.hwnd)
+        if not hdc:
+            return
+        try:
+            memdc = self._memory_dc(hdc, dst_w, dst_h)
+            # clear to black
+            r = wintypes.RECT(0, 0, dst_w, dst_h)
+            u.FillRect(memdc, ctypes.byref(r), self._black_brush)
+            if segs is not None:
+                self._draw_segs(memdc, segs)
+            elif polys is not None:
+                self._draw_polys_gdi(memdc, polys)
+            self._draw_particles_gdi(memdc, particles)
+            self._draw_texts(memdc, texts)
+            g.BitBlt(hdc, 0, 0, dst_w, dst_h, memdc, 0, 0, SRCCOPY)
+        finally:
+            u.ReleaseDC(self.hwnd, hdc)
+
+    def _draw_segs(self, hdc, segs):
+        """Draw wireframe line segments (flat (x0, y0, x1, y1) tuples) in green.
+        Selects the cached wire pen, draws each as MoveToEx + LineTo, then restores
+        the previously-selected pen (the cached pen is freed in close())."""
+        g = self.gdi32
+        old = g.SelectObject(hdc, self._wire_pen)
+        for x0, y0, x1, y1 in segs:
+            g.MoveToEx(hdc, int(x0), int(y0), None)
+            g.LineTo(hdc, int(x1), int(y1))
+        g.SelectObject(hdc, old)
+
+    def _draw_polys_gdi(self, hdc, polys):
+        """Fill flat-shaded polygons. Each poly is (flat, color) where flat is a
+        flat coord list [x0, y0, x1, y1, ...] and color is a Tk hex string
+        '#rrggbb' (as render_shaded emits). A NULL pen suppresses outlines (the Tk
+        version used outline=''). Each per-poly brush is selected, used, the old
+        brush restored, then the brush DeleteObject'd -- no GDI leak."""
+        g = self.gdi32
+        oldpen = g.SelectObject(hdc, self._null_pen)
+        for flat, color in polys:
+            n = len(flat) // 2
+            if n < 3:
+                continue
+            pts = (wintypes.POINT * n)()
+            for i in range(n):
+                pts[i].x = int(flat[2 * i])
+                pts[i].y = int(flat[2 * i + 1])
+            brush = g.CreateSolidBrush(colorref(_hex_to_rgb(color)))
+            oldbrush = g.SelectObject(hdc, brush)
+            g.Polygon(hdc, pts, n)
+            g.SelectObject(hdc, oldbrush)
+            g.DeleteObject(brush)
+        g.SelectObject(hdc, oldpen)
+
+    def _draw_particles_gdi(self, hdc, particles):
+        """Fill each particle as a small square: (x, y, half, (r,g,b)) ->
+        FillRect [x-half, y-half, x+half, y+half] with a brush of that colour.
+        Brushes are grouped by colour so a run of same-colour particles reuses one
+        brush; every created brush is DeleteObject'd before returning."""
+        u, g = self.user32, self.gdi32
+        brushes = {}
+        try:
+            for x, y, half, rgb in particles:
+                rgb = tuple(rgb)
+                brush = brushes.get(rgb)
+                if brush is None:
+                    brush = brushes[rgb] = g.CreateSolidBrush(colorref(rgb))
+                r = wintypes.RECT(int(x - half), int(y - half),
+                                  int(x + half), int(y + half))
+                u.FillRect(hdc, ctypes.byref(r), brush)
+        finally:
+            for brush in brushes.values():
+                g.DeleteObject(brush)
+
+    def close(self):
+        """Free the GDI objects this blitter caches: the off-screen backing store
+        and the wire pen (stock objects are never deleted). Idempotent."""
+        self._free_memory_dc()
+        if self._wire_pen:
+            self.gdi32.DeleteObject(self._wire_pen)
+            self._wire_pen = None
 
 
 # ---- raw input constants / structs (winuser.h) ------------------------------

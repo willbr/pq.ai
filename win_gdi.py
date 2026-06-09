@@ -385,10 +385,6 @@ class GameWindow:
 
         commands = frozenset(cmd for vk, cmd in COMMAND_KEYS.items() if vk in newly)
 
-        if VK_ESCAPE in keys:
-            self.running = False
-            # Esc is also handled in _proc; both paths agree
-
         self._prev_keys = set(keys)
         return InputState(move_forward=move_forward, move_strafe=move_strafe,
                           move_up=move_up, turn=turn, look_dx=look_dx,

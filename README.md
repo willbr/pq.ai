@@ -24,7 +24,8 @@ quake-shareware/id1/pak0.pak
 Then:
 
 ```bash
-python3 main.py e1m1        # also: e1m2 … e1m8, start
+python main.py e1m1           # gdi32 on Windows, tkinter elsewhere; also e1m2…e1m8, start
+python main.py --tk e1m1      # force tkinter on Windows
 ```
 
 **Controls**
@@ -37,10 +38,10 @@ python3 main.py e1m1        # also: e1m2 … e1m8, start
 
 ## How it works
 
-The platform-agnostic engine lives in the **`quake/`** package; the tkinter UI and
-the platform audio backend stay outside it (at the repo root), so the engine itself
-imports nothing OS- or UI-specific. Sound is split the same way: the mixer is portable;
-only the output stream is platform code.
+The platform-agnostic engine lives in the **`quake/`** package. The UI-agnostic
+`Client` core and both frontends live outside it (at the repo root), so the engine
+imports nothing OS- or UI-specific. Sound is split the same way: the mixer is
+portable; only the output stream is platform code.
 
 | File | Role |
 |------|------|
@@ -53,9 +54,12 @@ only the output stream is platform code.
 | `quake/physics.py` | Clip-hull tracing + player movement (gravity, friction, accel, 18u stairs) — ported from `SV_RecursiveHullCheck` / `SV_WalkMove`. Backs the collision builtins (`traceline`, `walkmove`, `movetogoal`, `droptofloor`) |
 | `quake/render.py` | Three renderers — **wireframe** (PVS → backface cull → near-clip edges → project), **flat-shaded** (BSP painter's order → near-clip polygons → filled `create_polygon`), and a **textured z-buffer software rasteriser** (perspective-correct texels modulated by baked lightmaps, per-pixel 1/z depth). Lightmaps animate with **light styles** (flickering/pulsing lights); **special surfaces animate** — sky scrolls, liquids/teleporters sine-warp, `+N` textures cycle at 5 Hz. Draws the world, brush-model **entities**, and **alias models** (monsters/items), all PVS-culled |
 | `quake/snd.py` | Platform-agnostic software sound mixer — a port of `S_PaintChannels` / `SND_Spatialize`. Decodes/resamples once at precache; `mix(nframes)` sums active voices to 16-bit stereo with distance attenuation + stereo pan re-panned every frame. Touches no OS — a backend pulls from it |
-| `mac.py` | macOS audio backend (outside the package): one 16-bit stereo CoreAudio `AudioQueue` stream via ctypes, whose realtime callback pulls samples from the mixer. `main.py` picks a backend by `sys.platform` |
-| `win.py` | Windows audio backend (outside the package): a pool of `winmm` `waveOut` buffers via ctypes; a feeder thread waits on the device's completion event and refills each finished buffer from the mixer. Linux still gets a sibling backend |
-| `main.py` | tkinter app (outside the package): mouse-look, movement, input → the player edict, the game loop, the reused Canvas line/poly pools and scaled framebuffer; runs the QC server once per rendered frame |
+| `client.py` | UI-agnostic game client: the `Client` core holds the engine stack + all camera/player/game state and exposes `frame(dt, input) -> RenderFrame`; the `InputState` / `RenderFrame` dataclasses are the only contracts shared by the two frontends |
+| `main.py` | tkinter frontend (all platforms; default off-Windows and via `--tk` on Windows): `after()` game loop, Canvas/`PhotoImage` drawing, warp-based mouselook. `select_frontend(argv, platform)` decides which frontend to launch |
+| `win_gdi.py` | gdi32 Windows frontend (the default on Windows): owns a `PeekMessage` game loop and Win32 raw-input mouselook + cursor grab, draws via `win_ui.GdiBlitter` (StretchDIBits / Polyline / Polygon / FillRect / TextOut). Exists because tkinter owns the message pump and the software render blocks it, so raw mouse input backlogs — a dedicated loop that drains all input each frame fixes that |
+| `win_ui.py` | Windows GDI + raw-input ctypes helpers: `GdiBlitter`, `RawMouse`, RAWINPUT structs; pure helpers unit-tested in `test_win_ui.py` |
+| `mac.py` | macOS audio backend (outside the package): one 16-bit stereo CoreAudio `AudioQueue` stream via ctypes, whose realtime callback pulls samples from the mixer |
+| `win.py` | Windows audio backend (outside the package): a pool of `winmm` `waveOut` buffers via ctypes; a feeder thread waits on the device's completion event and refills each finished buffer from the mixer |
 
 **Three ways to draw, three sets of tradeoffs.** Wireframe needs **no framebuffer** —
 edges go straight to `Canvas.create_line` (C-implemented), and PVS + backface culling

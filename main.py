@@ -406,6 +406,20 @@ class App:
         self.root.mainloop()
 
 
+def select_frontend(argv, platform):
+    """Pick the frontend and map from CLI args. Windows defaults to the gdi32
+    frontend (win_gdi) for its own message loop + raw mouselook; `--tk` forces the
+    tkinter frontend, which is also the default everywhere else."""
+    args = [a for a in argv if a != "--tk"]
+    mapname = args[0] if args else "e1m1"
+    use_tk = "--tk" in argv or platform != "win32"
+    return ("tk" if use_tk else "gdi", mapname)
+
+
 if __name__ == "__main__":
-    mapname = sys.argv[1] if len(sys.argv) > 1 else "e1m1"
-    App(mapname).run()
+    frontend, mapname = select_frontend(sys.argv[1:], sys.platform)
+    if frontend == "gdi":
+        import win_gdi
+        win_gdi.run(mapname)
+    else:
+        App(mapname).run()

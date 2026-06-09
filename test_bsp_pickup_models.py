@@ -78,7 +78,7 @@ def test_pickup_model_loads_real_bsp():
         assert len(rgb) == 3 and all(0 <= c <= 255 for c in rgb)
         if texrec is not None:
             w, h, pix = texrec
-            assert w > 0 and h > 0 and len(pix) == w * h * 3
+            assert w > 0 and h > 0 and len(pix) == w * h   # palette indices
             assert svec is not None and tvec is not None
             textured += 1
     assert textured, "pickup faces should carry decoded textures for textured mode"

@@ -42,6 +42,36 @@ def test_to_dib_bgr_pads_each_row_to_dword_boundary():
     assert out == b"\x03\x02\x01\x00\x0c\x0b\x0a\x00"
 
 
+def test_fb8_to_dib_aligned_width_is_a_plain_copy():
+    """An 8bpp DIB row is the width itself; a multiple-of-4 width needs no
+    padding -- just a writable copy of the index bytes."""
+    import win_ui
+    fb = bytes(range(8))
+    out = win_ui.fb8_to_dib(fb, 4, 2)
+    assert bytes(out) == fb
+    assert isinstance(out, bytearray)          # from_buffer needs writable
+
+
+def test_fb8_to_dib_pads_rows_to_dword_boundary():
+    """A 3px row pads to 4 bytes; two rows of 3 indices become 8 bytes with a
+    zero after each row."""
+    import win_ui
+    out = bytes(win_ui.fb8_to_dib(b"\x01\x02\x03\x0a\x0b\x0c", 3, 2))
+    assert out == b"\x01\x02\x03\x00\x0a\x0b\x0c\x00"
+
+
+def test_bitmapinfo256_packs_palette_as_bgr_dwords():
+    """set_palette must put blue in the low byte of each colour-table DWORD
+    (RGBQUAD layout). Checked structurally, no window needed."""
+    import ctypes
+    import win_ui
+    bmi = win_ui.BITMAPINFO256()
+    assert ctypes.sizeof(bmi) == ctypes.sizeof(win_ui.BITMAPINFOHEADER) + 256 * 4
+    bmi.bmiColors[7] = 0x0A | (0x0B << 8) | (0x0C << 16)
+    raw = bytes(bmi)[ctypes.sizeof(win_ui.BITMAPINFOHEADER) + 7 * 4:][:4]
+    assert raw == b"\x0a\x0b\x0c\x00"          # B, G, R, reserved
+
+
 def test_letterbox_matched_aspect_fills_window():
     """A framebuffer whose aspect already matches the window fills it edge-to-edge
     with no bars: 320x240 (4:3) into 800x600 (4:3) -> full window, ox=oy=0."""
@@ -133,6 +163,9 @@ if __name__ == "__main__":
     test_bgr_swap_multi_pixel_keeps_green_and_length()
     test_to_dib_bgr_no_padding_when_row_already_aligned()
     test_to_dib_bgr_pads_each_row_to_dword_boundary()
+    test_fb8_to_dib_aligned_width_is_a_plain_copy()
+    test_fb8_to_dib_pads_rows_to_dword_boundary()
+    test_bitmapinfo256_packs_palette_as_bgr_dwords()
     test_letterbox_matched_aspect_fills_window()
     test_letterbox_wide_framebuffer_gets_top_bottom_bars()
     test_letterbox_tall_window_pillarboxes()

@@ -88,8 +88,11 @@ class Mdl:
             if first_skin is None:
                 first_skin = img
         self.skin_color = _avg_color(first_skin, palette)
-        # full skin decoded to packed RGB once, for the textured z-buffer path
-        self.skin_rgb = _decode_skin(first_skin, sw, sh, palette)
+        # full skin kept as raw palette indices for the textured z-buffer path
+        # (the rasteriser lights indices through the colormap; no RGB decode)
+        self.skin_idx = ((sw, sh, bytes(first_skin))
+                         if first_skin is not None and len(first_skin) >= sw * sh
+                         else None)
 
         # --- stverts: (onseam, s, t) texel coords per vertex ---
         stverts = [struct.unpack_from("<3i", data, o + i * 12) for i in range(nv)]
@@ -156,19 +159,6 @@ class Mdl:
             if tt < end:
                 return subs[i]
         return subs[-1]
-
-
-def _decode_skin(img, w, h, palette):
-    """Skin's 8-bit palette indices -> packed RGB bytearray, or None if unusable."""
-    if not img or palette is None or w <= 0 or h <= 0 or len(img) < w * h:
-        return None
-    rgb = bytearray(w * h * 3)
-    o = 0
-    for px in img:
-        pr, pg, pb = palette[px]
-        rgb[o] = pr; rgb[o + 1] = pg; rgb[o + 2] = pb
-        o += 3
-    return (w, h, rgb)
 
 
 def _avg_color(img, palette):

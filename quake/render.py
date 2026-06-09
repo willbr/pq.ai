@@ -217,25 +217,19 @@ def _bsp_texture_colors(bsp, palette):
     return out
 
 
-def _bsp_texture_rgb(bsp, palette):
-    """Decode each miptex of `bsp` to (w, h, packed_rgb), or None where unusable.
+def _bsp_texture_idx(bsp):
+    """Each miptex of `bsp` as (w, h, index_bytes), or None where unusable.
     Standalone twin of Renderer._decode_textures, for texturing pickup models."""
     out = []
     for t in bsp.textures:
-        if t is None or t[3] is None or palette is None:
+        if t is None or t[3] is None:
             out.append(None)
             continue
         _name, w, h, idx = t
         if w <= 0 or h <= 0 or len(idx) < w * h:
             out.append(None)
             continue
-        rgb = bytearray(w * h * 3)
-        o = 0
-        for px in idx:
-            pr, pg, pb = palette[px]
-            rgb[o] = pr; rgb[o + 1] = pg; rgb[o + 2] = pb
-            o += 3
-        out.append((w, h, rgb))
+        out.append((w, h, bytes(idx)))
     return out
 
 
@@ -249,8 +243,9 @@ class PickupModel:
     culling alone -- no internal BSP walk or face sorting needed.
 
     self.faces: list of (local_verts, (nx, ny, nz, dist), color_hex, (r,g,b),
-                         texrec, s_vec, t_vec) where texrec is (w,h,rgb) or None
-                         and s_vec/t_vec map a local vertex to texel coords.
+                         texrec, s_vec, t_vec) where texrec is (w,h,index_bytes)
+                         or None and s_vec/t_vec map a local vertex to texel
+                         coords.
     self.mins/self.maxs: model-space bounds, for PVS + painter routing.
     """
     def __init__(self, bsp, palette):
@@ -258,7 +253,7 @@ class PickupModel:
         self.mins = tuple(m0["mins"])
         self.maxs = tuple(m0["maxs"])
         tex_rgb = _bsp_texture_colors(bsp, palette)     # average colour (flat mode)
-        tex_full = _bsp_texture_rgb(bsp, palette)       # full texels (textured mode)
+        tex_full = _bsp_texture_idx(bsp)                # texel indices (textured mode)
         lx, ly, lz = ALIAS_LIGHT
         self.faces = []
         self.edges = []                 # (p0, p1) local-space, for wireframe mode
@@ -297,9 +292,23 @@ class PickupModel:
 
 
 class Renderer:
-    def __init__(self, bsp, palette=None):
+    def __init__(self, bsp, palette=None, colormap=None):
         self.bsp = bsp
         self.palette = palette          # list of 256 (r,g,b) for texture colours
+        # gfx/colormap.lmp: 64 light rows x 256 palette indices; row 0 is full
+        # bright, row 63 darkest (our 0..255 luxel maps to row (255-lux)>>2 --
+        # the inversion in id's R_BuildLightMap). The z-buffer mode draws into
+        # an 8-bit palette-indexed framebuffer and lights every texel through
+        # this table, exactly like WinQuake. Without one (palette-less boots),
+        # a no-op identity table keeps the code path alive, just unlit.
+        if colormap is None:
+            colormap = bytes(range(256)) * 64
+        self.colormap = colormap[:64 * 256]
+        self._cmap_rows = [self.colormap[i * 256:(i + 1) * 256]
+                           for i in range(64)]
+        self._idx_cache = {}            # (r,g,b) -> nearest palette index memo
+        # background of the z-buffer framebuffer as a palette index
+        self._bg_idx = self._nearest_index(ZBUF_BG) if palette else 0
         self.headnode = bsp.models[0]["headnode"]
         self.width = 800
         self.height = 600
@@ -354,44 +363,52 @@ class Renderer:
         # lightmaps, which we don't apply) -> boost so the scene is visible.
         gain = 2.2
         texinfo = bsp.texinfo
-        self.face_color_rgb = []        # (r,g,b) ints, for the z-buffer flat fill
+        self.face_color_idx = []        # palette index for the z-buffer flat fill
         self.face_base_rgb = []         # raw texture average, lit per-face by flat mode
+        cmap = self.colormap
         for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
             inten = (0.50 + 0.50 * max(0.0, nx * lx + ny * ly + nz * lz)) * gain
             base = None
+            mode_idx = None
             ti = bsp.faces[fi][4]
             if 0 <= ti < len(texinfo):
                 mt = texinfo[ti][0]
                 if 0 <= mt < len(tex_rgb):
                     base = tex_rgb[mt]
+                    mode_idx = self.tex_mode_idx[mt]
             if base is None:
                 base = (140.0, 140.0, 140.0)
             self.face_base_rgb.append(base)
-            r = min(255, int(base[0] * inten))
-            g = min(255, int(base[1] * inten))
-            b = min(255, int(base[2] * inten))
-            self.face_color_rgb.append((r, g, b))
+            # palette-indexed flat fill: the texture's most common index lit
+            # through the colormap. inten (1.1..2.2) maps to luxel 128..255 so
+            # the directional shading survives the row quantisation.
+            if mode_idx is None:
+                mode_idx = self._nearest_index(base)
+            lux = int(inten * 116.0)
+            if lux > 255:
+                lux = 255
+            self.face_color_idx.append(cmap[((255 - lux) >> 2) * 256 + mode_idx])
 
-        # full-resolution textures decoded to packed RGB bytes (once), for the
-        # textured z-buffer rasteriser. Aligned to bsp.textures; None where the
-        # miptex has no level-0 pixels or no palette was supplied.
-        self.tex_rgb = self._decode_textures()
+        # full-resolution textures as raw palette indices, for the textured
+        # z-buffer rasteriser (lit through the colormap). Aligned to
+        # bsp.textures; None where the miptex has no level-0 pixels or no
+        # palette was supplied.
+        self.tex_idx = self._decode_textures()
 
         # classify miptexes by Quake's name conventions: sky* scroll, *liquids
         # warp (water/lava/slime/teleport), and +N frames cycle. _classify_tex
         # also builds the animation chains (per-miptex list of frame indices).
         self.is_sky, self.is_turb, self.tex_anim = self._classify_textures()
 
-        # per-face texture record for the rasteriser: (w, h, rgb_bytes, s_vec,
-        # t_vec) or None to fall back to flat colour. Plus a per-face integer
-        # shade (0..256, 8-bit fixed point) from the same directional light, so
-        # textured surfaces still read their facing -- textures are full-bright
-        # palette colours, so no 2.2 gain here (that only rescued dark averages).
+        # per-face texture record for the rasteriser: (w, h, index_bytes,
+        # s_vec, t_vec) or None to fall back to flat colour. Plus a per-face
+        # integer shade (0..256, 8-bit fixed point) from the same directional
+        # light, so textured surfaces still read their facing.
         self.face_tex = []
         self.face_shade = []
         self.face_sky = [False] * nfaces      # scroll the sky texture
         self.face_turb = [False] * nfaces     # sine-warp (liquids, teleporters)
-        self.face_anim = [None] * nfaces      # [(w,h,rgb), ...] frames, or None
+        self.face_anim = [None] * nfaces      # [(w,h,idx), ...] frames, or None
         for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
             self.face_shade.append(int((0.55 + 0.45 * max(0.0,
                                    nx * lx + ny * ly + nz * lz)) * 256))
@@ -399,31 +416,29 @@ class Renderer:
             ti = bsp.faces[fi][4]
             if 0 <= ti < len(texinfo):
                 mt = texinfo[ti][0]
-                if 0 <= mt < len(self.tex_rgb):
+                if 0 <= mt < len(self.tex_idx):
                     self.face_sky[fi] = self.is_sky[mt]
                     self.face_turb[fi] = self.is_turb[mt]
                     if self.tex_anim[mt] is not None:
-                        frames = [self.tex_rgb[m] for m in self.tex_anim[mt]
-                                  if self.tex_rgb[m] is not None]
+                        frames = [self.tex_idx[m] for m in self.tex_anim[mt]
+                                  if self.tex_idx[m] is not None]
                         if len(frames) > 1:
                             self.face_anim[fi] = frames
-                    if self.tex_rgb[mt] is not None:
-                        w, h, rgb = self.tex_rgb[mt]
-                        rec = (w, h, rgb, texinfo[ti][2], texinfo[ti][3])
+                    if self.tex_idx[mt] is not None:
+                        w, h, idx = self.tex_idx[mt]
+                        rec = (w, h, idx, texinfo[ti][2], texinfo[ti][3])
             self.face_tex.append(rec)
         # faces whose texture cycles -- the only ones _animate_surfaces touches
         self.anim_faces = [fi for fi in range(nfaces)
                            if self.face_anim[fi] is not None]
 
         # lit-surface cache (Quake's surface cache, r_surf.c): per face, its
-        # texture tiled over the face's extent premultiplied by the lightmap,
+        # texture tiled over the face's extent pre-lit through the colormap,
         # built lazily on first draw and dropped when the lightmap recombines
-        # or a +N animation swaps the texture. _shade_tables holds one 256-byte
-        # translate table per seen luxel value ((i*sh)>>8), so cache rows build
-        # at C speed via bytes.translate.
+        # or a +N animation swaps the texture. Each 16-texel luxel cell builds
+        # in one bytes.translate through its colormap row.
         self._surf_cache_map = {}
         self._surf_cache_bytes = 0
-        self._shade_tables = {}
 
         # per-face lightmaps from the LIGHTING lump (baked static light). Each
         # entry: (lmw, lmh, smin, tmin, luxels, has_real). For surfaces with a
@@ -460,17 +475,47 @@ class Renderer:
             stack.append((ch[0], num))
             stack.append((ch[1], num))
 
+    def _nearest_index(self, rgb):
+        """Nearest palette index to an (r,g,b) -- for the few colours computed
+        at runtime (flat-shade fills, background). Memoised; the palette is
+        searched linearly only on a miss. Fullbright slots (240..255) are
+        skipped: they would glow regardless of lighting."""
+        key = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        hit = self._idx_cache.get(key)
+        if hit is not None:
+            return hit
+        pal = self.palette
+        if not pal:
+            return 0
+        r, g, b = key
+        best = 0
+        bd = 1 << 30
+        for i in range(240):
+            pr, pg, pb = pal[i]
+            d = (pr - r) ** 2 + (pg - g) ** 2 + (pb - b) ** 2
+            if d < bd:
+                bd = d
+                best = i
+        self._idx_cache[key] = best
+        return best
+
     def _texture_colors(self):
-        """Average RGB per miptex via a palette histogram. None where unusable."""
+        """Average RGB per miptex via a palette histogram. None where unusable.
+        Also fills self.tex_mode_idx: each miptex's most common palette index,
+        the flat fill colour of the palette-indexed framebuffer."""
         from collections import Counter
         pal = self.palette
         out = []
+        self.tex_mode_idx = []
         for t in self.bsp.textures:
             if t is None or t[3] is None or pal is None:
                 out.append(None)
+                self.tex_mode_idx.append(None)
                 continue
             r = g = b = tot = 0
-            for idx, c in Counter(t[3]).items():     # idx -> pixel count
+            hist = Counter(t[3])
+            self.tex_mode_idx.append(hist.most_common(1)[0][0] if hist else None)
+            for idx, c in hist.items():              # idx -> pixel count
                 pr, pg, pb = pal[idx]
                 r += pr * c
                 g += pg * c
@@ -480,26 +525,21 @@ class Renderer:
         return out
 
     def _decode_textures(self):
-        """Decode each miptex's level-0 palette indices to packed RGB bytes,
-        once. Returns a list aligned to bsp.textures: (w, h, rgb_bytearray) or
-        None where unusable. The rasteriser samples these directly."""
+        """Validate each miptex's level-0 image and keep its raw palette
+        indices. Returns a list aligned to bsp.textures: (w, h, index_bytes)
+        or None where unusable. The rasteriser samples indices and lights them
+        through the colormap, so no RGB expansion happens at all."""
         pal = self.palette
         out = []
         for t in self.bsp.textures:
             if t is None or t[3] is None or pal is None:
                 out.append(None)
                 continue
-            name, w, h, idx = t
+            _name, w, h, idx = t
             if w <= 0 or h <= 0 or len(idx) < w * h:
                 out.append(None)
                 continue
-            rgb = bytearray(w * h * 3)
-            o = 0
-            for px in idx:
-                pr, pg, pb = pal[px]
-                rgb[o] = pr; rgb[o + 1] = pg; rgb[o + 2] = pb
-                o += 3
-            out.append((w, h, rgb))
+            out.append((w, h, bytes(idx)))
         return out
 
     def _classify_textures(self):
@@ -656,16 +696,17 @@ class Renderer:
 
     def _surface_cache(self, fi, rec):
         """Lit surface for face fi (Quake's D_CacheSurface, r_surf.c): the
-        texture tiled over the face's full s/t extent, premultiplied by the
-        lightmap luxel covering each texel. The rasteriser then needs one
-        fetch per pixel -- no lightmap sampling, wrap or shade math. Cached
-        until the lightmap recombines (_combine_face drops the entry) or the
-        +N animation swaps the texture (the `is` check below). Returns
-        (cw, ch, rgb_bytearray, tex); index with (t - tmin, s - smin).
+        texture tiled over the face's full s/t extent, every texel's palette
+        index mapped through the colormap row of the luxel covering it. The
+        rasteriser then needs one fetch per pixel -- no lightmap sampling,
+        wrap or shade math. Cached until the lightmap recombines
+        (_combine_face drops the entry) or the +N animation swaps the texture
+        (the `is` check below). Returns (cw, ch, index_bytearray, tex); index
+        with (t - tmin, s - smin).
 
         Rows are built with C-level ops: the texture row is tiled across the
-        extent by bytes repeat/slice, then each 16-texel luxel cell is shade-
-        modulated in one bytes.translate using a per-shade lookup table."""
+        extent by bytes repeat/slice, then each 16-texel luxel cell is lit in
+        one bytes.translate through its colormap row."""
         tw, th, tex = rec[0], rec[1], rec[2]
         ent = self._surf_cache_map.get(fi)
         if ent is not None and ent[3] is tex:
@@ -673,31 +714,25 @@ class Renderer:
         lmw, lmh, smin, tmin, lux, _ = self.face_lm[fi]
         cw = lmw << 4
         ch = lmh << 4
-        out = bytearray(cw * ch * 3)
-        tabs = self._shade_tables
-        tw3 = tw * 3
-        cw3 = cw * 3
+        out = bytearray(cw * ch)
+        rows = self._cmap_rows
         smin_i = int(smin)
         tmin_i = int(tmin)
-        soff3 = (smin_i % tw) * 3
-        reps = (soff3 + cw3 + tw3 - 1) // tw3
+        soff = smin_i % tw
+        reps = (soff + cw + tw - 1) // tw
         for tc in range(ch):
-            trow = ((tmin_i + tc) % th) * tw3
-            tiled = (tex[trow:trow + tw3] * reps)[soff3:soff3 + cw3]
+            trow = ((tmin_i + tc) % th) * tw
+            tiled = (tex[trow:trow + tw] * reps)[soff:soff + cw]
             lr = (tc >> 4) * lmw
-            obase = tc * cw3
+            obase = tc * cw
             for lc in range(lmw):
-                sh = lux[lr + lc]
-                tab = tabs.get(sh)
-                if tab is None:
-                    tab = bytes((i * sh) >> 8 for i in range(256))
-                    tabs[sh] = tab
-                s3 = lc * 48                      # 16 texels * 3 bytes per cell
-                out[obase + s3:obase + s3 + 48] = \
-                    tiled[s3:s3 + 48].translate(tab)
+                tab = rows[(255 - lux[lr + lc]) >> 2]
+                s = lc << 4                       # 16 texels per luxel cell
+                out[obase + s:obase + s + 16] = \
+                    tiled[s:s + 16].translate(tab)
         ent = (cw, ch, out, tex)
         self._surf_cache_bytes += len(out)
-        if self._surf_cache_bytes > 96 * 1024 * 1024:   # crude bound: flush all
+        if self._surf_cache_bytes > 64 * 1024 * 1024:   # crude bound: flush all
             self._surf_cache_map.clear()
             self._surf_cache_bytes = len(out)
         self._surf_cache_map[fi] = ent
@@ -762,7 +797,7 @@ class Renderer:
         else:
             self.zw = max(1, self.width // self.zbuf_scale)
             self.zh = max(1, self.height // self.zbuf_scale)
-        self._bg_frame = bytes(ZBUF_BG) * (self.zw * self.zh)
+        self._bg_frame = bytes((self._bg_idx,)) * (self.zw * self.zh)
         # a plain list, not array('f'): list reads hand back the stored float
         # object, while array('f') boxes a fresh float on every read -- one
         # allocation per depth test in the rasteriser's hot loop.
@@ -1459,9 +1494,10 @@ class Renderer:
         """True per-pixel z-buffered software rasteriser. World/brush faces are
         perspective-correct texture-mapped (textured=True) or flat-shaded; both
         resolve occlusion with a 1/z depth buffer (no painter's ordering, so
-        intersecting geometry no longer mis-sorts). Alias models and pickups stay
-        flat-shaded. Returns ((framebuffer, w, h), leaf); the buffer is raw RGB
-        bytes the UI wraps in a PPM image and scales up."""
+        intersecting geometry no longer mis-sorts). Returns ((framebuffer, w,
+        h), leaf); the buffer is 8-bit palette indices, one byte per pixel,
+        lit through gfx/colormap.lmp exactly like WinQuake -- the UI expands
+        it through the palette (tk) or blits it as an 8bpp DIB (gdi32)."""
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
@@ -1476,8 +1512,11 @@ class Renderer:
         marks = bsp.marksurfaces
         face_verts = self.face_verts
         face_plane = self.face_plane
-        face_color_rgb = self.face_color_rgb
+        face_color_idx = self.face_color_idx
         face_tex = self.face_tex
+        cmap = self.colormap
+        cmap_rows = self._cmap_rows
+        nearest = self._nearest_index
         face_lm = self.face_lm
         face_sky = self.face_sky
         face_turb = self.face_turb
@@ -1521,10 +1560,12 @@ class Renderer:
             vert_frame[vi] = frame
             return c
 
-        def raster_poly(cam, r, g, b):
-            # flat-shaded convex polygon: near-plane clip (z >= NEAR), project,
-            # then scanline spans -- 1/z is linear in screen space, so each row
-            # steps it with one add per pixel (no per-pixel edge tests).
+        def raster_poly(cam, ci):
+            # flat-shaded convex polygon filled with palette index ci:
+            # near-plane clip (z >= NEAR), project, then scanline spans -- 1/z
+            # is linear in screen space, so each row steps it with one add per
+            # pixel (no per-pixel edge tests). The framebuffer is one index
+            # byte per pixel, so the depth index doubles as the fb offset.
             out = []
             A = cam[-1]; da = A[2] - NEAR
             for B in cam:
@@ -1555,13 +1596,11 @@ class Renderer:
                 if xli < xri:
                     iz = z00 + zdx * (xli + 0.5) + zdy * (y + 0.5)
                     row = y * iwl
-                    fo = (row + xli) * 3
                     for idx in range(row + xli, row + xri):
                         if iz > zbl[idx]:
                             zbl[idx] = iz
-                            fbl[fo] = r; fbl[fo + 1] = g; fbl[fo + 2] = b
+                            fbl[idx] = ci
                         iz += zdx
-                        fo += 3
                 y += 1
 
         def raster_poly_tex(cam, rec, lm):
@@ -1604,7 +1643,7 @@ class Renderer:
             y, spans = poly_spans(sx, sy, iw, ih)
             zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
             flat_lm = lmw == 1 and lmh == 1            # sky / alias / pickups:
-            sh0 = lux[0]                               # shade constant per poly
+            rowtab = cmap_rows[(255 - lux[0]) >> 2]    # shade constant per poly
             for xli, xri in spans:
                 if xli < xri:
                     xc = xli + 0.5; yc = y + 0.5
@@ -1612,21 +1651,16 @@ class Renderer:
                     uoz = u00 + udx * xc + udy * yc
                     voz = v00 + vdx * xc + vdy * yc
                     row = y * iwl
-                    fo = (row + xli) * 3
                     if flat_lm:
                         for idx in range(row + xli, row + xri):
                             if iz > zbl[idx]:
                                 z = 1.0 / iz
-                                o = (int_(voz * z) % th * tw
-                                     + int_(uoz * z) % tw) * 3
                                 zbl[idx] = iz
-                                fbl[fo] = (tex[o] * sh0) >> 8
-                                fbl[fo + 1] = (tex[o + 1] * sh0) >> 8
-                                fbl[fo + 2] = (tex[o + 2] * sh0) >> 8
+                                fbl[idx] = rowtab[tex[int_(voz * z) % th * tw
+                                                      + int_(uoz * z) % tw]]
                             iz += zdx
                             uoz += udx
                             voz += vdx
-                            fo += 3
                         y += 1
                         continue
                     for idx in range(row + xli, row + xri):
@@ -1641,15 +1675,12 @@ class Renderer:
                             if lr < 0: lr = 0
                             elif lr >= lmh: lr = lmh - 1
                             sh = lux[lr * lmw + lc]      # lightmap luxel 0..255
-                            o = (int_(v) % th * tw + int_(u) % tw) * 3
                             zbl[idx] = iz
-                            fbl[fo] = (tex[o] * sh) >> 8
-                            fbl[fo + 1] = (tex[o + 1] * sh) >> 8
-                            fbl[fo + 2] = (tex[o + 2] * sh) >> 8
+                            fbl[idx] = cmap[(255 - sh & 252) << 6
+                                            | tex[int_(v) % th * tw + int_(u) % tw]]
                         iz += zdx
                         uoz += udx
                         voz += vdx
-                        fo += 3
                 y += 1
 
         def raster_poly_cached(cam, surf, csmin, ctmin):
@@ -1699,19 +1730,14 @@ class Renderer:
                     uoz = u00 + udx * xc + udy * yc
                     voz = v00 + vdx * xc + vdy * yc
                     row = y * iwl
-                    fo = (row + xli) * 3
                     for idx in range(row + xli, row + xri):
                         if iz > zbl[idx]:
                             z = 1.0 / iz
-                            o = (int_(voz * z) * cw + int_(uoz * z)) * 3
                             zbl[idx] = iz
-                            fbl[fo] = cache[o]
-                            fbl[fo + 1] = cache[o + 1]
-                            fbl[fo + 2] = cache[o + 2]
+                            fbl[idx] = cache[int_(voz * z) * cw + int_(uoz * z)]
                         iz += zdx
                         uoz += udx
                         voz += vdx
-                        fo += 3
                 y += 1
 
         def raster_poly_tex_turb(cam, rec):
@@ -1759,7 +1785,6 @@ class Renderer:
                     uoz = u00 + udx * xc + udy * yc
                     voz = v00 + vdx * xc + vdy * yc
                     row = y * iwl
-                    fo = (row + xli) * 3
                     for idx in range(row + xli, row + xri):
                         if iz > zbl[idx]:
                             z = 1.0 / iz
@@ -1767,15 +1792,11 @@ class Renderer:
                             v = voz * z
                             su2 = u + sintab[int_((v * 0.125 + tt) * scale) & 255]
                             sv2 = v + sintab[int_((u * 0.125 + tt) * scale) & 255]
-                            o = (int_(sv2) % th * tw + int_(su2) % tw) * 3
                             zbl[idx] = iz
-                            fbl[fo] = tex[o]
-                            fbl[fo + 1] = tex[o + 1]
-                            fbl[fo + 2] = tex[o + 2]
+                            fbl[idx] = tex[int_(sv2) % th * tw + int_(su2) % tw]
                         iz += zdx
                         uoz += udx
                         voz += vdx
-                        fo += 3
                 y += 1
 
         def emit_face(fi, pts, rec):
@@ -1829,13 +1850,13 @@ class Renderer:
                 r = min(255, int(br * inten))
                 g = min(255, int(bg * inten))
                 bl = min(255, int(bb * inten))
-                raster_poly([cam[a], cam[b], cam[c]], r, g, bl)
+                raster_poly([cam[a], cam[b], cam[c]], nearest((r, g, bl)))
 
         def raster_alias_tex(mdl, verts, org, ang):
             # textured alias model: skin-mapped per triangle, lit by the baked
             # light sampled at the model's origin (so a monster in a dark room is
             # dark) modulated by each triangle's facing.
-            rec = mdl.skin_rgb                       # (skinw, skinh, rgb_bytes)
+            rec = mdl.skin_idx                       # (skinw, skinh, index_bytes)
             wl = self.light_point(org)               # 0..255 ambient from the world
             ox_e, oy_e, oz_e = org
             afwd, arr, aup = model_axes(ang)
@@ -1892,8 +1913,8 @@ class Renderer:
                                 vx * t0 + vy * t1 + vz * t2 + t3))
                 emit_face(fi, cam, rec)
             else:
-                r, g, b = face_color_rgb[fi]
-                raster_poly([transform(vi) for vi in face_verts[fi]], r, g, b)
+                raster_poly([transform(vi) for vi in face_verts[fi]],
+                            face_color_idx[fi])
 
         PROFILER.begin("raster")        # per-pixel fill of all visible geometry
         # world (model 0): mark the visible leaves' surfaces and their ancestor
@@ -1978,8 +1999,7 @@ class Renderer:
                             pts.append((dx * rx + dy * ry + dz * rz,
                                         dx * ux + dy * uy + dz * uz,
                                         dx * fx + dy * fy + dz * fz))
-                        r, g, b = face_color_rgb[fi]
-                        raster_poly(pts, r, g, b)
+                        raster_poly(pts, face_color_idx[fi])
 
         # alias (.mdl) entities -- monsters, items
         if alias_ents:
@@ -1988,7 +2008,7 @@ class Renderer:
                 if not self.box_in_pvs((org[0] - r, org[1] - r, org[2] - r),
                                        (org[0] + r, org[1] + r, org[2] + r), vis):
                     continue
-                if textured and mdl.skin_rgb is not None:
+                if textured and mdl.skin_idx is not None:
                     raster_alias_tex(mdl, verts, org, ang)
                 else:
                     raster_alias(mdl, verts, org, ang)
@@ -2034,13 +2054,13 @@ class Renderer:
                             pts.append((dx * rx + dy * ry + dz * rz,
                                         dx * ux + dy * uy + dz * uz,
                                         dx * fx + dy * fy + dz * fz))
-                        raster_poly(pts, r, g, b)
+                        raster_poly(pts, nearest((r, g, b)))
 
         # first-person weapon view model: drawn last; sits at the camera so its
         # near depth wins the z-test and it reads as on top. No PVS cull.
         if view_model:
             mdl, verts, org, ang = view_model
-            if textured and mdl.skin_rgb is not None:
+            if textured and mdl.skin_idx is not None:
                 raster_alias_tex(mdl, verts, org, ang)
             else:
                 raster_alias(mdl, verts, org, ang)

@@ -101,6 +101,7 @@ class App:
         # sits at the bottom of the stack (lines/polys/particles/HUD draw above);
         # hidden until the mode is on. self.fb_photo holds the live PhotoImage.
         self.fb_photo = None
+        self._pal_lut = None             # index -> 3-byte RGB, built on first use
         self.fb_item = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
         # reusable line-item pool; unused items are parked off-screen with a
         # cheap coords() call (no itemconfig state churn, no extra item count)
@@ -390,12 +391,16 @@ class App:
         self.poly_prev = n
 
     def _draw_fb(self, fbdata):
-        """Wrap the renderer's raw RGB framebuffer in a PPM PhotoImage, scale it
-        up to fill the window (chunky pixels), and show it on the canvas image
-        item. A fresh PhotoImage per frame -- cheap; the costly part is the
-        per-pixel fill the renderer already did."""
+        """Expand the renderer's 8-bit palette-indexed framebuffer to RGB via a
+        256-entry lookup (one C-level map+join), wrap it in a PPM PhotoImage,
+        scale it up to fill the window (chunky pixels), and show it on the
+        canvas image item. A fresh PhotoImage per frame -- cheap; the costly
+        part is the per-pixel fill the renderer already did."""
         fb, w, h = fbdata
-        ppm = b"P6 %d %d 255 " % (w, h) + bytes(fb)
+        lut = self._pal_lut
+        if lut is None:
+            lut = self._pal_lut = [bytes(c) for c in self.client.palette]
+        ppm = b"P6 %d %d 255 " % (w, h) + b"".join(map(lut.__getitem__, fb))
         photo = tk.PhotoImage(data=ppm, format="ppm")
         if ZBUF_SCALE > 1:
             photo = photo.zoom(ZBUF_SCALE)

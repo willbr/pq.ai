@@ -93,9 +93,11 @@ class InputState:
 @dataclass
 class RenderFrame:
     """What Client.frame() returns; the frontend draws it. mode is 'wire'|'flat'|
-    'zbuf'. Exactly one of segs/polys/framebuffer is set per mode. overlays are
-    (x, y, text, (r,g,b), anchor) with anchor in {'nw','center','sw'}. menu is
-    the overlay menu's view (title, rows) when open, else None."""
+    'zbuf'. Exactly one of segs/polys/framebuffer is set per mode; framebuffer
+    is (index_bytes, w, h) -- 8-bit palette indices the frontend expands via
+    Client.palette (tk) or blits as an 8bpp palettised DIB (gdi32). overlays
+    are (x, y, text, (r,g,b), anchor) with anchor in {'nw','center','sw'}.
+    menu is the overlay menu's view (title, rows) when open, else None."""
     mode: str
     segs: list = None                       # mode 'wire': line segments
     polys: list = None                      # mode 'flat': (points, color)
@@ -114,6 +116,9 @@ class Client:
         pal = self.pak.read("gfx/palette.lmp")
         self.palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2])
                         for i in range(256)]
+        # 64 light rows x 256 palette indices; the z-buffer renderer lights
+        # every texel through it and returns an 8-bit indexed framebuffer.
+        self.colormap = self.pak.read("gfx/colormap.lmp")[:64 * 256]
         self._missing_warned = set()   # maps not in the pak we've already flagged
         # The mixer is platform-agnostic; a backend (chosen by OS) opens the
         # output stream and flips mixer.ok on. Kept on self so its ctypes
@@ -176,7 +181,7 @@ class Client:
             return False
 
         self.bsp = Bsp(self.pak.read(path))
-        self.rend = Renderer(self.bsp, self.palette)
+        self.rend = Renderer(self.bsp, self.palette, self.colormap)
         self.rend.zbuf_scale = self._zbuf_scale   # keep the console's chosen scale
         self.rend.video_res = self.video_res      # keep the menu's chosen resolution
         self.rend.resize(self.rend.width, self.rend.height)  # rebuild buffer at the chosen res

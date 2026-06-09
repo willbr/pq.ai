@@ -39,7 +39,7 @@ def test_frame_returns_zbuf_renderframe_sized_to_viewport():
     assert rf.mode == "zbuf"
     fb, w, h = rf.framebuffer
     assert w == 800 // 4 and h == 600 // 4        # ZBUF_SCALE == 4 (Auto mode)
-    assert len(fb) == w * h * 3                    # packed RGB
+    assert len(fb) == w * h                        # 8-bit palette indices
     assert any("fps" in o[2] for o in rf.overlays) # HUD line present
 
 

@@ -87,6 +87,20 @@ def to_dib_bgr(rgb, w, h):
     return out
 
 
+def fb8_to_dib(fb, w, h):
+    """Pad the renderer's 8-bit palette-indexed framebuffer rows out to the
+    DWORD-aligned stride a top-down 8bpp DIB expects. No channel work at all
+    -- the palette rides in the BITMAPINFO colour table, so an aligned width
+    needs nothing but a writable copy."""
+    stride = (w + 3) & ~3
+    if stride == w:
+        return bytearray(fb)
+    out = bytearray(stride * h)
+    for y in range(h):
+        out[y * stride:y * stride + w] = fb[y * w:(y + 1) * w]
+    return out
+
+
 def letterbox_rect(src_w, src_h, dst_w, dst_h):
     """Largest (ox, oy, w, h) rect inside the dst window that preserves the src
     framebuffer's aspect ratio, centered -- the destination for an aspect-correct
@@ -164,6 +178,14 @@ class BITMAPINFOHEADER(ctypes.Structure):
                 ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
                 ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
                 ("biClrImportant", wintypes.DWORD)]
+
+
+class BITMAPINFO256(ctypes.Structure):
+    """BITMAPINFOHEADER plus a full 256-entry colour table for 8bpp palettised
+    DIBs. Each entry is an RGBQUAD packed as a little-endian DWORD: blue in
+    the low byte, then green, red, reserved -- i.e. b | g<<8 | r<<16."""
+    _fields_ = [("bmiHeader", BITMAPINFOHEADER),
+                ("bmiColors", wintypes.DWORD * 256)]
 
 
 class SIZE(ctypes.Structure):
@@ -264,6 +286,7 @@ class GdiBlitter:
         self._bmi = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER),
                                      biPlanes=1, biBitCount=24,
                                      biCompression=BI_RGB)
+        self._bmi8 = None            # 8bpp palettised header; set_palette fills it
         self._buf = None             # keep the live DIB bytes alive across the call
         # cached double-buffer for present_vector (recreated on size change), and
         # cached stock/created objects reused every frame (freed in close()).
@@ -275,11 +298,33 @@ class GdiBlitter:
         self._null_pen = g.GetStockObject(NULL_PEN)         # stock: never delete
         self._wire_pen = g.CreatePen(PS_SOLID, 1, colorref(WIRE_RGB))  # del in close()
 
+    def set_palette(self, palette):
+        """Install the 256-colour palette for 8bpp framebuffer presents.
+        palette: 256 (r, g, b) tuples. Until this is called, present() treats
+        framebuffers as packed 24bpp RGB (the legacy path)."""
+        bmi = BITMAPINFO256()
+        bmi.bmiHeader = BITMAPINFOHEADER(
+            biSize=ctypes.sizeof(BITMAPINFOHEADER), biPlanes=1, biBitCount=8,
+            biCompression=BI_RGB, biClrUsed=256)
+        for i, (r, g, b) in enumerate(palette[:256]):
+            bmi.bmiColors[i] = b | (g << 8) | (r << 16)
+        self._bmi8 = bmi
+
     def present(self, fb, w, h, dst_w, dst_h, texts=(), particles=()):
         g, u = self.gdi32, self.user32
-        self._buf = to_dib_bgr(fb, w, h)
-        self._bmi.biWidth = w
-        self._bmi.biHeight = -h                 # negative => top-down (our row order)
+        if self._bmi8 is not None and len(fb) == w * h:
+            # 8bpp palette-indexed framebuffer: GDI maps indices through the
+            # colour table during the stretch -- no Python-side expansion.
+            self._buf = fb8_to_dib(fb, w, h)
+            self._bmi8.bmiHeader.biWidth = w
+            self._bmi8.bmiHeader.biHeight = -h  # negative => top-down rows
+            pbmi = ctypes.cast(ctypes.byref(self._bmi8),
+                               ctypes.POINTER(BITMAPINFOHEADER))
+        else:
+            self._buf = to_dib_bgr(fb, w, h)
+            self._bmi.biWidth = w
+            self._bmi.biHeight = -h             # negative => top-down rows
+            pbmi = ctypes.byref(self._bmi)
         cbuf = (ctypes.c_char * len(self._buf)).from_buffer(self._buf)
         # scale the framebuffer into the largest aspect-correct rect; an off-ratio
         # mode (e.g. 80x40 in a 4:3 window) gets centered with black bars rather
@@ -290,8 +335,7 @@ class GdiBlitter:
             return
         try:
             g.StretchDIBits(hdc, ox, oy, ow, oh, 0, 0, w, h,
-                            cbuf, ctypes.byref(self._bmi),
-                            DIB_RGB_COLORS, SRCCOPY)
+                            cbuf, pbmi, DIB_RGB_COLORS, SRCCOPY)
             if ox or oy:                        # letterboxed: fill bars + fit sprites
                 self._fill_bars(hdc, ox, oy, ow, oh, dst_w, dst_h)
                 particles = self._fit_particles(particles, ox, oy, ow, oh,

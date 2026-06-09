@@ -166,23 +166,23 @@ def _real_lm_face(r):
 
 
 def test_surface_cache_matches_direct_math():
-    # cache texel (sc, tc) must equal the rasteriser's old per-pixel formula:
-    # texture wrapped at (smin+sc, tmin+tc), modulated by the luxel covering it.
+    # cache texel (sc, tc) must be the texture's palette index (wrapped at
+    # smin+sc, tmin+tc) mapped through the colormap row for the luxel covering
+    # it: row (255-lux)>>2, row 0 brightest (id's R_BuildLightMap inversion).
     _b, r = _renderer()
     fi = _real_lm_face(r)
     rec = r.face_tex[fi]
-    tw, th, tex = rec[0], rec[1], rec[2]
+    tw, th, tex = rec[0], rec[1], rec[2]          # tex = palette index bytes
     lmw, lmh, smin, tmin, lux, _ = r.face_lm[fi]
     cw, ch, cache, _tex = r._surface_cache(fi, rec)
     assert cw == lmw * 16 and ch == lmh * 16, (cw, ch, lmw, lmh)
+    cmap = r.colormap
     smin_i, tmin_i = int(smin), int(tmin)
     for sc, tc in ((0, 0), (1, 0), (15, 0), (16, 0), (cw - 1, ch - 1),
                    (cw // 2, ch // 2), (3, ch - 1)):
         sh = lux[(tc >> 4) * lmw + (sc >> 4)]
-        o = (((tmin_i + tc) % th) * tw + ((smin_i + sc) % tw)) * 3
-        co = (tc * cw + sc) * 3
-        for k in range(3):
-            assert cache[co + k] == (tex[o + k] * sh) >> 8, (sc, tc, k)
+        ti = tex[((tmin_i + tc) % th) * tw + ((smin_i + sc) % tw)]
+        assert cache[tc * cw + sc] == cmap[((255 - sh) >> 2) * 256 + ti], (sc, tc)
 
 
 def test_surface_cache_reuse_and_invalidation():
@@ -195,8 +195,9 @@ def test_surface_cache_reuse_and_invalidation():
     r._combine_face(fi, [256] * 64)
     c2 = r._surface_cache(fi, rec)
     assert c2 is not c1, "lightmap recombine must invalidate"
-    # a texture swap (+N animation) must rebuild too
-    swapped = (rec[0], rec[1], bytes(rec[2]), rec[3], rec[4])
+    # a texture swap (+N animation) must rebuild too (bytes(bytes) would be
+    # the same object in CPython, so go through bytearray to get a new one)
+    swapped = (rec[0], rec[1], bytes(bytearray(rec[2])), rec[3], rec[4])
     c3 = r._surface_cache(fi, swapped)
     assert c3 is not c2, "texture swap must invalidate"
 
@@ -207,8 +208,9 @@ def _renderer():
     pak = Pak(PAK)
     pb = pak.read("gfx/palette.lmp")
     palette = [(pb[i * 3], pb[i * 3 + 1], pb[i * 3 + 2]) for i in range(256)]
+    colormap = pak.read("gfx/colormap.lmp")[:64 * 256]
     b = Bsp(pak.read("maps/e1m1.bsp"))
-    r = Renderer(b, palette)
+    r = Renderer(b, palette, colormap)
     r.resize(800, 600)                       # -> 200x150 internal framebuffer
     return b, r
 
@@ -250,6 +252,7 @@ def regen_goldens():
 
 def test_golden_frames():
     b, r = _renderer()
+    pal = r.palette
     for view in _views(b):
         fb, w, h = _render_view(r, view)
         path = os.path.join(GOLDEN_DIR, f"zbuf_{view[0]}_{w}x{h}.bin")
@@ -257,17 +260,21 @@ def test_golden_frames():
             f"missing golden {path}; run `python test_zbuffer_raster.py --regen`"
         with open(path, "rb") as f:
             ref = f.read()
-        assert len(ref) == len(fb), (view[0], len(ref), len(fb))
+        assert len(ref) == len(fb) == w * h, (view[0], len(ref), len(fb))
         npix = w * h
         ndiff = 0
         total = 0
-        for i in range(0, len(fb), 3):
-            dr = fb[i] - ref[i]
-            dg = fb[i + 1] - ref[i + 1]
-            db = fb[i + 2] - ref[i + 2]
-            if dr or dg or db:
+        # frames are palette indices; diff in RGB so the tolerances measure
+        # visible error, not index distance
+        for i in range(npix):
+            a = fb[i]
+            b2 = ref[i]
+            if a != b2:
                 ndiff += 1
-                total += abs(dr) + abs(dg) + abs(db)
+                pa = pal[a]
+                pb = pal[b2]
+                total += (abs(pa[0] - pb[0]) + abs(pa[1] - pb[1])
+                          + abs(pa[2] - pb[2]))
         frac = ndiff / npix
         mean = total / (npix * 3)
         assert frac <= MAX_DIFF_FRAC, (view[0], f"{frac:.4f} of pixels differ")

@@ -409,6 +409,7 @@ def run(mapname):
     last = time.perf_counter()
     try:
         blitter = win_ui.GdiBlitter(win.hwnd)
+        blitter.set_palette(client.palette)   # 8bpp palettised framebuffer blits
         cw, ch = win.client_size()
         client.resize(cw, ch)
         last_wh = (cw, ch)

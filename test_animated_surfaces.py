@@ -83,7 +83,7 @@ def test_render_runs_with_time():
     # two ticks: must not raise, and must return a full-size framebuffer
     (fb0, w, h), _ = r.render_zbuffer(eye, yaw, 0.0, textured=True, time=0.0)
     (fb1, _, _), _ = r.render_zbuffer(eye, yaw, 0.0, textured=True, time=1.7)
-    assert len(fb0) == w * h * 3 and len(fb1) == w * h * 3
+    assert len(fb0) == w * h and len(fb1) == w * h     # 8-bit palette indices
 
 
 if __name__ == "__main__":

@@ -77,6 +77,7 @@ class InputState:
     fire: bool = False
     impulse: int = 0
     commands: frozenset = frozenset()
+    mouselook: bool = False
 
 
 @dataclass
@@ -448,6 +449,7 @@ class Client:
                    f"leaf {leaf}   {movemode}   health {hp:.0f}\n"
                    f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                    f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
+                   f"{'MOUSELOOK — mouse/Ctrl fire, 1-8 weapons' if inp.mouselook else 'click to capture mouse'} "
                    f"[N]oclip [F]lat [Z]buffer [T]exture")
         overlays.append((8, 8, hud_str, (0, 255, 102), "nw"))
 

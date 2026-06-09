@@ -12,6 +12,7 @@ from quake.bsp import Bsp
 from quake.render import (Renderer, PickupModel, angle_vectors,
                           lightstyle_values, ZBUF_SCALE)
 from quake.console import Console
+from quake.menu import Menu, ChoiceItem, ActionItem
 from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED
 from quake.progs import Progs
 from quake.sv import Server, anglemod
@@ -39,6 +40,12 @@ CENTER_MSG_TIME = 4.0      # seconds a centerprint message stays on screen
 CL_BOB = 0.02
 CL_BOBCYCLE = 0.6
 CL_BOBUP = 0.5
+# Selectable textured-mode render resolutions for the video-options menu.
+# "Auto" = derive from the window via zbuf_scale (today's behaviour, keeps the
+# zbuf_scale cvar meaningful); the fixed modes set the framebuffer exactly.
+VIDEO_MODES = [("Auto", None), ("240x160", (240, 160)),
+               ("320x240", (320, 240)), ("640x480", (640, 480))]
+DEFAULT_VIDEO_RES = (320, 240)
 
 
 def view_origins(pos, view_height, forward, bob):
@@ -86,7 +93,8 @@ class InputState:
 class RenderFrame:
     """What Client.frame() returns; the frontend draws it. mode is 'wire'|'flat'|
     'zbuf'. Exactly one of segs/polys/framebuffer is set per mode. overlays are
-    (x, y, text, (r,g,b), anchor) with anchor in {'nw','center','sw'}."""
+    (x, y, text, (r,g,b), anchor) with anchor in {'nw','center','sw'}. menu is
+    the overlay menu's view (title, rows) when open, else None."""
     mode: str
     segs: list = None                       # mode 'wire': line segments
     polys: list = None                      # mode 'flat': (points, color)
@@ -95,6 +103,7 @@ class RenderFrame:
     overlays: list = field(default_factory=list)
     crosshair: tuple = (0, 0)
     console: tuple = None    # (lines, input_line, cursor_col) when open, else None
+    menu: tuple = None       # (title, [(label, value, selected), ...]) when open, else None
 
 
 class Client:
@@ -140,11 +149,15 @@ class Client:
 
         self.quit_requested = False
         self._zbuf_scale = ZBUF_SCALE     # desired textured divisor, persists across maps
+        # fixed textured render resolution (video-options menu), persists across
+        # maps like _zbuf_scale; applied to each freshly built Renderer.
+        self.video_res = DEFAULT_VIDEO_RES
         self.con = Console()
 
         if not self._load_map(mapname):
             raise ValueError(f"no such map: maps/{mapname}.bsp")
         self._register_console()
+        self.menu = self._build_menu()
 
     # ---- level loading ----
     def _load_map(self, mapname, skill=1):
@@ -164,6 +177,8 @@ class Client:
         self.bsp = Bsp(self.pak.read(path))
         self.rend = Renderer(self.bsp, self.palette)
         self.rend.zbuf_scale = self._zbuf_scale   # keep the console's chosen scale
+        self.rend.video_res = self.video_res      # keep the menu's chosen resolution
+        self.rend.resize(self.rend.width, self.rend.height)  # rebuild buffer at the chosen res
         self.phys = Physics(self.bsp)
 
         # QuakeC server: spawn the level's entities and run their logic. Doors,
@@ -305,6 +320,30 @@ class Client:
 
     def _apply_mode(self):
         self.mode = "zbuf" if self.zbuf else "flat" if self.flat else "wire"
+
+    def set_video_res(self, wh):
+        """Set the textured render resolution (None = Auto/window-derived) and
+        rebuild the framebuffer now, so a menu change takes effect immediately
+        even when the window size hasn't changed."""
+        self.video_res = wh
+        self.rend.video_res = wh
+        self.rend.resize(self.rend.width, self.rend.height)
+
+    def _menu_back(self):
+        self.menu.active = False
+
+    def _build_menu(self):
+        """Build the Escape overlay menu: Resolution (cycles VIDEO_MODES), Back,
+        Quit. Closures bind to this Client's methods, like console commands."""
+        idx = next((i for i, (_, v) in enumerate(VIDEO_MODES)
+                    if v == self.video_res), 0)
+        res = ChoiceItem("Resolution", VIDEO_MODES, idx, self.set_video_res)
+        back = ActionItem("Back", self._menu_back)
+        quit_item = ActionItem("Quit", self._cmd_quit_menu)
+        return Menu("VIDEO OPTIONS", [res, back, quit_item])
+
+    def _cmd_quit_menu(self):
+        self.quit_requested = True
 
     # ---- console registration / commands ----
     def _register_console(self):
@@ -638,10 +677,12 @@ class Client:
             rows = max(1, (h * 2 // 5) // 16 - 1)  # panel is ~40% tall, ~16px lines
             console = (con.view_lines(rows), "]" + con.input, con.cursor + 1)
 
+        menu = self.menu.view() if self.menu.active else None
+
         return RenderFrame(mode=self.mode, segs=segs, polys=polys,
                            framebuffer=framebuffer, particles=particles,
                            overlays=overlays, crosshair=(w // 2, h // 2),
-                           console=console)
+                           console=console, menu=menu)
 
     def _particle_sprites(self, eye):
         """Project the live particles to screen and return a list of (x, y, half,

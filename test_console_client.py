@@ -67,7 +67,8 @@ def test_client_console_bindings():
     before = c.noclip
     c.con.execute("noclip")
     assert c.noclip != before
-    # zbuf_scale cvar resizes the framebuffer and persists on the client
+    # zbuf_scale cvar resizes the framebuffer (Auto mode) and persists on the client
+    c.set_video_res(None)                         # Auto: zbuf_scale drives the framebuffer size
     c.con.execute("zbuf_scale 8")
     assert c.rend.zbuf_scale == 8
     assert c.rend.zw == 800 // 8

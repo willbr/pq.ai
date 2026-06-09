@@ -33,11 +33,12 @@ def test_client_boots_e1m1_with_spawn_and_viewport():
 def test_frame_returns_zbuf_renderframe_sized_to_viewport():
     c = client.Client("e1m1")
     c.resize(800, 600)
+    c.set_video_res(None)                          # Auto: framebuffer follows window/zbuf_scale
     c.mode = "zbuf"
     rf = c.frame(0.016, client.InputState())
     assert rf.mode == "zbuf"
     fb, w, h = rf.framebuffer
-    assert w == 800 // 4 and h == 600 // 4        # ZBUF_SCALE == 4
+    assert w == 800 // 4 and h == 600 // 4        # ZBUF_SCALE == 4 (Auto mode)
     assert len(fb) == w * h * 3                    # packed RGB
     assert any("fps" in o[2] for o in rf.overlays) # HUD line present
 

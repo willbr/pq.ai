@@ -439,6 +439,55 @@ class GdiBlitter:
         finally:
             u.ReleaseDC(self.hwnd, hdc)
 
+    def draw_menu(self, view, dst_w, dst_h):
+        """Draw the Escape overlay menu: a centered dark panel with the title and
+        rows, the selected row prefixed '> ' and brightened. view is
+        (title, [(label, value, selected), ...]). Drawn after the world present,
+        straight onto the window DC. Mirrors draw_console's font handling."""
+        title, rows = view
+        g, u = self.gdi32, self.user32
+        hdc = u.GetDC(self.hwnd)
+        if not hdc:
+            return
+        try:
+            g.SetBkMode(hdc, TRANSPARENT)
+            g.SelectObject(hdc, self._font)
+            sz = SIZE()
+            g.GetTextExtentPoint32W(hdc, "X", 1, ctypes.byref(sz))
+            lh = sz.cy or 16
+            # panel sized to the content: title + blank + one row per item
+            nlines = len(rows) + 2
+            panel_w = 360
+            panel_h = nlines * lh + 24
+            x0 = (dst_w - panel_w) // 2
+            y0 = (dst_h - panel_h) // 2
+            rect = wintypes.RECT(x0, y0, x0 + panel_w, y0 + panel_h)
+            brush = g.CreateSolidBrush(colorref((16, 16, 24)))
+            u.FillRect(hdc, ctypes.byref(rect), brush)
+            g.DeleteObject(brush)
+            # 1px green bottom edge, like the console panel
+            edge = wintypes.RECT(x0, y0 + panel_h - 1, x0 + panel_w, y0 + panel_h)
+            ebrush = g.CreateSolidBrush(colorref((0, 160, 70)))
+            u.FillRect(hdc, ctypes.byref(edge), ebrush)
+            g.DeleteObject(ebrush)
+            # title in yellow
+            g.SetTextColor(hdc, colorref((255, 255, 0)))
+            g.TextOutW(hdc, x0 + 16, y0 + 12, title, len(title))
+            # rows, starting one blank line below the title
+            y = y0 + 12 + 2 * lh
+            for label, value, selected in rows:
+                text = label if not value else f"{label}: {value}"
+                if selected:
+                    text = "> " + text
+                    g.SetTextColor(hdc, colorref((255, 255, 255)))
+                else:
+                    text = "  " + text
+                    g.SetTextColor(hdc, colorref((160, 200, 160)))
+                g.TextOutW(hdc, x0 + 16, y, text, len(text))
+                y += lh
+        finally:
+            u.ReleaseDC(self.hwnd, hdc)
+
     def _draw_segs(self, hdc, segs):
         """Draw wireframe line segments (flat (x0, y0, x1, y1) tuples) in green.
         Selects the cached wire pen, draws each as MoveToEx + LineTo, then restores

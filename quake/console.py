@@ -248,6 +248,8 @@ class Console:
 
     # ---- tab-completion ----
     def key_tab(self):
+        # completes against the whole input string (command-name only), like
+        # stock Quake -- not the current token of a multi-word line
         prefix = self.input
         if not prefix:
             return
@@ -274,8 +276,13 @@ class Console:
         self.scroll = max(0, self.scroll - self.PAGE)
 
     def view_lines(self, n):
+        """Return the up-to-`n` scrollback lines visible for the current scroll
+        offset, oldest-to-newest. `n` is the viewport height in lines; this is
+        the only place that knows it, so it also clamps `self.scroll` to
+        [0, total - n] (an authoritative re-clamp each render, since key_pageup
+        bounds scroll only coarsely)."""
         total = len(self.lines)
-        self.scroll = max(0, min(self.scroll, max(0, total - 1)))
+        self.scroll = max(0, min(self.scroll, max(0, total - n)))
         end = total - self.scroll
         start = max(0, end - n)
         return list(self.lines)[start:end]

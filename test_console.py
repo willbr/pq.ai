@@ -216,6 +216,22 @@ def test_tee_stdout_forwards_complete_lines():
     assert real.getvalue() == "partial line\nsecond\n"
 
 
+def test_view_lines_clamps_scroll_to_viewport():
+    con = Console(width=80)
+    for i in range(5):
+        con.print(str(i))
+    con.scroll = 999                         # absurd over-scroll
+    # a height-3 viewport pins the oldest 3 lines and clamps scroll to total-n
+    assert con.view_lines(3) == ["0", "1", "2"]
+    assert con.scroll == 2                   # 5 lines - 3 viewport
+
+
+def test_view_lines_empty_buffer():
+    con = Console()
+    assert con.view_lines(3) == []
+    assert con.scroll == 0
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

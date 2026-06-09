@@ -15,13 +15,17 @@ take the slipgates, die, and respawn.
 ## Run
 
 You need the Quake shareware data (id Software copyright — free to download, not
-redistributed here):
+redistributed here) at `quake-shareware/id1/pak0.pak`. Fetch it — and the GPL
+reference source under `quake-source/` — with the one-shot setup script (pure
+stdlib, no git required, idempotent):
 
-```
-quake-shareware/id1/pak0.pak
+```bash
+python setup.py               # downloads shareware data + GPL reference source
+python setup.py --skip-source # just the shareware data (pak0.pak)
 ```
 
-Then:
+The shareware download defaults to a public archive.org mirror; override it with
+`--shareware-url URL` or `$QUAKE_SHAREWARE_URL` if the mirror moves. Then:
 
 ```bash
 python main.py e1m1           # gdi32 on Windows, tkinter elsewhere; also e1m2…e1m8, start

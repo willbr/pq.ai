@@ -18,6 +18,7 @@ thinks (monster AI, etc.) fire at their own ~10 Hz cadence.
 ## Commands
 
 ```bash
+python setup.py                 # fetch shareware data + GPL reference source (one-shot, idempotent)
 python main.py e1m1             # run the game (gdi32 on Windows, tkinter elsewhere)
 python main.py --tk e1m1        # force tkinter on Windows  (e1m1..e1m8, or "start")
 python test_pushmove.py         # run one test (prints "OK", or asserts)
@@ -29,7 +30,7 @@ whose `if __name__ == "__main__"` block calls its test functions and prints `OK`
 success (functions are named `test_*`, so a pytest run would also work if installed).
 
 Requires Python 3.13+ and the shareware data at `quake-shareware/id1/pak0.pak` (id
-copyright — gitignored, download separately). Sound has a **macOS** backend (`mac.py`,
+copyright — gitignored; run `python setup.py` to fetch it and the GPL reference source). Sound has a **macOS** backend (`mac.py`,
 CoreAudio) and a **Windows** backend (`win.py`, winmm `waveOut`), both via ctypes;
 Linux runs muted until a backend is added.
 
@@ -89,7 +90,7 @@ win.py              Windows audio backend (outside pkg): winmm waveOut buffers, 
 ## Reference source
 
 `quake-source/` is id Software's GPL release kept locally as a read-only port reference
-(gitignored — clone separately). Ports cite their origin (e.g. `SV_RecursiveHullCheck`,
+(gitignored; `python setup.py` fetches it). Ports cite their origin (e.g. `SV_RecursiveHullCheck`,
 `S_PaintChannels`). When porting more behaviour, match these sources rather than
 inventing; it is the standing convention in commit messages and docstrings.
 

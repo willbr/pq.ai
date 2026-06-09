@@ -232,6 +232,23 @@ def test_view_lines_empty_buffer():
     assert con.scroll == 0
 
 
+def test_tee_stdout_only_forwards_from_owning_thread():
+    import io
+    import threading
+    sink = []
+    real = io.StringIO()
+    tee = TeeStdout(real, sink.append)
+    # a write from another thread reaches the stream but NOT the console sink
+    t = threading.Thread(target=lambda: tee.write("bg line\n"))
+    t.start()
+    t.join()
+    assert sink == []
+    assert "bg line\n" in real.getvalue()
+    # the owning thread (this one) still mirrors complete lines to the sink
+    tee.write("fg line\n")
+    assert sink == ["fg line"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

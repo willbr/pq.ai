@@ -10,6 +10,7 @@ cleanly from inside the package and from the root frontends. Single-thread by
 design: only the frame/input thread touches it."""
 
 import collections
+import threading
 
 
 def tokenize(line):
@@ -106,16 +107,25 @@ class _Command:
 
 class TeeStdout:
     """Wrap a text stream, mirroring each complete line into a sink callback
-    (the console's print). Partial writes buffer until a newline. Used by the
-    frontend to make engine print() output appear in the console."""
+    (the console's print). Partial writes buffer until a newline.
+
+    Thread-aware on purpose: `Console` is single-threaded by design, but this is
+    installed as the PROCESS-WIDE sys.stdout, and background threads (e.g. the
+    audio feeder) may print(). So only writes from the thread that constructed
+    the tee -- the frame/input thread -- are mirrored to the sink; every thread
+    still reaches the underlying stream. This keeps the sink (con.print, which
+    mutates a deque) free of cross-thread races without a lock."""
 
     def __init__(self, stream, sink):
         self._stream = stream
         self._sink = sink
         self._buf = ""
+        self._owner = threading.get_ident()
 
     def write(self, s):
         self._stream.write(s)
+        if threading.get_ident() != self._owner:
+            return len(s)                       # other threads: stream only, no sink
         self._buf += s
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)

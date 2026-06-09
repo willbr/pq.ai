@@ -199,6 +199,7 @@ class GameWindow:
                     self.console.key_char(ch)
                 # swallow; control chars (CR/BS/TAB) are handled via WM_KEYDOWN
         elif msg in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            # F1 checked first so it toggles the console open AND closed
             if wparam == VK_F1:
                 self._toggle_console()
             elif self.console and self.console.active:

@@ -103,7 +103,7 @@ IT_NAILS = 512
 IT_ROCKETS = 1024
 IT_CELLS = 2048
 IT_AXE = 4096
-FL_GODMODE = 1                    # .flags bit (defs.qc): damage immunity
+FL_GODMODE = 64                   # .flags bit (defs.qc): damage immunity
 _WEAPON_NAMES = {
     IT_AXE: "Axe", IT_SHOTGUN: "Shotgun", IT_SUPER_SHOTGUN: "Super Shotgun",
     IT_NAILGUN: "Nailgun", IT_SUPER_NAILGUN: "Super Nailgun",

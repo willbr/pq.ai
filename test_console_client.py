@@ -4,6 +4,7 @@ the Renderer's live zbuf_scale and the Client's console bindings."""
 from quake.pak import Pak
 from quake.bsp import Bsp
 from quake.render import Renderer, ZBUF_SCALE
+from quake.sv import FL_GODMODE
 
 
 def _palette(pak):
@@ -43,13 +44,13 @@ def test_toggle_god_flips_flag():
     f = sv.f["flags"]
     base = int(sv.vm.fget_f(sv.player, f))
     assert sv.toggle_god() is True
-    assert int(sv.vm.fget_f(sv.player, f)) & 1
+    assert int(sv.vm.fget_f(sv.player, f)) & FL_GODMODE
     assert sv.toggle_god() is False
     assert int(sv.vm.fget_f(sv.player, f)) == base
 
 
 def test_give_health_and_ammo():
-    sv = sv = _boot_server()
+    sv = _boot_server()
     sv.give("h", 25)
     assert int(sv.vm.fget_f(sv.player, sv.f["health"])) == 25
     sv.give("r", 99)

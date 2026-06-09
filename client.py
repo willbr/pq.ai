@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from quake.pak import Pak
 from quake.bsp import Bsp
-from quake.render import (Renderer, PickupModel, angle_vectors, ZBUF_SCALE,
+from quake.render import (Renderer, PickupModel, angle_vectors,
                           lightstyle_values)
 from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED
 from quake.progs import Progs

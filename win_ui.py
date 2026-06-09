@@ -120,7 +120,21 @@ BI_RGB = 0
 DIB_RGB_COLORS = 0
 SRCCOPY = 0x00CC0020
 TRANSPARENT = 1
-SYSTEM_FIXED_FONT = 16            # a stock monospace font (no CreateFont needed)
+SYSTEM_FIXED_FONT = 16            # stock monospace fallback (lacks block glyphs)
+# HUD font: a TrueType monospace with the block-element glyphs the profiler bar
+# chart draws (the stock fixed font and even Consolas lack the 1/8..7/8 blocks;
+# Cascadia Mono ships with Windows 11 and has them). Fallback to stock if absent.
+HUD_FONT_FACE = "Cascadia Mono"
+HUD_FONT_HEIGHT = 16              # character height in logical units (negative lfHeight)
+FW_NORMAL = 400
+DEFAULT_CHARSET = 1
+OUT_TT_PRECIS = 4                 # prefer a TrueType face over a raster substitute
+CLIP_DEFAULT_PRECIS = 0
+CLEARTYPE_QUALITY = 5
+FIXED_PITCH = 1
+FF_MODERN = 48                    # proportional family hint: modern (monospace)
+GGI_MARK_NONEXISTING = 0x0001     # GetGlyphIndices: report missing glyphs as 0xFFFF
+FULL_BLOCK = "█"             # probe glyph: present => the bar chars will render
 BLACK_BRUSH = 4                   # GetStockObject id: solid black brush
 NULL_PEN = 8                      # GetStockObject id: no outline (for Polygon)
 PS_SOLID = 0                      # CreatePen style: solid line
@@ -194,6 +208,12 @@ class GdiBlitter:
         g.GetStockObject.restype = wintypes.HANDLE
         g.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
         g.SelectObject.restype = wintypes.HANDLE
+        g.CreateFontW.argtypes = ([ctypes.c_int] * 5 + [wintypes.DWORD] * 8 +
+                                  [wintypes.LPCWSTR])
+        g.CreateFontW.restype = wintypes.HANDLE
+        g.GetGlyphIndicesW.argtypes = [wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int,
+                                       ctypes.POINTER(ctypes.c_ushort), wintypes.DWORD]
+        g.GetGlyphIndicesW.restype = wintypes.DWORD
         # -- double-buffered vector drawing (wireframe / flat / particles) -------
         # A cached memory DC + compatible bitmap is drawn into off-screen, then
         # BitBlt'd to the window in one shot, so vector frames never flicker.
@@ -224,7 +244,8 @@ class GdiBlitter:
         u.FillRect.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.RECT),
                                wintypes.HANDLE]
         u.FillRect.restype = ctypes.c_int
-        self._font = g.GetStockObject(SYSTEM_FIXED_FONT)
+        self._font_created = False        # True if _font is ours to DeleteObject
+        self._font = self._hud_font()
         self._bmi = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER),
                                      biPlanes=1, biBitCount=24,
                                      biCompression=BI_RGB)
@@ -254,6 +275,38 @@ class GdiBlitter:
                             DIB_RGB_COLORS, SRCCOPY)
             self._draw_particles_gdi(hdc, particles)
             self._draw_texts(hdc, texts)
+        finally:
+            u.ReleaseDC(self.hwnd, hdc)
+
+    def _hud_font(self):
+        """Create the Cascadia Mono HUD font, verifying it actually carries the
+        block glyphs the bar chart draws; fall back to the stock fixed font if the
+        face is unavailable (GDI silently substitutes a font that may lack them)."""
+        g = self.gdi32
+        hf = g.CreateFontW(-HUD_FONT_HEIGHT, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                           DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, HUD_FONT_FACE)
+        if hf and self._font_has_glyph(hf, FULL_BLOCK):
+            self._font_created = True
+            return hf
+        if hf:
+            g.DeleteObject(hf)
+        self._font_created = False
+        return g.GetStockObject(SYSTEM_FIXED_FONT)
+
+    def _font_has_glyph(self, hf, ch):
+        """Does font `hf` have a glyph for `ch`? (Selects it into a scratch DC and
+        asks GetGlyphIndices, which flags a missing glyph as 0xFFFF.)"""
+        g, u = self.gdi32, self.user32
+        hdc = u.GetDC(self.hwnd)
+        if not hdc:
+            return False
+        try:
+            old = g.SelectObject(hdc, hf)
+            idx = (ctypes.c_ushort * 1)()
+            g.GetGlyphIndicesW(hdc, ch, 1, idx, GGI_MARK_NONEXISTING)
+            g.SelectObject(hdc, old)
+            return idx[0] != 0xFFFF
         finally:
             u.ReleaseDC(self.hwnd, hdc)
 
@@ -399,6 +452,9 @@ class GdiBlitter:
         if self._wire_pen:
             self.gdi32.DeleteObject(self._wire_pen)
             self._wire_pen = None
+        if self._font_created:
+            self.gdi32.DeleteObject(self._font)
+            self._font_created = False
 
 
 # ---- raw input constants / structs (winuser.h) ------------------------------

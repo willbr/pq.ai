@@ -461,9 +461,10 @@ class Client:
                    f"[N]oclip [F]lat [Z]buffer [T]exture [P]rofile")
         if self.show_prof:
             # previous completed frame's smoothed section ms (server/render/
-            # raster/present). present is timed in the frontend and frame_end()
-            # rolls the buckets, so the figures lag one frame uniformly.
-            hud_str += "\n" + PROFILER.report()
+            # raster/present) as a bar chart. present is timed in the frontend
+            # and frame_end() rolls the buckets, so the figures lag one frame
+            # uniformly.
+            hud_str += "\n" + PROFILER.bars()
         overlays.append((8, 8, hud_str, (0, 255, 102), "nw"))
 
         # bottom status bar: health / armor / current-weapon ammo, plus the four

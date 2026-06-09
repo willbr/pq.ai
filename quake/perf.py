@@ -22,6 +22,22 @@ decays toward 0."""
 import time
 from contextlib import contextmanager
 
+# Unicode block fractions for 1/8..7/8 of a cell; "█" is a full cell. Lets a bar
+# end on an eighth-of-a-character boundary so short times still read smoothly.
+_EIGHTHS = "▏▎▍▌▋▊▉"
+
+
+def _bar(frac, width):
+    """A horizontal block-character bar `width` cells wide at `frac` (0..1) full,
+    clamped to the width (an over-budget section just fills it)."""
+    if frac <= 0.0:
+        return ""
+    eighths = int(round(frac * width * 8))
+    full, rem = divmod(eighths, 8)
+    if full >= width:
+        return "█" * width
+    return "█" * full + (_EIGHTHS[rem - 1] if rem else "")
+
 
 class Profiler:
     def __init__(self, clock=time.perf_counter, alpha=0.1):
@@ -33,6 +49,7 @@ class Profiler:
         self._accum = {}            # name -> seconds accumulated this frame
         self._open = []             # (name, start) stack of open sections
         self._depth = 0             # open-section nesting depth
+        self._parent = {}           # name -> enclosing section name (first seen), or None
         self._frame_total = 0.0     # wall time under top-level sections this frame
         self.ms = {}                # name -> EMA-smoothed milliseconds
         self.total_ms = 0.0         # EMA-smoothed top-level total, milliseconds
@@ -40,6 +57,9 @@ class Profiler:
     def begin(self, name):
         """Open a section; pair with end(name). Use this to bracket an inline
         region that can't be cleanly wrapped in a `with` block."""
+        # remember the section we're nested inside (the first time we see this
+        # name), so the bar chart can indent children under their parent
+        self._parent.setdefault(name, self._open[-1][0] if self._open else None)
         self._depth += 1
         self._open.append((name, self._clock()))
 
@@ -78,6 +98,29 @@ class Profiler:
         plus the total."""
         parts = "  ".join(f"{n} {ms:.1f}" for n, ms in self.ms.items())
         return f"prof  {parts}  total {self.total_ms:.1f}"
+
+    def bars(self, target_ms=16.7, width=12):
+        """Multi-line block-character bar chart of the smoothed section times,
+        each bar scaled so a section filling the whole frame budget (`target_ms`,
+        default ~60fps) spans the full `width`. Children are listed indented
+        directly under their parent; the top is a header and the last row is the
+        frame total. Monospace HUD font keeps the columns aligned."""
+        # depth-first order: each top-level section followed by its children
+        rows = []
+        for name in self.ms:
+            if self._parent.get(name) is None:
+                rows.append((name, 0))
+                for child in self.ms:
+                    if self._parent.get(child) == name:
+                        rows.append((child, 1))
+        rows.append(("total", 0))
+
+        lines = [f"prof (ms, target {target_ms:.1f})"]
+        for name, depth in rows:
+            ms = self.total_ms if name == "total" else self.ms[name]
+            label = "  " * depth + name
+            lines.append(f"{label:<9}{ms:5.1f} {_bar(ms / target_ms, width)}")
+        return "\n".join(lines)
 
 
 # Module-level singleton the engine and frontends share.

@@ -120,6 +120,56 @@ def test_report_lists_sections_and_total():
     assert "10.0" in r, r                             # total ms
 
 
+def test_bars_full_width_at_target():
+    """A section whose time equals the target budget draws a full-width bar."""
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=1.0)
+    with p.section("a"):
+        clk.advance(10.0)
+    p.frame_end()
+    out = p.bars(target_ms=10.0, width=12)
+    a_line = next(l for l in out.splitlines() if "a " in l and "total" not in l)
+    assert a_line.count("█") == 12, a_line       # 12 full blocks
+
+
+def test_bars_length_scales_with_time():
+    """A slower section draws a longer bar than a faster one."""
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=1.0)
+    with p.section("slow"):
+        clk.advance(8.0)
+    with p.section("fast"):
+        clk.advance(2.0)
+    p.frame_end()
+    out = p.bars(target_ms=16.0, width=16)
+    lines = out.splitlines()
+    slow = next(l for l in lines if "slow" in l)
+    fast = next(l for l in lines if "fast" in l)
+    assert slow.count("█") > fast.count("█"), out
+
+
+def test_bars_nests_child_under_parent_in_order():
+    """A nested section is listed (indented) right after its parent, and the
+    total row comes last -- even though it finished before the parent."""
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=1.0)
+    p.begin("render")
+    clk.advance(2.0)
+    p.begin("raster")
+    clk.advance(4.0)
+    p.end("raster")           # raster finishes before render
+    clk.advance(1.0)
+    p.end("render")
+    with p.section("present"):
+        clk.advance(3.0)
+    p.frame_end()
+    lines = p.bars().splitlines()
+    idx = lambda sub: next(i for i, l in enumerate(lines) if sub in l)
+    assert idx("render") < idx("raster") < idx("present"), lines
+    assert lines[idx("raster")].startswith("  "), repr(lines[idx("raster")])
+    assert "total" in lines[-1], lines
+
+
 if __name__ == "__main__":
     test_section_accumulates_elapsed()
     test_same_name_sums_within_frame()
@@ -128,4 +178,7 @@ if __name__ == "__main__":
     test_begin_end_brackets_a_region()
     test_ema_smooths_and_resets_between_frames()
     test_report_lists_sections_and_total()
+    test_bars_full_width_at_target()
+    test_bars_length_scales_with_time()
+    test_bars_nests_child_under_parent_in_order()
     print("OK")

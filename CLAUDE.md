@@ -55,7 +55,9 @@ quake/physics.py    clip-hull tracing + player/monster movement; backs the colli
 quake/render.py     three renderers (wireframe, flat, textured z-buffer); lightmaps, light styles, animated surfaces
 quake/snd.py        platform-agnostic mixer: decode/spatialize/mix(nframes)→int16 stereo; no OS calls
 quake/perf.py       PROFILER singleton: always-on per-frame section timer (server/render/raster/present),
-                      EMA-smoothed; section()/begin()/end()/frame_end(); shown on the HUD via the P key
+                      EMA-smoothed; section()/begin()/end()/frame_end(); P-key HUD bar chart via bars().
+                      The HUD font is Cascadia Mono (Win) / Menlo (mac) -- the stock GDI font and Consolas
+                      lack the 1/8-block glyphs the bars draw; win_ui falls back to the stock font if absent
 client.py           UI-agnostic Client: engine stack + camera/player/game state; frame(dt, input)→RenderFrame
 main.py             tkinter frontend (all platforms; default off-Windows, or --tk on Windows):
                       after() loop, Canvas/PhotoImage drawing, warp-based mouselook;

@@ -31,10 +31,11 @@ from client import Client, InputState
 
 MOUSE_MARGIN = 100         # px from a window edge that triggers a recenter warp
 
-# HUD/crosshair font: a fixed-width face that exists on each OS (Menlo ships on
-# macOS, Consolas on Windows; Tk falls back to a default monospace elsewhere).
+# HUD/crosshair font: a fixed-width face that exists on each OS. Cascadia Mono
+# (Windows 11) and Menlo (macOS) carry the 1/8-block glyphs the profiler bar
+# chart draws; Tk falls back to a default monospace elsewhere.
 HUD_FONT = ("Menlo" if sys.platform == "darwin" else
-            "Consolas" if sys.platform == "win32" else "TkFixedFont")
+            "Cascadia Mono" if sys.platform == "win32" else "TkFixedFont")
 
 LINE_COLOR = "#00ff66"
 PREGROW = 2048             # line items pre-created up front to avoid hitches

@@ -34,8 +34,12 @@ ZBUF_BG = (40, 40, 56)     # flat colour where nothing is drawn (past the sky)
 # index (coord*0.125 + time) * TURBSCALE, wrapped to the 256-entry table.
 _TURBSCALE = 256.0 / (2.0 * math.pi)
 _TURBSIN = [8.0 * math.sin(i * 2.0 * math.pi / 256.0) for i in range(256)]
-# sky drift: texels/sec the scrolling sky texture slides across its faces.
-SKY_SCROLL = 24.0
+# sky drift: texels/sec each sky layer scrolls. A Quake sky is two stacked
+# 128x128 layers -- a transparent-keyed cloud foreground over a background --
+# composited into one tile (R_InitSky/R_MakeSky). The two scroll at different
+# speeds for parallax; the foreground (clouds) outruns the background.
+SKY_BG_SCROLL = 8.0
+SKY_FG_SCROLL = 16.0
 
 # lightmap luxels are 0..255; Quake brightens them with overbright bits we don't
 # emulate, so a gain keeps lit areas from looking muddy. DEFAULT_LIGHT is what an
@@ -398,7 +402,8 @@ class Renderer:
         # classify miptexes by Quake's name conventions: sky* scroll, *liquids
         # warp (water/lava/slime/teleport), and +N frames cycle. _classify_tex
         # also builds the animation chains (per-miptex list of frame indices).
-        self.is_sky, self.is_turb, self.tex_anim = self._classify_textures()
+        self.is_sky, self.is_turb, self.tex_anim, self.tex_alt = \
+            self._classify_textures()
 
         # per-face texture record for the rasteriser: (w, h, index_bytes,
         # s_vec, t_vec) or None to fall back to flat colour. Plus a per-face
@@ -407,8 +412,10 @@ class Renderer:
         self.face_tex = []
         self.face_shade = []
         self.face_sky = [False] * nfaces      # scroll the sky texture
+        self.face_sky_mt = [-1] * nfaces      # sky face -> its miptex (for tiles)
         self.face_turb = [False] * nfaces     # sine-warp (liquids, teleporters)
         self.face_anim = [None] * nfaces      # [(w,h,idx), ...] frames, or None
+        self.face_alt = [None] * nfaces       # alternate frames (entity frame!=0)
         for fi, (nx, ny, nz, dist) in enumerate(self.face_plane):
             self.face_shade.append(int((0.55 + 0.45 * max(0.0,
                                    nx * lx + ny * ly + nz * lz)) * 256))
@@ -418,16 +425,28 @@ class Renderer:
                 mt = texinfo[ti][0]
                 if 0 <= mt < len(self.tex_idx):
                     self.face_sky[fi] = self.is_sky[mt]
+                    if self.is_sky[mt]:
+                        self.face_sky_mt[fi] = mt
                     self.face_turb[fi] = self.is_turb[mt]
                     if self.tex_anim[mt] is not None:
                         frames = [self.tex_idx[m] for m in self.tex_anim[mt]
                                   if self.tex_idx[m] is not None]
                         if len(frames) > 1:
                             self.face_anim[fi] = frames
+                    if self.tex_alt[mt] is not None:
+                        alt = [self.tex_idx[m] for m in self.tex_alt[mt]
+                               if self.tex_idx[m] is not None]
+                        if alt:
+                            self.face_alt[fi] = alt
                     if self.tex_idx[mt] is not None:
                         w, h, idx = self.tex_idx[mt]
                         rec = (w, h, idx, texinfo[ti][2], texinfo[ti][3])
             self.face_tex.append(rec)
+        # sky textures split into their two 128x128 layers (R_InitSky); the
+        # per-frame composite tile is cached in _make_sky.
+        self.sky_split = self._split_sky()
+        self._sky_tiles = {}          # mt -> (w, h, tile_bytes)
+        self._sky_shift = None        # last (fg, bg) integer shift built at
         # faces whose texture cycles -- the only ones _animate_surfaces touches
         self.anim_faces = [fi for fi in range(nfaces)
                            if self.face_anim[fi] is not None]
@@ -543,20 +562,25 @@ class Renderer:
         return out
 
     def _classify_textures(self):
-        """Split miptexes by Quake's name conventions and build +N animation
-        chains. Returns (is_sky, is_turb, tex_anim) aligned to bsp.textures:
+        """Split miptexes by Quake's name conventions and build animation chains.
+        Returns (is_sky, is_turb, tex_anim, tex_alt) aligned to bsp.textures:
           - is_sky[mt]:  name starts 'sky'  -> scrolling sky.
           - is_turb[mt]: name starts '*'    -> sine-warped liquid/teleporter.
-          - tex_anim[mt]: the main-sequence frame list ['+0x','+1x',...] this
-            miptex belongs to (sorted by digit), or None. The alternate '+a..'
-            sequence (entity-triggered) is ignored -- world surfaces only cycle
-            the main one."""
+          - tex_anim[mt]: the frame list this miptex cycles through (the main
+            '+0..+9x' sequence or, for an alternate frame, the '+a..+jx' one),
+            ordered, or None.
+          - tex_alt[mt]: the *other* sequence -- the alternate frames a brush
+            entity switches to when its `frame` field is set (Quake's
+            R_TextureAnimation / alternate_anims, e.g. a button lighting up).
+            None when the group has no alternate. Mirrors model.c: '+0..+9'
+            are the main frames, '+a..+j' the alternates."""
         textures = self.bsp.textures
         n = len(textures)
         is_sky = [False] * n
         is_turb = [False] * n
         tex_anim = [None] * n
-        groups = {}                  # base name -> {digit: miptex index}
+        tex_alt = [None] * n
+        groups = {}                  # base name -> {'main': {i:mt}, 'alt': {i:mt}}
         for mt, t in enumerate(textures):
             if t is None:
                 continue
@@ -565,13 +589,25 @@ class Renderer:
                 is_sky[mt] = True
             elif name.startswith("*"):
                 is_turb[mt] = True
-            elif name.startswith("+") and len(name) >= 2 and name[1].isdigit():
-                groups.setdefault(name[2:], {})[int(name[1])] = mt
-        for frames in groups.values():
-            chain = [frames[k] for k in sorted(frames)]
-            for mt in chain:
-                tex_anim[mt] = chain
-        return is_sky, is_turb, tex_anim
+            elif name.startswith("+") and len(name) >= 2:
+                c = name[1]
+                g = groups.setdefault(name[2:], {"main": {}, "alt": {}})
+                if c.isdigit():
+                    g["main"][int(c)] = mt
+                elif "a" <= c <= "j":
+                    g["alt"][ord(c) - ord("a")] = mt
+        for g in groups.values():
+            main = [g["main"][k] for k in sorted(g["main"])]
+            alt = [g["alt"][k] for k in sorted(g["alt"])]
+            for mt in main:
+                tex_anim[mt] = main
+                if alt:
+                    tex_alt[mt] = alt
+            for mt in alt:
+                tex_anim[mt] = alt
+                if main:
+                    tex_alt[mt] = main
+        return is_sky, is_turb, tex_anim, tex_alt
 
     def _animate_surfaces(self, t):
         """Swap each +N face to the frame for time t (Quake cycles at 5 Hz).
@@ -584,6 +620,68 @@ class Renderer:
             w, h, rgb = frames[fidx % len(frames)]
             old = self.face_tex[fi]
             self.face_tex[fi] = (w, h, rgb, old[3], old[4])
+
+    def brush_face_tex(self, fi, frame, time):
+        """The texture record to draw brush face `fi` with. When the owning
+        entity's `frame` is set, swap to the face's alternate chain -- Quake's
+        R_TextureAnimation, which lights a pressed button (buttons.qc sets
+        frame=1 to 'use alternate textures'). Otherwise the base (the world's
+        own, already time-animated) record. The texinfo s/t vectors are kept so
+        the texture still rides the brush."""
+        base = self.face_tex[fi]
+        alt = self.face_alt[fi]
+        if frame and alt is not None and base is not None:
+            w, h, idx = alt[int(time * 5.0) % len(alt)]
+            return (w, h, idx, base[3], base[4])
+        return base
+
+    def _split_sky(self):
+        """Each sky miptex (256x128) split into its two 128x128 layers, à la
+        R_InitSky: foreground clouds = the left half (palette index 0 reads as
+        transparent), background = the right half. Returns {mt: (fg, bg)} with
+        fg/bg as 128*128 index bytes. Skips skies that aren't 256x128."""
+        out = {}
+        for mt, sky in enumerate(self.is_sky):
+            if not sky or self.tex_idx[mt] is None:
+                continue
+            w, h, idx = self.tex_idx[mt]
+            if w < 256 or h < 128:
+                continue
+            fg = bytearray(128 * 128)
+            bg = bytearray(128 * 128)
+            for r in range(128):
+                src = r * w
+                fg[r * 128:(r + 1) * 128] = idx[src:src + 128]
+                bg[r * 128:(r + 1) * 128] = idx[src + 128:src + 256]
+            out[mt] = (bytes(fg), bytes(bg))
+        return out
+
+    def _make_sky(self, time):
+        """Composite each split sky into one 128x128 tile for time `t`
+        (R_MakeSky): the two layers scrolled at different speeds, the
+        foreground's non-zero (opaque) texels overlaid on the background.
+        Rebuilt only when an integer texel shift changes -- the sky steps a
+        texel at a time, exactly like WinQuake. Returns {mt: (128, 128, tile)}."""
+        if not self.sky_split:
+            return self._sky_tiles
+        fgs = int(time * SKY_FG_SCROLL) & 127
+        bgs = int(time * SKY_BG_SCROLL) & 127
+        if self._sky_shift == (fgs, bgs) and self._sky_tiles:
+            return self._sky_tiles
+        self._sky_shift = (fgs, bgs)
+        tiles = {}
+        for mt, (fg, bg) in self.sky_split.items():
+            tile = bytearray(128 * 128)
+            for r in range(128):
+                fr = ((r + fgs) & 127) << 7
+                br = ((r + bgs) & 127) << 7
+                out = r << 7
+                for c in range(128):
+                    px = fg[fr + ((c + fgs) & 127)]
+                    tile[out + c] = px if px else bg[br + ((c + bgs) & 127)]
+            tiles[mt] = (128, 128, bytes(tile))
+        self._sky_tiles = tiles
+        return tiles
 
     def _build_lightmaps(self):
         """Per-face lightmap data from the LIGHTING lump. Fills self.face_lm
@@ -1036,9 +1134,9 @@ class Renderer:
         # submodel at rest (standalone / no QC server).
         if self.brushmodels:
             if brush_ents is None:
-                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0)
                               for i in range(1, len(bsp.models))]
-            for mi, (ofx, ofy, ofz), _ang in brush_ents:
+            for mi, (ofx, ofy, ofz), _ang, _fr in brush_ents:
                 md = bsp.models[mi]
                 mn, mx = md["mins"], md["maxs"]
                 mins = (mn[0] + ofx, mn[1] + ofy, mn[2] + ofz)
@@ -1383,9 +1481,9 @@ class Renderer:
         pending = []
         if self.brushmodels:
             if brush_ents is None:
-                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0)
                               for i in range(1, len(bsp.models))]
-            for mi, ofs, _ang in brush_ents:
+            for mi, ofs, _ang, _fr in brush_ents:
                 md = bsp.models[mi]
                 ofx, ofy, ofz = ofs
                 mn, mx = md["mins"], md["maxs"]
@@ -1519,8 +1617,9 @@ class Renderer:
         nearest = self._nearest_index
         face_lm = self.face_lm
         face_sky = self.face_sky
+        face_sky_mt = self.face_sky_mt
         face_turb = self.face_turb
-        sky_off = (time * SKY_SCROLL) % 256.0     # sky texels scrolled this frame
+        sky_tiles = self._make_sky(time)          # composited sky layers, by mt
         face_frame = self.face_frame
         vert_frame = self.vert_frame
         vcache = self.vcache
@@ -1806,8 +1905,11 @@ class Renderer:
             if face_turb[fi]:
                 raster_poly_tex_turb(pts, rec)
             elif face_sky[fi]:
-                raster_poly_tex([(p[0], p[1], p[2], p[3] + sky_off, p[4])
-                                 for p in pts], rec, face_lm[fi])
+                # the two sky layers, composited and scrolled into one 128-tile
+                # (no doubling); falls back to the raw miptex if it wasn't split.
+                tile = sky_tiles.get(face_sky_mt[fi])
+                srec = (tile[0], tile[1], tile[2], rec[3], rec[4]) if tile else rec
+                raster_poly_tex(pts, srec, face_lm[fi])
             else:
                 lm = face_lm[fi]
                 if lm[5]:
@@ -1959,9 +2061,9 @@ class Renderer:
         # brush-model entities (doors, lifts, buttons), each offset to its origin
         if self.brushmodels:
             if brush_ents is None:
-                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0)
                               for i in range(1, len(bsp.models))]
-            for mi, (ofx, ofy, ofz), _ang in brush_ents:
+            for mi, (ofx, ofy, ofz), _ang, efr in brush_ents:
                 md = bsp.models[mi]
                 mn, mx = md["mins"], md["maxs"]
                 mins = (mn[0] + ofx, mn[1] + ofy, mn[2] + ofz)
@@ -1976,7 +2078,8 @@ class Renderer:
                     nx, ny, nz, dist = face_plane[fi]
                     if (ox - ofx) * nx + (oy - ofy) * ny + (oz - ofz) * nz - dist <= BACKFACE_EPS:
                         continue
-                    rec = face_tex[fi] if textured else None
+                    # entity frame set -> alternate textures (pressed button)
+                    rec = self.brush_face_tex(fi, efr, time) if textured else None
                     if rec is not None:
                         (s0, s1, s2, s3) = rec[3]
                         (t0, t1, t2, t3) = rec[4]

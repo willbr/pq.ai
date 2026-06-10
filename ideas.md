@@ -1,10 +1,18 @@
 things to fix in texture view
-* button textures dont change when you press them
-* sky texture is double layered
+* button textures dont change when you press them   -- FIXED
+* sky texture is double layered                     -- FIXED
 
-review if we're using a palleted rendering like quake1
-review what's cached
-review D.CacheSurface
+review if we're using a palleted rendering like quake1   -- yes (see below)
+review what's cached                                     -- see below
+review D.CacheSurface                                    -- faithful port (see below)
+
+Fixes (commit follows this review): test_texture_view_bugs.py covers both.
+- Buttons: brush_models() now reports each entity's `frame`; _classify_textures
+  builds the `+a..+j` alternate chains; the textured brush emit swaps to the
+  alternate texture when frame!=0 (Renderer.brush_face_tex / R_TextureAnimation).
+- Sky: sky miptexes split into their two 128x128 layers (_split_sky / R_InitSky)
+  and composited per frame into one 128-wide scrolled tile (_make_sky /
+  R_MakeSky) -- no more side-by-side doubling.
 
 ---
 

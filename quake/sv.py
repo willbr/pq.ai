@@ -713,19 +713,23 @@ class Server:
                 break
 
     def brush_models(self):
-        """Live brush-model entities as (submodel_index, origin, angles), for the
-        renderer. Skips entities whose modelindex isn't an inline '*N' model --
+        """Live brush-model entities as (submodel_index, origin, angles, frame),
+        for the renderer. `frame` is 0/1: a set frame swaps animated surfaces to
+        their alternate textures (R_TextureAnimation -- a pressed button lights
+        up). Skips entities whose modelindex isn't an inline '*N' model --
         notably triggers, which QC makes invisible by clearing modelindex."""
         vm = self.vm
         mp = self.model_precache
-        fmi, forg, fang = self.f["modelindex"], self.f["origin"], self.f["angles"]
+        fmi, forg = self.f["modelindex"], self.f["origin"]
+        fang, ffr = self.f["angles"], self.f["frame"]
         out = []
         for num in range(1, vm.num_edicts):
             if vm.free[num]:
                 continue
             mi = vm.fget_i(num, fmi)
             if 0 < mi < len(mp) and mp[mi][:1] == "*":
-                out.append((int(mp[mi][1:]), vm.fget_v(num, forg), vm.fget_v(num, fang)))
+                out.append((int(mp[mi][1:]), vm.fget_v(num, forg),
+                            vm.fget_v(num, fang), int(vm.fget_f(num, ffr))))
         return out
 
     def solid_brush_models(self):

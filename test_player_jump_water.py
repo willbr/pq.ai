@@ -80,6 +80,27 @@ def test_jump_impulse_is_additive():
         f"jump not additive: vel_z={vel[2]:.1f} (rest jump ~{from_rest:.1f})"
 
 
+class _SoundRecorder:
+    def __init__(self):
+        self.samples = []
+
+    def start_sound(self, ent, chan, sample, vol, atten, origin):
+        self.samples.append(sample)
+
+
+def test_no_drowning_gasp_on_spawn():
+    """A freshly spawned player is on dry land with a full lungful of air, so the
+    first WaterMove must not play the drowning gasp. (PutClientInServer sets
+    air_finished = time + 12; without it air_finished == 0 < time triggers gasp2
+    the instant the level loads.)"""
+    sv = _boot()
+    rec = _SoundRecorder()
+    sv.snd = rec
+    sv.run_frame(0.1)
+    gasps = [s for s in rec.samples if "gasp" in s]
+    assert not gasps, f"drowning gasp played on spawn: {gasps}"
+
+
 def test_watermove_toggles_inwater_flag():
     sv = _boot()
     vm, f, p = sv.vm, sv.f, sv.player
@@ -103,5 +124,6 @@ def test_watermove_toggles_inwater_flag():
 if __name__ == "__main__":
     test_jump_debounce_no_pogo()
     test_jump_impulse_is_additive()
+    test_no_drowning_gasp_on_spawn()
     test_watermove_toggles_inwater_flag()
     print("OK")

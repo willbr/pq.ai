@@ -86,7 +86,7 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "attack_finished", "currentammo", "ammo_shells", "ammo_nails",
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
            "button0", "deadflag", "enemy", "owner", "touch", "goalentity",
-           "waterlevel", "watertype", "th_die")
+           "waterlevel", "watertype", "air_finished", "th_die")
 
 SOLID_NOT = 0
 SOLID_TRIGGER = 1
@@ -1526,6 +1526,10 @@ class Server:
         vm.fset_f(e, f["ammo_rockets"], 0.0)
         vm.fset_f(e, f["ammo_cells"], 0.0)
         vm.fset_v(e, f["view_ofs"], (0.0, 0.0, 22.0))
+        # PutClientInServer gives the player a full 12s of air; without it the
+        # first WaterMove sees air_finished == 0 < time and plays the drowning
+        # gasp the instant the level loads.
+        vm.fset_f(e, f["air_finished"], self.time + 12.0)
         self._set_minmax(e, (-16.0, -16.0, -24.0), (16.0, 16.0, 32.0))
         # let the real QC pick the view model: W_SetCurrentAmmo sets .weaponmodel
         # ("progs/v_shot.mdl") and .weaponframe from .weapon, exactly as the game

@@ -26,7 +26,6 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 
-from quake.render import ZBUF_SCALE
 from quake.perf import PROFILER
 
 from client import Client, InputState
@@ -64,6 +63,24 @@ def look_delta(last, x, y, w, h, margin):
     if abs(dx) >= w // 2 - margin or abs(dy) >= h // 2 - margin:
         return (x, y), 0, 0          # cursor teleported by a recenter -- not input
     return (x, y), dx, dy
+
+
+def fb_fit(win_w, win_h, fb_w, fb_h):
+    """Pick how to integer-scale an fb_w x fb_h framebuffer into a win_w x win_h
+    window with a Tk PhotoImage, which only scales by integer factors. Returns
+    (zoom, subsample) -- apply photo.zoom(zoom).subsample(subsample); a factor of
+    1 is a no-op. Chooses the largest zoom that fits while preserving aspect; if
+    the framebuffer is larger than the window, subsamples to fit instead. The
+    frontend centres the result, so any leftover is a letterbox border. (gdi's
+    StretchDIBits fills exactly; Tk is integer-limited, so Auto resolution fills
+    cleanly while a fixed low-res letterboxes.)"""
+    if fb_w <= 0 or fb_h <= 0 or win_w <= 0 or win_h <= 0:
+        return 1, 1
+    z = min(win_w // fb_w, win_h // fb_h)
+    if z >= 1:
+        return z, 1
+    s = max(-(-fb_w // win_w), -(-fb_h // win_h))     # ceil division -> shrink
+    return 1, max(1, s)
 
 
 def route_console_key(con, keysym, char):
@@ -561,17 +578,27 @@ class App:
     def _draw_fb(self, fbdata):
         """Expand the renderer's 8-bit palette-indexed framebuffer to RGB via a
         256-entry lookup (one C-level map+join), wrap it in a PPM PhotoImage,
-        scale it up to fill the window (chunky pixels), and show it on the
-        canvas image item. A fresh PhotoImage per frame -- cheap; the costly
-        part is the per-pixel fill the renderer already did."""
+        scale it to the *window* with the largest integer factor that fits
+        (fb_fit -- the framebuffer is a fixed render resolution, not window//4),
+        and centre it on the canvas (letterbox). A fresh PhotoImage per frame --
+        cheap; the costly part is the per-pixel fill the renderer already did."""
         fb, w, h = fbdata
         lut = self._pal_lut
         if lut is None:
             lut = self._pal_lut = [bytes(c) for c in self.client.palette]
         ppm = b"P6 %d %d 255 " % (w, h) + b"".join(map(lut.__getitem__, fb))
         photo = tk.PhotoImage(data=ppm, format="ppm")
-        if ZBUF_SCALE > 1:
-            photo = photo.zoom(ZBUF_SCALE)
+        W = self.canvas.winfo_width()
+        H = self.canvas.winfo_height()
+        zoom, sub = fb_fit(W, H, w, h)
+        if zoom > 1:
+            photo = photo.zoom(zoom)
+        if sub > 1:
+            photo = photo.subsample(sub)
+        # centre the scaled image in the window (letterbox the remainder)
+        dw, dh = photo.width(), photo.height()
+        self.canvas.coords(self.fb_item, max(0, (W - dw) // 2),
+                           max(0, (H - dh) // 2))
         self.canvas.itemconfig(self.fb_item, image=photo)
         self.fb_photo = photo            # keep a ref so Tk doesn't GC the pixels
         self.canvas.tag_lower(self.fb_item)

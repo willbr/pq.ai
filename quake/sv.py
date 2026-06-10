@@ -20,12 +20,24 @@ SPAWNFLAG_NOT_MEDIUM = 512
 SPAWNFLAG_NOT_HARD = 1024
 SPAWNFLAG_NOT_DEATHMATCH = 2048
 
+# .flags bits, mirroring defs.qc. Not all are acted on by this engine: the water
+# and jump flags (FL_INWATER/FL_WATERJUMP/FL_JUMPRELEASED) are managed by the QC
+# (client.qc WaterMove/PlayerJump) once the engine feeds the edict waterlevel/
+# watertype, and FL_WATERJUMP is never set because id left CheckWaterJump
+# commented out. FL_JUMPRELEASED's debounce is mirrored engine-side in
+# physics.player_move, which owns the jump impulse.
 FL_FLY = 1
 FL_SWIM = 2
+FL_CLIENT = 8                     # set for all client edicts
+FL_INWATER = 16                   # for enter / leave water splash
 FL_MONSTER = 32
-FL_ITEM = 256                     # "extra wide size for bonus items" (defs.qc)
-FL_ONGROUND = 512
-FL_PARTIALGROUND = 1024
+FL_GODMODE = 64                   # player cheat: damage immunity
+FL_NOTARGET = 128                 # player cheat: monsters ignore you
+FL_ITEM = 256                     # extra wide size for bonus items
+FL_ONGROUND = 512                 # standing on something
+FL_PARTIALGROUND = 1024           # not all corners are valid
+FL_WATERJUMP = 2048               # player jumping out of water
+FL_JUMPRELEASED = 4096            # for jump debouncing (don't pogo-stick)
 STEPSIZE = 18.0             # monsters step up/down ledges this tall (SV_movestep)
 DI_NODIR = -1.0            # SV_NewChaseDir: "no direction"
 SOLID_BSP = 4
@@ -74,9 +86,8 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "attack_finished", "currentammo", "ammo_shells", "ammo_nails",
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
            "button0", "deadflag", "enemy", "owner", "touch", "goalentity",
-           "th_die")
+           "waterlevel", "watertype", "th_die")
 
-FL_CLIENT = 8
 SOLID_NOT = 0
 SOLID_TRIGGER = 1
 SOLID_BBOX = 2
@@ -105,7 +116,6 @@ IT_NAILS = 512
 IT_ROCKETS = 1024
 IT_CELLS = 2048
 IT_AXE = 4096
-FL_GODMODE = 64                   # .flags bit (defs.qc): damage immunity
 _WEAPON_NAMES = {
     IT_AXE: "Axe", IT_SHOTGUN: "Shotgun", IT_SUPER_SHOTGUN: "Super Shotgun",
     IT_NAILGUN: "Nailgun", IT_SUPER_NAILGUN: "Super Nailgun",
@@ -476,6 +486,7 @@ class Server:
                 except PR_RunError as ex:
                     cn = self.pr.string(vm.fget_i(num, self.f["classname"]))
                     print(f"think {cn} (edict {num}) aborted: {ex}")
+        self.run_water_move()                   # PlayerPreThink: drown/splash/damage
         self.run_weapon_frame()                 # PlayerPostThink: drive the weapons
         self.run_player_death_think()           # PlayerPreThink's dead->respawn FSM
         self.touch_triggers(self.player)        # fire teleports/triggers we touch
@@ -1630,6 +1641,18 @@ class Server:
         vm.fset_v(e, f["v_angle"], angles)
         self._link_abs(e)
 
+    def update_player_water(self, waterlevel, watertype):
+        """Stamp the player edict's waterlevel/watertype before the QC tick, as
+        SV_ClientThink's SV_CheckWater does. The ported client.qc WaterMove then
+        owns the rest: the enter/leave/gasp sounds, drowning and lava/slime
+        damage, and the FL_INWATER flag. (CheckWaterJump/FL_WATERJUMP stays a
+        no-op -- id left it commented out in PlayerPreThink.)"""
+        if not self.player:
+            return
+        vm, f, e = self.vm, self.f, self.player
+        vm.fset_f(e, f["waterlevel"], float(waterlevel))
+        vm.fset_f(e, f["watertype"], float(watertype))
+
     def intermission_active(self):
         """True once the QC has entered intermission (execute_changelevel set
         intermission_running). The host freezes the camera at the player's
@@ -1664,6 +1687,32 @@ class Server:
         self.button0 = bool(button0)
         if impulse:
             self.pending_impulse = int(impulse)
+
+    def run_water_move(self):
+        """Run the QC's WaterMove for the player (the water half of PlayerPreThink):
+        air/drown timing with gasp sounds, lava/slime damage, the enter/leave-water
+        sounds and the FL_INWATER flag. The engine stamps the edict's waterlevel/
+        watertype first (update_player_water) exactly as SV_ClientThink's water
+        check does; WaterMove reads them. Mirrors how run_weapon_frame drives
+        PlayerPostThink's weapon logic straight from the game's own QC."""
+        if not self.player or self.phys is None:
+            return
+        if self.intermission_active():
+            return
+        vm, f, e = self.vm, self.f, self.player
+        if vm.fget_f(e, f["health"]) <= 0:
+            return
+        func = self.pr.find_function("WaterMove")
+        if func is None:
+            return
+        self.gset_f("time", self.time)
+        self.gset_f("frametime", self.frametime)
+        self.gset_i("self", e)
+        self.gset_i("other", 0)
+        try:
+            vm.execute(func)
+        except PR_RunError as ex:
+            print(f"water move aborted: {ex}")
 
     def run_weapon_frame(self):
         """One tick of the real Quake weapon system (what PlayerPostThink runs):

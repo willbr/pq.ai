@@ -84,6 +84,10 @@ class Physics:
         # edicts the player's move bumped this step (SV_Impact). Drained by the
         # host into the QC touch functions so walking into a button presses it.
         self.touched = set()
+        # jump debounce, mirroring the QC's FL_JUMPRELEASED (client.qc PlayerJump:
+        # "don't pogo stick"). The flag is set whenever the jump button is up and
+        # cleared when a jump fires, so holding jump yields exactly one hop.
+        self.jump_released = True
 
     # ---- hull queries ----
     def hull_point_contents(self, num, p):
@@ -650,11 +654,11 @@ class Physics:
                     forward, right, fmove, smove, upmove, maxspeed,
                     onground, want_jump, dt):
         """One step of player physics. Mutates origin and vel; returns
-        (onground, waterlevel). wishdir/wishspeed are the horizontal ground/air
-        intent; forward/right + fmove/smove/upmove are the full 3D swim intent and
-        forward also drives wall friction."""
+        (onground, waterlevel, watertype). wishdir/wishspeed are the horizontal
+        ground/air intent; forward/right + fmove/smove/upmove are the full 3D swim
+        intent and forward also drives wall friction."""
         self.touched.clear()
-        waterlevel, _ = self.check_water(origin)
+        waterlevel, watertype = self.check_water(origin)
 
         if waterlevel >= 2:
             # swimming: build a full 3D wish velocity from the view direction
@@ -670,12 +674,18 @@ class Physics:
         else:
             self.air_accelerate(vel, wishdir, wishspeed, dt)
 
-        if want_jump and onground:
+        # Jump, debounced like the QC's FL_JUMPRELEASED: releasing the button arms
+        # the next jump; a fired jump disarms it. Without this, holding jump
+        # re-fires every grounded frame (pogo-sticking), unlike Quake.
+        if not want_jump:
+            self.jump_released = True
+        if want_jump and onground and self.jump_released:
             vel[2] = JUMPSPEED
             onground = False
+            self.jump_released = False
 
         if waterlevel <= 1:                 # no gravity while swimming
             vel[2] -= GRAVITY * dt
 
         onground = self.walk_move(origin, vel, forward, dt, onground, waterlevel)
-        return onground, waterlevel
+        return onground, waterlevel, watertype

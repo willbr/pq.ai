@@ -19,7 +19,6 @@ Reproduced end-to-end on e1m1: button *4 triggers the func_door lift *3
 without the fix you end up wedged in the lift, unable to walk or jump out.
 """
 
-import math
 from client import Client, InputState
 
 PAK = "quake-shareware/id1/pak0.pak"
@@ -66,13 +65,20 @@ def test_ride_lift_to_bottom_then_walk_off():
         f"rider embedded {(-worst_gap):.1f} units into the stopped lift -- "
         "the stuck-on-lift bug")
 
-    # now try to walk off (and jump) -- a stuck/embedded player can't move at all
+    # An embedded (allsolid) rider has every move zeroed -- "you're stuck until
+    # you noclip" -- so it can't even leave the ground. Confirm a jump actually
+    # lifts the player clear of the lift surface. (A 3D-distance check would be
+    # fooled by the bottom of the shaft being walled in on the horizontal: the
+    # only honest signal that the player isn't wedged is that they can move.)
     cl.yaw = 0.0
-    start = list(cl.pos)
+    floor_z = cl.pos[2]
+    peak = cl.pos[2]
     for _ in range(15):
         cl.frame(0.1, InputState(move_forward=1.0, move_up=1.0))
-    moved = math.dist(cl.pos, start)
-    assert moved > 16.0, f"player only moved {moved:.1f} units -- stuck on the lift/button"
+        peak = max(peak, cl.pos[2])
+    assert peak - floor_z > 16.0, (
+        f"player rose only {peak - floor_z:.1f} units off the lift -- "
+        "stuck/embedded (allsolid) on the lift")
 
 
 if __name__ == "__main__":

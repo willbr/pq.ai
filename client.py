@@ -13,7 +13,7 @@ from quake.render import (Renderer, PickupModel, angle_vectors,
                           lightstyle_values, ZBUF_SCALE)
 from quake.console import Console
 from quake.menu import Menu, ChoiceItem, ActionItem
-from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED
+from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED, CONTENTS_EMPTY
 from quake.progs import Progs
 from quake.sv import Server, anglemod
 from quake.mdl import Mdl, EF_ROTATE
@@ -244,6 +244,7 @@ class Client:
         self.bobtime = 0.0          # wall-clock phase for the weapon bob
         self.onground = False
         self.waterlevel = 0
+        self.watertype = CONTENTS_EMPTY   # fed to the player edict for QC WaterMove
         self.noclip = False
         self.yaw = yaw
         self.pitch = 0.0
@@ -308,7 +309,7 @@ class Client:
 
         # clamp dt so a hitch can't tunnel the player through a wall
         step = min(dt, 0.05)
-        self.onground, self.waterlevel = self.phys.player_move(
+        self.onground, self.waterlevel, self.watertype = self.phys.player_move(
             self.pos, self.vel, wishdir, wishspeed,
             forward, right, fwd * speed, strafe * speed, upmove, speed,
             self.onground, jump, step)
@@ -559,6 +560,10 @@ class Client:
                 # player and shots originate from the current view
                 self.sv.update_player((self.pos[0], self.pos[1], self.pos[2]),
                                       (self.pitch, self.yaw, 0.0))
+                # feed the move's water sampling to the edict so the QC WaterMove
+                # runs (drown/splash sounds, lava/slime damage, FL_INWATER), as
+                # SV_ClientThink's water check does before PlayerPreThink
+                self.sv.update_player_water(self.waterlevel, self.watertype)
                 # SV_Impact: fire touch on the solid movers the move just bumped,
                 # so walking into a button presses it / into a key door opens it
                 self.sv.touch_impacts(self.phys.touched)

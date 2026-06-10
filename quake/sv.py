@@ -127,6 +127,7 @@ _WEAPON_NAMES = {
 _GLOBALS = ("self", "other", "time", "frametime", "force_retouch", "skill",
             "v_forward", "v_right", "v_up", "msg_entity", "mapname",
             "intermission_running", "intermission_exittime",
+            "total_secrets", "total_monsters", "found_secrets", "killed_monsters",
             "trace_allsolid", "trace_startsolid", "trace_fraction", "trace_endpos",
             "trace_plane_normal", "trace_plane_dist", "trace_ent",
             "trace_inopen", "trace_inwater")
@@ -237,6 +238,7 @@ class Server:
         # can fold it into the camera position it owns (SV_PushMove riders)
         self.player_carry = [0.0, 0.0, 0.0]
         self.changelevel = None     # set by the changelevel builtin; host reads it
+        self.intermission_time = None  # level time frozen when intermission began
         self.center_msg = None      # (text, time) from centerprint; host displays it
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
         self._te = None             # in-progress temp-entity message being parsed
@@ -492,6 +494,11 @@ class Server:
         self.touch_triggers(self.player)        # fire teleports/triggers we touch
         self._emit_trails()                     # R_RocketTrail for moving missiles
         self._advance_particles(dt)
+        # freeze the completed-level time the frame execute_changelevel fires, so
+        # the intermission overlay shows when the exit was reached, not a clock
+        # that keeps ticking while the camera sits on the spot.
+        if self.intermission_time is None and self.intermission_active():
+            self.intermission_time = self.time
         self.gset_f("time", self.time)
 
     def _sv_impact(self, e1, e2):
@@ -1662,6 +1669,24 @@ class Server:
         intermission_running). The host freezes the camera at the player's
         intermission spot and hides the view model while this holds."""
         return self.gget_f("intermission_running") > 0.0
+
+    def intermission_stats(self):
+        """End-of-level tallies for the intermission overlay (Sbar_Intermission-
+        Overlay): completed_time in seconds plus secrets-found/total and
+        monsters-killed/total. None outside intermission.
+
+        completed_time is the level time frozen by run_frame the frame the exit
+        was reached (mirrors cl.completed_time, stamped when svc_intermission
+        arrives)."""
+        if not self.intermission_active():
+            return None
+        return {
+            "time": int(self.intermission_time or 0.0),
+            "secrets": int(self.gget_f("found_secrets")),
+            "total_secrets": int(self.gget_f("total_secrets")),
+            "monsters": int(self.gget_f("killed_monsters")),
+            "total_monsters": int(self.gget_f("total_monsters")),
+        }
 
     def run_intermission(self, button0):
         """Drive the player's IntermissionThink, which PlayerPreThink would run

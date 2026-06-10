@@ -702,8 +702,20 @@ class Client:
                           f"rockets {st['rockets']:3d}  cells {st['cells']:3d}")
             overlays.append((10, h - 8, status_str, status_rgb, "sw"))
 
+        # intermission: Sbar_IntermissionOverlay's three stat rows -- completed
+        # time (m:ss), secrets found/total, monsters killed/total -- centered over
+        # the frozen end-of-level camera.
+        ist = self.sv.intermission_stats() if self.intermission else None
+        if ist:
+            mins, secs = divmod(ist["time"], 60)
+            panel = ("LEVEL COMPLETE\n\n"
+                     f"Time      {mins}:{secs:02d}\n"
+                     f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
+                     f"Kills     {ist['monsters']} / {ist['total_monsters']}")
+            overlays.append((w // 2, h // 3, panel, (255, 255, 0), "center"))
+
         cm = self.sv.center_msg
-        if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
+        if not ist and cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
             overlays.append((w // 2, h // 3, cm[0], (255, 255, 0), "center"))
 
         con = self.con

@@ -23,6 +23,7 @@ SPAWNFLAG_NOT_DEATHMATCH = 2048
 FL_FLY = 1
 FL_SWIM = 2
 FL_MONSTER = 32
+FL_ITEM = 256                     # "extra wide size for bonus items" (defs.qc)
 FL_ONGROUND = 512
 FL_PARTIALGROUND = 1024
 STEPSIZE = 18.0             # monsters step up/down ledges this tall (SV_movestep)
@@ -985,12 +986,30 @@ class Server:
         self._link_abs(e)
 
     def _link_abs(self, e):
-        """Maintain absmin/absmax = origin + mins/maxs (SV_LinkEdict's job)."""
+        """Maintain absmin/absmax = origin + mins/maxs (SV_LinkEdict's job), then
+        widen FL_ITEM bonus items by 15 on x/y, exactly as SV_LinkEdict (world.c)
+        does "to make items easier to pick up and allow them to be grabbed off of
+        shelves". Without it a shelf item whose trigger face is flush with a wall
+        (e1m1's nail ammo at 272,2352,64) is never reachable: the player's box
+        always stops a DIST_EPSILON fraction short of the trigger, so the AABB
+        overlap test in touch_triggers misses by a hair.
+
+        SV_LinkEdict also widens *non*-items by 1 on every axis (movement is
+        clipped an epsilon from real edges). We deliberately skip that: items are
+        SOLID_TRIGGER and never clip the player, but barrels/monsters are
+        SOLID_BBOX/SOLID_SLIDEBOX and solid_box_entities feeds their absmin/absmax
+        straight in as the *collision* box -- in Quake that widening only grows the
+        broadphase query (the narrow phase re-clips against true mins/maxs), so
+        applying it here would make the player bump them a unit early."""
         ox, oy, oz = self.vm.fget_v(e, self.f["origin"])
         mnx, mny, mnz = self.vm.fget_v(e, self.f["mins"])
         mxx, mxy, mxz = self.vm.fget_v(e, self.f["maxs"])
-        self.vm.fset_v(e, self.f["absmin"], (ox + mnx, oy + mny, oz + mnz))
-        self.vm.fset_v(e, self.f["absmax"], (ox + mxx, oy + mxy, oz + mxz))
+        amnx, amny, amnz = ox + mnx, oy + mny, oz + mnz
+        amxx, amxy, amxz = ox + mxx, oy + mxy, oz + mxz
+        if int(self.vm.fget_f(e, self.f["flags"])) & FL_ITEM:
+            amnx -= 15; amny -= 15; amxx += 15; amxy += 15
+        self.vm.fset_v(e, self.f["absmin"], (amnx, amny, amnz))
+        self.vm.fset_v(e, self.f["absmax"], (amxx, amxy, amxz))
 
     def _set_minmax(self, e, mins, maxs):
         self.vm.fset_v(e, self.f["mins"], mins)

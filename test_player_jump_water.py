@@ -63,6 +63,23 @@ def test_jump_debounce_no_pogo():
     assert _jump_step(ph, want_jump=True) > threshold, "re-press after release didn't jump"
 
 
+def test_jump_impulse_is_additive():
+    """PM_Jump does velocity[2] += 270, not = 270: jumping with existing upward
+    speed (e.g. off an ascending mover) keeps it. With a riser velocity the
+    resulting vertical speed must exceed a from-rest jump by about that amount."""
+    sv = _boot()
+    ph = sv.phys
+    riser = 100.0
+    origin = [480.0, -352.0, 88.0]
+    vel = [0.0, 0.0, riser]
+    ph.player_move(origin, vel, (0.0, 0.0, 0.0), 0.0,
+                   (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), 0.0, 0.0, 0.0, 320.0,
+                   True, True, 0.1)
+    from_rest = JUMPSPEED - GRAVITY * 0.1
+    assert vel[2] > from_rest + riser * 0.5, \
+        f"jump not additive: vel_z={vel[2]:.1f} (rest jump ~{from_rest:.1f})"
+
+
 def test_watermove_toggles_inwater_flag():
     sv = _boot()
     vm, f, p = sv.vm, sv.f, sv.player
@@ -85,5 +102,6 @@ def test_watermove_toggles_inwater_flag():
 
 if __name__ == "__main__":
     test_jump_debounce_no_pogo()
+    test_jump_impulse_is_additive()
     test_watermove_toggles_inwater_flag()
     print("OK")

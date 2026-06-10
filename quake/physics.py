@@ -676,11 +676,13 @@ class Physics:
 
         # Jump, debounced like the QC's FL_JUMPRELEASED: releasing the button arms
         # the next jump; a fired jump disarms it. Without this, holding jump
-        # re-fires every grounded frame (pogo-sticking), unlike Quake.
+        # re-fires every grounded frame (pogo-sticking), unlike Quake. The impulse
+        # is added to velocity_z (PM_Jump: "velocity[2] += 270"), not assigned, so
+        # jumping off a riser/ascending mover keeps that upward speed.
         if not want_jump:
             self.jump_released = True
         if want_jump and onground and self.jump_released:
-            vel[2] = JUMPSPEED
+            vel[2] += JUMPSPEED
             onground = False
             self.jump_released = False
 

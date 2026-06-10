@@ -10,9 +10,10 @@ Controls:
     left / right    turn          Space / C    up / down
     Space           jump (walk) / up (noclip)  Shift   move faster
     N               toggle noclip flight        Tab    toggle mouselook
-    F               toggle flat shading         Esc    release mouse / quit
+    F               toggle flat shading         1-8    select weapon
     Z               toggle z-buffer (textured)  T      toggle texturing
     P               toggle profiler HUD (per-frame section ms)
+    F1 or `         drop-down console           Esc    overlay menu (video / quit)
 
 This is a THIN tkinter frontend: it owns the window, the Tk canvas item pools and
 the WARP-based mouselook; all game logic lives in client.Client, which returns a
@@ -23,6 +24,7 @@ import ctypes
 import sys
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 
 from quake.render import ZBUF_SCALE
 from quake.perf import PROFILER
@@ -62,6 +64,64 @@ def look_delta(last, x, y, w, h, margin):
     if abs(dx) >= w // 2 - margin or abs(dy) >= h // 2 - margin:
         return (x, y), 0, 0          # cursor teleported by a recenter -- not input
     return (x, y), dx, dy
+
+
+def route_console_key(con, keysym, char):
+    """Map a tkinter key event onto the console line editor while it is open.
+    `keysym` is the event keysym (e.g. 'Return', 'BackSpace', 'a'); `char` is the
+    event char (the printable text, or '' for named keys). Drives the matching
+    con.key_* method and always returns True -- an open console swallows every
+    key so it never reaches the game. The tkinter twin of win_gdi._console_key."""
+    k = keysym.lower()
+    if k == "escape":
+        con.active = False
+    elif k in ("return", "kp_enter"):
+        con.key_enter()
+    elif k == "backspace":
+        con.key_backspace()
+    elif k == "delete":
+        con.key_delete()
+    elif k == "tab":
+        con.key_tab()
+    elif k == "left":
+        con.key_left()
+    elif k == "right":
+        con.key_right()
+    elif k == "home":
+        con.key_home()
+    elif k == "end":
+        con.key_end()
+    elif k == "up":
+        con.key_up()
+    elif k == "down":
+        con.key_down()
+    elif k in ("prior", "page_up"):
+        con.key_pageup()
+    elif k in ("next", "page_down"):
+        con.key_pagedown()
+    elif char and char >= " " and char != "\x7f":
+        con.key_char(char)               # printable text; con.key_char re-guards
+    return True
+
+
+def route_menu_key(menu, keysym):
+    """Map a tkinter keysym onto the overlay menu while it is open. Drives the
+    matching menu.key_* method and always returns True -- the menu swallows every
+    key. The tkinter twin of win_gdi._menu_key."""
+    k = keysym.lower()
+    if k == "escape":
+        menu.key_escape()
+    elif k == "up":
+        menu.key_up()
+    elif k == "down":
+        menu.key_down()
+    elif k == "left":
+        menu.key_left()
+    elif k == "right":
+        menu.key_right()
+    elif k in ("return", "kp_enter"):
+        menu.key_enter()
+    return True
 
 
 def _make_cursor_reassociator():
@@ -131,6 +191,35 @@ class App:
         self.statusbar = self.canvas.create_text(
             0, 0, anchor="sw", fill="#ffcc00", font=(HUD_FONT, 16, "bold"), text="")
 
+        # drop-down console + overlay menu (the gdi32 frontend's F1/Esc panels,
+        # ported to Tk canvas items). The Client owns the pure Console/Menu state
+        # and hands us a draw-ready view each frame (rf.console / rf.menu); these
+        # items are parked hidden until then. A monospace font object gives the
+        # cell metrics the caret and panel layout need.
+        self.con_font = tkfont.Font(family=HUD_FONT, size=11)
+        self.con_lh = self.con_font.metrics("linespace")
+        self.con_cw = self.con_font.measure("0")
+        self.con_panel = self.canvas.create_rectangle(
+            0, 0, 0, 0, fill="#101018", outline="", state="hidden")
+        self.con_edge = self.canvas.create_rectangle(
+            0, 0, 0, 0, fill="#00a046", outline="", state="hidden")
+        self.con_scroll = self.canvas.create_text(
+            0, 0, anchor="sw", fill="#c8dcc8", font=self.con_font, text="",
+            state="hidden")
+        self.con_input = self.canvas.create_text(
+            0, 0, anchor="nw", fill="#ffffff", font=self.con_font, text="",
+            state="hidden")
+        self.con_caret = self.canvas.create_rectangle(
+            0, 0, 0, 0, fill="#ffffff", outline="", state="hidden")
+        self.menu_panel = self.canvas.create_rectangle(
+            0, 0, 0, 0, fill="#101018", outline="", state="hidden")
+        self.menu_edge = self.canvas.create_rectangle(
+            0, 0, 0, 0, fill="#00a046", outline="", state="hidden")
+        self.menu_title = self.canvas.create_text(
+            0, 0, anchor="nw", fill="#ffff00", font=(HUD_FONT, 11, "bold"),
+            text="", state="hidden")
+        self.menu_rows = []          # per-row text items, grown on demand
+
         # frontend input state
         self.keys = set()
         self.mouselook = False
@@ -160,6 +249,11 @@ class App:
 
     def _input(self):
         """Build one frame of InputState from held keys + accumulators."""
+        # while a panel owns the keyboard, feed the game a do-nothing frame so the
+        # world keeps ticking (console `map`, menu resolution change) but the
+        # player neither moves nor fires. Mirrors win_gdi.build_input.
+        if self.client.con.active or self.client.menu.active:
+            return InputState(mouselook=False)
         keys = self.keys
         fwd = (("w" in keys or "up" in keys) -
                ("s" in keys or "down" in keys))
@@ -185,6 +279,9 @@ class App:
     def _click(self, e):
         # first click captures the mouse; while captured, hold to fire (button0).
         # The QC weapon frame handles per-weapon cadence, ammo and animation.
+        # A click into an open panel does nothing (the cursor is for typing/menus).
+        if self.client.con.active or self.client.menu.active:
+            return
         if not self.mouselook:
             self._set_mouselook(True)
         else:
@@ -195,11 +292,19 @@ class App:
 
     def _keydown(self, e):
         k = e.keysym.lower()
+        # F1 (or the Quake-style backtick, reliable where macOS eats F-keys)
+        # toggles the console open AND closed -- checked first so it always wins.
+        if k in ("f1", "grave"):
+            self._toggle_console()
+            return
+        if self.client.con.active:
+            route_console_key(self.client.con, e.keysym, e.char)
+            return
+        if self.client.menu.active:
+            route_menu_key(self.client.menu, e.keysym)
+            return
         if k == "escape":
-            if self.mouselook:
-                self._set_mouselook(False)
-            else:
-                self.root.destroy()
+            self._open_menu()         # opens the overlay menu (and releases mouse)
             return
         if k == "tab":
             self._set_mouselook(not self.mouselook)
@@ -243,6 +348,30 @@ class App:
             self._last_mouse = None
             self._warp_center()
 
+    def _toggle_console(self):
+        """F1 / backtick: open or close the drop-down console. Opening clears held
+        keys, releases the mouse so the cursor is free to type, and closes the
+        overlay menu so the two panels are never up at once. Mirrors
+        win_gdi._toggle_console."""
+        con = self.client.con
+        con.active = not con.active
+        if con.active:
+            self.client.menu.active = False
+            self._panel_opened()
+
+    def _open_menu(self):
+        """Esc (with the console closed): open the overlay video/quit menu, clearing
+        held keys and releasing the mouse. Mirrors win_gdi._open_menu."""
+        self.client.menu.active = True
+        self._panel_opened()
+
+    def _panel_opened(self):
+        """Shared setup when a console/menu panel takes the keyboard: drop held
+        movement keys, stop firing, and ungrab the mouse so the cursor is usable."""
+        self.keys.clear()
+        self.fire_key = False
+        self._set_mouselook(False)
+
     def _warp_center(self):
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
@@ -283,6 +412,9 @@ class App:
         self.last_t = now
         self.client.resize(self.canvas.winfo_width(), self.canvas.winfo_height())
         rf = self.client.frame(dt, self._input())
+        if self.client.quit_requested:        # console `quit`/`exit` or menu Quit
+            self.root.destroy()
+            return
         with PROFILER.section("present"):
             self._draw_frame(rf)
         PROFILER.frame_end()         # roll this frame's section times into the HUD readout
@@ -328,6 +460,10 @@ class App:
         self.canvas.tag_raise(self.crosshair)
         self.canvas.tag_raise(self.center_text)
         self.canvas.tag_raise(self.statusbar)
+
+        # console / menu panels draw on top of everything (or hide when closed)
+        self._draw_console(rf.console)
+        self._draw_menu(rf.menu)
 
     def _draw(self, segs):
         c = self.canvas
@@ -407,6 +543,85 @@ class App:
         self.canvas.itemconfig(self.fb_item, image=photo)
         self.fb_photo = photo            # keep a ref so Tk doesn't GC the pixels
         self.canvas.tag_lower(self.fb_item)
+
+    def _draw_console(self, console):
+        """Draw the drop-down console panel from the Client's view tuple
+        (lines, input_line, cursor_col), or hide it when None. A dark band across
+        the top ~40% of the window; scrollback bottom-aligned just above the
+        `] input` line; a caret bar at the cursor column. Mirrors
+        win_ui.draw_console (monospace cell metrics from self.con_font)."""
+        c = self.canvas
+        items = (self.con_panel, self.con_edge, self.con_scroll,
+                 self.con_input, self.con_caret)
+        if console is None:
+            for it in items:
+                c.itemconfig(it, state="hidden")
+            return
+        lines, input_line, cursor_col = console
+        w = c.winfo_width()
+        h = c.winfo_height()
+        lh, cw = self.con_lh, self.con_cw
+        panel_h = h * 2 // 5
+        iy = panel_h - lh - 4                 # top of the input line
+        c.coords(self.con_panel, 0, 0, w, panel_h)
+        c.coords(self.con_edge, 0, panel_h - 2, w, panel_h)
+        # scrollback: south-west anchored at the input top, so the block grows
+        # upward with the newest line resting just above the input line
+        c.coords(self.con_scroll, 6, iy)
+        c.itemconfig(self.con_scroll, text="\n".join(lines))
+        c.coords(self.con_input, 6, iy)
+        c.itemconfig(self.con_input, text=input_line)
+        cx = 6 + cursor_col * cw
+        c.coords(self.con_caret, cx, iy, cx + 1, iy + lh)
+        for it in items:
+            c.itemconfig(it, state="normal")
+            c.tag_raise(it)
+
+    def _draw_menu(self, view):
+        """Draw the overlay menu from the Client's view (title, rows), or hide it
+        when None. A centered dark panel: yellow title, one row per item, the
+        selected row '> '-prefixed and brightened. Mirrors win_ui.draw_menu; the
+        per-row text items grow on demand like the geometry pools."""
+        c = self.canvas
+        if view is None:
+            for it in (self.menu_panel, self.menu_edge, self.menu_title):
+                c.itemconfig(it, state="hidden")
+            for it in self.menu_rows:
+                c.itemconfig(it, state="hidden")
+            return
+        title, rows = view
+        w = c.winfo_width()
+        h = c.winfo_height()
+        lh = self.con_lh
+        panel_w = 360
+        panel_h = (len(rows) + 2) * lh + 24
+        x0 = (w - panel_w) // 2
+        y0 = (h - panel_h) // 2
+        c.coords(self.menu_panel, x0, y0, x0 + panel_w, y0 + panel_h)
+        c.coords(self.menu_edge, x0, y0 + panel_h - 2, x0 + panel_w, y0 + panel_h)
+        c.coords(self.menu_title, x0 + 16, y0 + 12)
+        c.itemconfig(self.menu_title, text=title, state="normal")
+        y = y0 + 12 + 2 * lh                 # rows start one blank line below title
+        for i, (label, value, selected) in enumerate(rows):
+            while i >= len(self.menu_rows):
+                self.menu_rows.append(c.create_text(
+                    0, 0, anchor="nw", font=self.con_font, text=""))
+            text = label if not value else f"{label}: {value}"
+            text = ("> " if selected else "  ") + text
+            item = self.menu_rows[i]
+            c.coords(item, x0 + 16, y)
+            c.itemconfig(item, text=text,
+                         fill="#ffffff" if selected else "#a0c8a0", state="normal")
+            y += lh
+        for j in range(len(rows), len(self.menu_rows)):
+            c.itemconfig(self.menu_rows[j], state="hidden")
+        c.itemconfig(self.menu_panel, state="normal")
+        c.itemconfig(self.menu_edge, state="normal")
+        # restack panel first (lowest), then title + rows on top (tag_raise on a
+        # still-hidden surplus row is harmless -- it stays hidden)
+        for it in (self.menu_panel, self.menu_edge, self.menu_title,
+                   *self.menu_rows):
+            c.tag_raise(it)
 
     def _park(self, pool, used, ncoords):
         """Move the first `used` items of a pool off-screen (on mode switch)."""

@@ -46,7 +46,7 @@ CL_BOBUP = 0.5
 VIDEO_MODES = [("Auto", None), ("80x40", (80, 40)), ("160x80", (160, 80)),
                ("240x160", (240, 160)), ("320x240", (320, 240)),
                ("640x480", (640, 480))]
-DEFAULT_VIDEO_RES = (320, 240)
+DEFAULT_VIDEO_RES = (240, 160)
 
 
 def view_origins(pos, view_height, forward, bob):
@@ -135,8 +135,9 @@ class Client:
             self.audio = win.WinmmBackend(self.mixer)
         # else: runs muted until a linux backend is added
 
-        # z-buffer mode blits a software framebuffer.
-        self.zbuf = False
+        # z-buffer mode blits a software framebuffer. Default on: the game boots
+        # straight into the textured software rasteriser.
+        self.zbuf = True
         self.textured = True            # texture-map world faces in z-buffer mode
         # filled-polygon (flat shading) mode flag
         self.flat = True

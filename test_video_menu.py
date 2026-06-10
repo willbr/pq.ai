@@ -31,11 +31,11 @@ def test_renderer_video_res_fixes_framebuffer():
     assert rend.zw == 320 and rend.zh == 240
 
 
-def test_client_default_video_res_is_320x240():
+def test_client_default_video_res_is_240x160():
     c = Client("e1m1")
-    assert c.video_res == (320, 240)
-    assert c.rend.video_res == (320, 240)
-    assert c.rend.zw == 320 and c.rend.zh == 240
+    assert c.video_res == (240, 160)
+    assert c.rend.video_res == (240, 160)
+    assert c.rend.zw == 240 and c.rend.zh == 160
 
 
 def test_set_video_res_rebuilds_buffer_immediately():
@@ -60,9 +60,9 @@ def test_menu_resolution_item_drives_client():
     c.resize(800, 600)
     # the first menu item is the Resolution choice, wired to set_video_res
     c.menu.selected = 0
-    c.menu.key_right()               # cycle off the default (320x240) to 640x480
-    assert c.video_res == (640, 480)
-    assert c.rend.zw == 640 and c.rend.zh == 480
+    c.menu.key_right()               # cycle off the default (240x160) to 320x240
+    assert c.video_res == (320, 240)
+    assert c.rend.zw == 320 and c.rend.zh == 240
 
 
 def test_tiny_resolutions_are_selectable():
@@ -77,7 +77,7 @@ def test_tiny_resolutions_are_selectable():
 
 if __name__ == "__main__":
     test_renderer_video_res_fixes_framebuffer()
-    test_client_default_video_res_is_320x240()
+    test_client_default_video_res_is_240x160()
     test_set_video_res_rebuilds_buffer_immediately()
     test_video_res_persists_across_map_change()
     test_menu_resolution_item_drives_client()

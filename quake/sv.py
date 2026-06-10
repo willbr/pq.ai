@@ -78,6 +78,7 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
 FL_CLIENT = 8
 SOLID_NOT = 0
 SOLID_TRIGGER = 1
+SOLID_BBOX = 2
 SOLID_SLIDEBOX = 3
 MOVETYPE_WALK = 3
 DAMAGE_AIM = 2
@@ -770,6 +771,27 @@ class Server:
             sub = int(mp[mi][1:])
             if sub < len(models):
                 out.append((models[sub]["headnodes"][1], vm.fget_v(num, forg), num))
+        return out
+
+    def solid_box_entities(self, ignore=None):
+        """Solid bounding-box entities (SOLID_BBOX barrels, SOLID_SLIDEBOX
+        monsters) as (absmin, absmax, edict), for clipping the player's movement.
+        Quake's SV_ClipToLinks clips a move against every solid edict, not just the
+        SOLID_BSP brush movers; this is what stops you walking through a barrel or a
+        grunt. `ignore` (the player) is skipped -- the player is itself
+        SOLID_SLIDEBOX and must not clip against itself."""
+        vm, f = self.vm, self.f
+        if self.bsp is None:
+            return []
+        famn, famx, fsol = f["absmin"], f["absmax"], f["solid"]
+        out = []
+        for num in range(1, vm.num_edicts):
+            if vm.free[num] or num == ignore:
+                continue
+            sol = int(vm.fget_f(num, fsol))
+            if sol != SOLID_BBOX and sol != SOLID_SLIDEBOX:
+                continue
+            out.append((vm.fget_v(num, famn), vm.fget_v(num, famx), num))
         return out
 
     def touch_impacts(self, edicts):

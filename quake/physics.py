@@ -36,6 +36,7 @@ PLAYER_MAXS_Z = 32.0    # player bounding box top, origin-relative
 # matches it exactly; other boxes (items rest with mins.z = 0) trace correctly
 # only after offsetting by clip_mins - their_mins.
 HULL1_CLIP_MINS = (-16.0, -16.0, -24.0)
+HULL1_CLIP_MAXS = (16.0, 16.0, 32.0)
 
 
 class Trace:
@@ -73,6 +74,13 @@ class Physics:
         # their submodel hulls were compiled at the closed position, so we trace in
         # the entity's local space (start/end minus its current origin).
         self.brush_entities = []
+        # solid bounding-box entities to clip the player against (SOLID_BBOX
+        # barrels, SOLID_SLIDEBOX monsters), as (expmin, expmax, edict). Quake's
+        # SV_Move clips a move against every solid edict, not just brush models;
+        # SV_HullForEntity turns a box solid into a temp box hull Minkowski-grown
+        # by the mover's own box, so the stored bounds are already expanded by the
+        # player clip box (see set_box_entities). Refreshed each frame by the host.
+        self.box_entities = []
         # edicts the player's move bumped this step (SV_Impact). Drained by the
         # host into the QC touch functions so walking into a button presses it.
         self.touched = set()
@@ -184,6 +192,69 @@ class Physics:
         """ents: list of (hull-1 headnode, origin) for solid brush models."""
         self.brush_entities = ents
 
+    def set_box_entities(self, ents):
+        """ents: list of (absmin, absmax, edict) for solid box entities (barrels,
+        monsters). Stored pre-expanded by the player clip box, the Minkowski grow
+        SV_HullForEntity applies for a box solid (hullmins = ent.mins - mover.maxs,
+        hullmaxs = ent.maxs - mover.mins): tracing the player *origin point*
+        through the grown box is equivalent to sweeping the player box against the
+        entity box. The expansion uses the hull-1 clip box, matching the single
+        player-sized hull this port traces every move through."""
+        self.box_entities = [
+            ([amn[i] - HULL1_CLIP_MAXS[i] for i in range(3)],
+             [amx[i] - HULL1_CLIP_MINS[i] for i in range(3)], ent)
+            for amn, amx, ent in ents]
+
+    def _trace_box(self, bmin, bmax, p1, p2):
+        """Clip segment p1->p2 against the axis-aligned box [bmin, bmax] (already
+        expanded by the mover box). Quake builds a 6-plane box hull and runs
+        SV_RecursiveHullCheck; this is the equivalent slab clip, keeping the same
+        DIST_EPSILON backoff so the player rests a hair off the face rather than
+        embedded. Returns a Trace (fraction/endpos/plane_normal/startsolid/
+        allsolid)."""
+        tr = Trace(p2)
+        tr.allsolid = False
+        enterfrac, leavefrac = -1.0, 1.0
+        startout = getout = False
+        clipnormal = None
+        # six faces: +axis (plane x = bmax) and -axis (plane x = bmin); `s` makes
+        # the signed distance positive when the point is *outside* that face.
+        for axis in range(3):
+            for s, pv, nrm in ((1.0, bmax[axis], axis), (-1.0, bmin[axis], axis)):
+                d1 = s * (p1[axis] - pv)
+                d2 = s * (p2[axis] - pv)
+                if d1 > 0:
+                    startout = True
+                if d2 > 0:
+                    getout = True
+                if d1 > 0 and d2 >= d1:
+                    return tr          # both ends outside this face, moving away
+                if d1 <= 0 and d2 <= 0:
+                    continue
+                if d1 > d2:            # crossing inward: an entry plane
+                    f = (d1 - DIST_EPSILON) / (d1 - d2)
+                    if f > enterfrac:
+                        enterfrac = f
+                        n = [0.0, 0.0, 0.0]
+                        n[nrm] = s
+                        clipnormal = tuple(n)
+                else:                  # crossing outward: an exit plane
+                    f = (d1 + DIST_EPSILON) / (d1 - d2)
+                    if f < leavefrac:
+                        leavefrac = f
+        if not startout:               # p1 began inside the box
+            tr.startsolid = True
+            if not getout:
+                tr.allsolid = True
+            return tr
+        if enterfrac < leavefrac and enterfrac > -1.0:
+            if enterfrac < 0.0:
+                enterfrac = 0.0
+            tr.fraction = enterfrac
+            tr.endpos = [p1[i] + enterfrac * (p2[i] - p1[i]) for i in range(3)]
+            tr.plane_normal = clipnormal
+        return tr
+
     def move(self, start, end, record=True, mins=None):
         """SV_Move: trace start->end (hull 1) against the world and every solid
         brush entity, returning the earliest impact. This is what makes
@@ -224,6 +295,25 @@ class Physics:
                     tr.ent = ent                # this entity blocked the move
             if record and tr.ent is not None:
                 self.touched.add(tr.ent)        # SV_Impact: bumped while moving
+        # Box solids (barrels, monsters) are the player path only: record=True is
+        # the player's own move; monster/item probes (record=False) keep the
+        # single-hull world-only trace they always had.
+        if record and self.box_entities:
+            for bmin, bmax, ent in self.box_entities:
+                bm = [bmin[i] - (offx, offy, offz)[i] for i in range(3)]
+                bx = [bmax[i] - (offx, offy, offz)[i] for i in range(3)]
+                t2 = self._trace_box(bm, bx, ls0, le0)
+                if t2.startsolid:
+                    tr.startsolid = True
+                    self.touched.add(ent)       # already overlapping it
+                if t2.allsolid:
+                    tr.allsolid = True
+                if t2.fraction < tr.fraction:
+                    tr.fraction = t2.fraction
+                    tr.endpos = list(t2.endpos)
+                    tr.plane_normal = t2.plane_normal
+                    tr.ent = ent
+                    self.touched.add(ent)       # SV_Impact: bumped while moving
         # back out of hull space: endpos += offset
         tr.endpos = [tr.endpos[0] + offx, tr.endpos[1] + offy, tr.endpos[2] + offz]
         return tr

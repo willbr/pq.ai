@@ -423,7 +423,22 @@ class Server:
             # nails/fireballs/gibs) trace their move and fire touch on impact.
             mt = int(vm.fget_f(num, mtf))
             if mt == MOVETYPE_PUSH:
-                self._push_move(num, dt)
+                # SV_Physics_Pusher: when the mover's move completes partway
+                # through this frame (its think is due), advance it by only the
+                # time left until then (nextthink - frame start), not the whole
+                # frame. Otherwise it overshoots its destination and carries its
+                # rider past the stop point; the think then snaps the mover back
+                # to the destination, leaving the rider embedded in it (allsolid,
+                # so it can't move or jump -- the stuck-on-lift bug).
+                nt = vm.fget_f(num, ntf)
+                movetime = dt
+                if 0.0 < nt <= self.time:
+                    movetime = nt - (self.time - dt)
+                    if movetime < 0.0:
+                        movetime = 0.0
+                    elif movetime > dt:
+                        movetime = dt
+                self._push_move(num, movetime)
             elif mt in _MOVE_PROJECTILE:
                 self._physics_toss(num, mt, dt)
             elif mt in _MOVE_INTEGRATE:

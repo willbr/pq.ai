@@ -93,7 +93,9 @@ class InputState:
 @dataclass
 class RenderFrame:
     """What Client.frame() returns; the frontend draws it. mode is 'wire'|'flat'|
-    'zbuf'. Exactly one of segs/polys/framebuffer is set per mode; framebuffer
+    'zbuf'|'wire_hidden'. Exactly one of segs/polys/framebuffer is set per mode
+    ('wire_hidden' uses polys, painted as background-filled green-outlined
+    polygons for hidden-line wireframe); framebuffer
     is (index_bytes, w, h) -- 8-bit palette indices the frontend expands via
     Client.palette (tk) or blits as an 8bpp palettised DIB (gdi32). overlays
     are (x, y, text, (r,g,b), anchor) with anchor in {'nw','center','sw'}.
@@ -138,6 +140,10 @@ class Client:
         self.textured = True            # texture-map world faces in z-buffer mode
         # filled-polygon (flat shading) mode flag
         self.flat = True
+        # wireframe hidden-line removal: when set, wire mode renders through the
+        # back-to-front (painter's) polygon path so walls occlude, instead of the
+        # edge-only X-ray wireframe. Toggled by the `wire_hidden` console cvar.
+        self.wire_hidden = False
 
         self.fps = 0.0
         # fire (button0) comes from two inputs -- the mouse and the Ctrl key --
@@ -384,6 +390,12 @@ class Client:
         con.register_cvar("zbuf_scale", self._zbuf_scale,
                           on_change=self._on_zbuf_scale,
                           help="textured rasteriser resolution divisor (1-16)")
+        con.register_cvar("wire_hidden", 0, on_change=self._on_wire_hidden,
+                          help="wireframe hidden-line removal (occlude walls): 0/1")
+
+    def _on_wire_hidden(self, cv):
+        self.wire_hidden = cv.as_bool()
+        self.con.print(f"wire_hidden {1 if self.wire_hidden else 0}")
 
     def _on_zbuf_scale(self, cv):
         v = max(1, min(16, cv.as_int()))
@@ -613,6 +625,7 @@ class Client:
 
         PROFILER.begin("render")
         segs = polys = framebuffer = None
+        render_mode = self.mode
         if self.mode == "zbuf":
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
             fbdata, leaf = self.rend.render_zbuffer(eye, self.yaw, self.pitch,
@@ -623,12 +636,18 @@ class Client:
                                                     time=self.sv.time)
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
-        elif self.mode == "flat":
+        elif self.mode == "flat" or self.wire_hidden:
+            # flat shading, or hidden-line wireframe: both want the back-to-front
+            # (painter's) polygon path so near faces occlude far ones. They differ
+            # only in how the frontend paints the polys (filled vs outlined), so
+            # tag the frame "wire_hidden" when it's the wireframe variant.
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
             polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
                                                   brush_ents, alias_ents, view_model,
                                                   bsp_ents, lightstyles=styles)
             nprim = len(polys)
+            if self.mode == "wire":
+                render_mode = "wire_hidden"
         else:
             segs, leaf = self.rend.render(eye, self.yaw, self.pitch,
                                           brush_ents, alias_ents, view_model,
@@ -646,8 +665,10 @@ class Client:
         w, h = self._view_wh
 
         overlays = []
+        prim_word = ("pixels" if render_mode == "zbuf" else
+                     "segs" if render_mode == "wire" else "polys")
         hud_str = (f"{self.fps:5.1f} fps   "
-                   f"{'pixels' if self.zbuf else 'polys' if self.flat else 'segs'} {nprim}   "
+                   f"{prim_word} {nprim}   "
                    f"leaf {leaf}   {movemode}   health {hp:.0f}\n"
                    f"pos {self.pos[0]:.0f} {self.pos[1]:.0f} {self.pos[2]:.0f}   "
                    f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
@@ -685,7 +706,7 @@ class Client:
 
         menu = self.menu.view() if self.menu.active else None
 
-        return RenderFrame(mode=self.mode, segs=segs, polys=polys,
+        return RenderFrame(mode=render_mode, segs=segs, polys=polys,
                            framebuffer=framebuffer, particles=particles,
                            overlays=overlays, crosshair=(w // 2, h // 2),
                            console=console, menu=menu)

@@ -174,6 +174,11 @@ class App:
             for _ in range(PREGROW_POLY)]
         self.polyfill = [None] * PREGROW_POLY
         self.poly_prev = 0
+        # hidden-line wireframe pool: background-filled, green-outlined polygons
+        # painted back-to-front (occludes walls). Opt-in via the wire_hidden cvar,
+        # so grown on demand rather than pre-allocated like the pools above.
+        self.hwpool = []
+        self.hw_prev = 0
         # point-sprite pool for particles (teleport fog, fireball trails)
         self.partpool = [self.canvas.create_rectangle(
             -10, -10, -8, -8, outline="", fill="#ffffff")
@@ -427,15 +432,23 @@ class App:
         if rf.mode == "wire":
             self._draw(rf.segs)
             self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
+            self._park(self.hwpool, self.hw_prev, 6); self.hw_prev = 0
             self.canvas.itemconfig(self.fb_item, state="hidden")
         elif rf.mode == "flat":
             self._draw_polys(rf.polys)
             self._park(self.pool, self.prev_n, 4); self.prev_n = 0
+            self._park(self.hwpool, self.hw_prev, 6); self.hw_prev = 0
+            self.canvas.itemconfig(self.fb_item, state="hidden")
+        elif rf.mode == "wire_hidden":
+            self._draw_wire_hidden(rf.polys)
+            self._park(self.pool, self.prev_n, 4); self.prev_n = 0
+            self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
             self.canvas.itemconfig(self.fb_item, state="hidden")
         else:                                # 'zbuf'
             self._draw_fb(rf.framebuffer)
             self._park(self.pool, self.prev_n, 4); self.prev_n = 0
             self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
+            self._park(self.hwpool, self.hw_prev, 6); self.hw_prev = 0
             self.canvas.itemconfig(self.fb_item, state="normal")
 
         self._draw_particles(rf.particles)
@@ -525,6 +538,25 @@ class App:
         for i in range(n, self.poly_prev):   # park surplus (degenerate triangle)
             coords(pool[i], -10, -10, -10, -10, -10, -10)
         self.poly_prev = n
+
+    def _draw_wire_hidden(self, polys):
+        """Hidden-line wireframe: paint each face as a background-filled (black),
+        green-outlined polygon back-to-front, so near faces occlude far ones
+        (painter's). polys is render_shaded's (flat_coords, color) list -- the
+        fill colour is ignored; every face uses the same black fill + green edge.
+        Like _draw_polys but with a fixed style and no per-poly fill caching."""
+        c = self.canvas
+        pool = self.hwpool
+        coords = c.coords
+        n = len(polys)
+        while len(pool) < n:
+            pool.append(c.create_polygon(-10, -10, -10, -10, -10, -10,
+                                         outline=LINE_COLOR, fill="#000000"))
+        for i in range(n):
+            coords(pool[i], *polys[i][0])
+        for i in range(n, self.hw_prev):     # park last frame's surplus
+            coords(pool[i], -10, -10, -10, -10, -10, -10)
+        self.hw_prev = n
 
     def _draw_fb(self, fbdata):
         """Expand the renderer's 8-bit palette-indexed framebuffer to RGB via a

@@ -441,6 +441,9 @@ def run(mapname):
             elif rf.mode == "wire":
                 blitter.present_vector(rf.segs, None, rf.particles, cw, ch,
                                        texts=texts)
+            elif rf.mode == "wire_hidden":
+                blitter.present_vector(None, rf.polys, rf.particles, cw, ch,
+                                       texts=texts, hidden=True)
             else:   # "flat"
                 blitter.present_vector(None, rf.polys, rf.particles, cw, ch,
                                        texts=texts)

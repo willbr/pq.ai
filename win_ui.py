@@ -461,10 +461,13 @@ class GdiBlitter:
         self._mem_dc = self._mem_bmp = self._mem_oldbmp = None
         self._mem_wh = (0, 0)
 
-    def present_vector(self, segs, polys, particles, dst_w, dst_h, texts=()):
+    def present_vector(self, segs, polys, particles, dst_w, dst_h, texts=(),
+                       hidden=False):
         """Draw one wireframe ('segs') or flat-shaded ('polys') frame, plus
         particles and HUD text, into an off-screen memory DC, then BitBlt it to the
-        window in one shot (no flicker). Exactly one of segs/polys is non-None."""
+        window in one shot (no flicker). Exactly one of segs/polys is non-None.
+        With `hidden`, `polys` are drawn as hidden-line wireframe (black fill +
+        green outline) instead of flat-shaded fills."""
         g, u = self.gdi32, self.user32
         hdc = u.GetDC(self.hwnd)
         if not hdc:
@@ -476,6 +479,8 @@ class GdiBlitter:
             u.FillRect(memdc, ctypes.byref(r), self._black_brush)
             if segs is not None:
                 self._draw_segs(memdc, segs)
+            elif polys is not None and hidden:
+                self._draw_wire_hidden_gdi(memdc, polys)
             elif polys is not None:
                 self._draw_polys_gdi(memdc, polys)
             self._draw_particles_gdi(memdc, particles)
@@ -615,6 +620,26 @@ class GdiBlitter:
             g.Polygon(hdc, pts, n)
             g.SelectObject(hdc, oldbrush)
             g.DeleteObject(brush)
+        g.SelectObject(hdc, oldpen)
+
+    def _draw_wire_hidden_gdi(self, hdc, polys):
+        """Hidden-line wireframe: each render_shaded poly (flat, color) drawn as a
+        black-filled, green-outlined polygon. Painted back-to-front, near faces
+        occlude far ones. Mirrors _draw_polys_gdi but with the cached wire pen and
+        black brush (the fill colour is ignored)."""
+        g = self.gdi32
+        oldpen = g.SelectObject(hdc, self._wire_pen)
+        oldbrush = g.SelectObject(hdc, self._black_brush)
+        for flat, _color in polys:
+            n = len(flat) // 2
+            if n < 3:
+                continue
+            pts = (wintypes.POINT * n)()
+            for i in range(n):
+                pts[i].x = int(flat[2 * i])
+                pts[i].y = int(flat[2 * i + 1])
+            g.Polygon(hdc, pts, n)
+        g.SelectObject(hdc, oldbrush)
         g.SelectObject(hdc, oldpen)
 
     def _draw_particles_gdi(self, hdc, particles):

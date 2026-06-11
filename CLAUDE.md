@@ -22,7 +22,10 @@ python setup.py                 # fetch shareware data + GPL reference source (o
 python main.py e1m1             # run the game (gdi32 on Windows, tkinter elsewhere)
 python main.py --tk e1m1        # force tkinter on Windows  (e1m1..e1m8, or "start")
 python test_pushmove.py         # run one test (prints "OK", or asserts)
-for t in test_*.py; do python "$t"; done   # run all tests
+export PQ_AUDIO=0; for t in test_*.py; do python "$t"; done   # run all tests
+# PQ_AUDIO=0 skips the OS audio backend: headless/sandboxed runs otherwise
+# segfault nondeterministically in the CoreAudio callback thread (often after
+# printing OK). test_zbuffer_raster.py needs goldens (--regen once).
 ```
 
 There is **no build step, no linter, no pytest**. Each `test_*.py` is a standalone script

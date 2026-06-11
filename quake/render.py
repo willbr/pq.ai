@@ -913,21 +913,49 @@ class Renderer:
         tmin_i = int(tmin)
         soff = smin_i % tw
         reps = (soff + cw + tw - 1) // tw
-        # Blocky lightmap, faithful to WinQuake's D_CacheSurface /
-        # R_DrawSurfaceBlock: each 16-texel luxel cell takes one flat shade from
-        # its luxel, so each cell is lit in a single C-level bytes.translate
-        # through that luxel's colormap row. (The span renderer is the structural
-        # port; the lighting matches id's blocky 16-unit blocks.)
+        # Bilinear light interpolation across each 16-texel luxel block, matching
+        # WinQuake's R_DrawSurfaceBlock8_mip0: the light steps linearly down the
+        # block's left/right edges and across each row, so every texel reads its
+        # own interpolated colormap row -- a smooth gradient, not a flat per-block
+        # shade. Light is fixed point with the colormap row in the high byte
+        # (row == light >> 8); lf maps a 0..255 luxel to that space so
+        # (light & 0xFF00) + pix indexes the colormap exactly as id does. The
+        # `* frac >> 4` form keeps light within [0, 63<<8] at every texel.
+        # A block row with no horizontal gradient (left == right -- the common
+        # case on evenly-lit surfaces) is lit in one C-level bytes.translate
+        # through its colormap row. A gradient row is lit in four 4-texel
+        # sub-cells, each flat-shaded from the light at its centre: that is 4x
+        # finer than id's 16-texel blocks (smooth at the rasteriser's resolution)
+        # while staying C-level (four translates, not a per-texel colormap index),
+        # so animated/dlit surfaces still rebuild cheaply.
+        lf = [(255 - v) << 6 for v in lux]             # luxel -> fixed-point light
+        last_r = lmh - 1
         for tc in range(ch):
             trow = ((tmin_i + tc) % th) * tw
             tiled = (tex[trow:trow + tw] * reps)[soff:soff + cw]
-            r0 = (tc >> 4) * lmw
-            obase = tc * cw
+            fy = tc & 15
+            rb = (tc >> 4) * lmw
+            rb1 = (tc >> 4) * lmw + (lmw if tc >> 4 < last_r else 0)
+            # vertical-interpolate every luxel column once for this row, then read
+            # adjacent columns as each block's left/right edge (no recomputation)
+            col = [lf[rb + lc] + ((lf[rb1 + lc] - lf[rb + lc]) * fy >> 4)
+                   for lc in range(lmw)]
+            o = tc * cw
             for lc in range(lmw):
-                bright = lux[r0 + lc]                  # nearest luxel, no blend
-                tab = rows[(255 - bright) >> 2]
-                s = lc << 4
-                out[obase + s:obase + s + 16] = tiled[s:s + 16].translate(tab)
+                left = col[lc]
+                right = col[lc + 1] if lc + 1 < lmw else left
+                lrow = left >> 8
+                if lrow == right >> 8:                  # one colormap row: one translate
+                    out[o:o + 16] = tiled[lc << 4:(lc << 4) + 16].translate(rows[lrow])
+                else:
+                    diff = right - left                 # row changes: 4-texel cells
+                    s = lc << 4
+                    for sub in range(4):
+                        light = left + (diff * (sub * 4 + 2) >> 4)   # cell centre
+                        out[o:o + 4] = tiled[s:s + 4].translate(rows[light >> 8])
+                        o += 4; s += 4
+                    continue
+                o += 16
         ent = (cw, ch, out, tex)
         self._surf_cache_bytes += len(out)
         if self._surf_cache_bytes > 64 * 1024 * 1024:   # crude bound: flush all

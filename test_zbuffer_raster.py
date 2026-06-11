@@ -166,9 +166,13 @@ def _real_lm_face(r):
 
 
 def test_surface_cache_matches_direct_math():
-    # cache texel (sc, tc) must be the texture's palette index (wrapped at
-    # smin+sc, tmin+tc) mapped through the colormap row for the luxel covering
-    # it: row (255-lux)>>2, row 0 brightest (id's R_BuildLightMap inversion).
+    # cache texel (sc, tc) is the texture's palette index (wrapped at smin+sc,
+    # tmin+tc) mapped through the BILINEARLY interpolated colormap row for that
+    # texel (render.py _surface_cache, mirroring R_DrawSurfaceBlock8_mip0): the
+    # light is interpolated between the four corner luxels of the 16-texel block;
+    # a block row that stays in one colormap row is flat, otherwise the row comes
+    # from the light at the texel's 4-texel sub-cell centre. row (255-lux)>>2,
+    # row 0 brightest (id's R_BuildLightMap inversion).
     _b, r = _renderer()
     fi = _real_lm_face(r)
     rec = r.face_tex[fi]
@@ -178,11 +182,25 @@ def test_surface_cache_matches_direct_math():
     assert cw == lmw * 16 and ch == lmh * 16, (cw, ch, lmw, lmh)
     cmap = r.colormap
     smin_i, tmin_i = int(smin), int(tmin)
+
+    def expect_row(sc, tc):
+        lc = sc >> 4; lc1 = lc + 1 if lc + 1 < lmw else lc
+        br = tc >> 4; br1 = br + 1 if br + 1 < lmh else br
+        fy = tc & 15
+        lf = lambda lr, cc: (255 - lux[lr * lmw + cc]) << 6
+        a, c = lf(br, lc), lf(br1, lc)
+        b, d = lf(br, lc1), lf(br1, lc1)
+        left = a + ((c - a) * fy >> 4)
+        right = b + ((d - b) * fy >> 4)
+        if left >> 8 == right >> 8:
+            return left >> 8
+        sub = (sc & 15) >> 2                       # 4-texel sub-cell, centre light
+        return (left + ((right - left) * (sub * 4 + 2) >> 4)) >> 8
+
     for sc, tc in ((0, 0), (1, 0), (15, 0), (16, 0), (cw - 1, ch - 1),
                    (cw // 2, ch // 2), (3, ch - 1)):
-        sh = lux[(tc >> 4) * lmw + (sc >> 4)]
         ti = tex[((tmin_i + tc) % th) * tw + ((smin_i + sc) % tw)]
-        assert cache[tc * cw + sc] == cmap[((255 - sh) >> 2) * 256 + ti], (sc, tc)
+        assert cache[tc * cw + sc] == cmap[expect_row(sc, tc) * 256 + ti], (sc, tc)
 
 
 def test_surface_cache_reuse_and_invalidation():

@@ -2326,6 +2326,54 @@ class Renderer:
         def leaf_bkey(li2):
             return leaf_key[li2] if leaf_keyframe[li2] == frame else far_key
 
+        def emit_brush_frag(wp, fi, rec, bkey):
+            # world-space fragment (wx,wy,wz,s,t) -> camera space -> span engine.
+            cam = []
+            for wx, wy, wz, s, t in wp:
+                dx, dy, dz = wx - ox, wy - oy, wz - oz
+                cam.append((dx * rx + dy * ry + dz * rz,
+                            dx * ux + dy * uy + dz * uz,
+                            dx * fx + dy * fy + dz * fz, s, t))
+            if rec is not None:
+                emit_face(fi, cam, rec, bkey)
+            else:
+                emit_flat([(c[0], c[1], c[2]) for c in cam], face_color_idx[fi], bkey)
+
+        def clip_bpoly(wp, num, fi, rec):
+            # R_RecursiveClipBPoly: split the bmodel face against the world BSP,
+            # emitting each fragment with the key of the leaf it lands in -- so a
+            # brush face spanning several leaves sorts correctly against the world
+            # in each. Clipping is done in world space (verts pre-offset).
+            if num < 0:
+                li2 = -num - 1
+                if leaf_keyframe[li2] == frame and leafs[li2][0] != -2:
+                    emit_brush_frag(wp, fi, rec, leaf_key[li2])
+                return
+            if node_visframe[num] != frame:
+                return
+            planenum, children, _, _ = nodes[num]
+            (nx, ny, nz), dist, _ = planes[planenum]
+            front = []; back = []
+            a = wp[-1]
+            da = a[0] * nx + a[1] * ny + a[2] * nz - dist
+            for b in wp:
+                db = b[0] * nx + b[1] * ny + b[2] * nz - dist
+                if da >= 0.0:
+                    front.append(a)
+                else:
+                    back.append(a)
+                if (da >= 0.0) != (db >= 0.0):
+                    tt = da / (da - db)
+                    mid = (a[0] + (b[0] - a[0]) * tt, a[1] + (b[1] - a[1]) * tt,
+                           a[2] + (b[2] - a[2]) * tt, a[3] + (b[3] - a[3]) * tt,
+                           a[4] + (b[4] - a[4]) * tt)
+                    front.append(mid); back.append(mid)
+                a, da = b, db
+            if len(front) >= 3:
+                clip_bpoly(front, children[0], fi, rec)
+            if len(back) >= 3:
+                clip_bpoly(back, children[1], fi, rec)
+
         # brush-model entities (doors, lifts, buttons), each offset to its origin
         if self.brushmodels:
             if brush_ents is None:
@@ -2339,19 +2387,15 @@ class Renderer:
                 if not self.box_in_pvs(mins, maxs, vis):
                     continue
                 # Key the bmodel into the world's BSP order so its surfaces sort
-                # correctly against the world (R_DrawBEntitiesOnList). If the box
-                # lands wholly in one leaf, every face inherits that leaf's key;
-                # if it straddles, it must be BSP-clipped per-fragment (Stage 3).
+                # correctly against the world (R_DrawBEntitiesOnList). Wholly in
+                # one leaf -> every face inherits that leaf's key (no clip). Else
+                # the topnode is a node and each face is BSP-clipped per-fragment.
                 tn = world_topnode(mins, maxs)
                 if tn is None:
                     continue
-                if tn[0] == "leaf":
-                    bkey = leaf_bkey(tn[1])
-                else:
-                    cl = self.point_leaf(((mins[0] + maxs[0]) * 0.5,
-                                          (mins[1] + maxs[1]) * 0.5,
-                                          (mins[2] + maxs[2]) * 0.5))
-                    bkey = leaf_bkey(cl)
+                clip = tn[0] == "node"
+                bkey = 0 if clip else leaf_bkey(tn[1])
+                topnum = tn[1]
                 ff = md["firstface"]
                 for fi in range(ff, ff + md["numfaces"]):
                     if face_frame[fi] == frame:
@@ -2365,26 +2409,19 @@ class Renderer:
                     if rec is not None:
                         (s0, s1, s2, s3) = rec[3]
                         (t0, t1, t2, t3) = rec[4]
-                        pts = []
-                        for vi in face_verts[fi]:
-                            vx, vy, vz = vertexes[vi]
-                            dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
-                            # UVs use the model-local vertex (texture rides the brush)
-                            pts.append((dx * rx + dy * ry + dz * rz,
-                                        dx * ux + dy * uy + dz * uz,
-                                        dx * fx + dy * fy + dz * fz,
-                                        vx * s0 + vy * s1 + vz * s2 + s3,
-                                        vx * t0 + vy * t1 + vz * t2 + t3))
-                        emit_face(fi, pts, rec, bkey)
+                        # world-space polygon; UVs from the model-local vertex
+                        # (the texture rides the brush as it moves)
+                        wp = [(vx + ofx, vy + ofy, vz + ofz,
+                               vx * s0 + vy * s1 + vz * s2 + s3,
+                               vx * t0 + vy * t1 + vz * t2 + t3)
+                              for vx, vy, vz in (vertexes[vi] for vi in face_verts[fi])]
                     else:
-                        pts = []
-                        for vi in face_verts[fi]:
-                            vx, vy, vz = vertexes[vi]
-                            dx, dy, dz = vx + ofx - ox, vy + ofy - oy, vz + ofz - oz
-                            pts.append((dx * rx + dy * ry + dz * rz,
-                                        dx * ux + dy * uy + dz * uz,
-                                        dx * fx + dy * fy + dz * fz))
-                        emit_flat(pts, face_color_idx[fi], bkey)
+                        wp = [(vx + ofx, vy + ofy, vz + ofz, 0.0, 0.0)
+                              for vx, vy, vz in (vertexes[vi] for vi in face_verts[fi])]
+                    if clip:
+                        clip_bpoly(wp, topnum, fi, rec)
+                    else:
+                        emit_brush_frag(wp, fi, rec, bkey)
         # resolve world + brush occlusion in one scanline sweep, then fill each
         # surviving span (write-only -- the stack already ordered them).
         for surf in edges.scan():

@@ -17,27 +17,15 @@ NORMAL = 0
 SKY = 1
 TURB = 2
 
-# Coplanar hysteresis for the surface-stack 1/z tie-break. render.py keys every
-# surface by its BSP order (R_RecursiveWorldNode for the world; the leaf the
-# bmodel is clipped into for brush models), so the stack orders by key and the
-# 1/z compare only breaks ties between *same-key* surfaces -- exactly the case
-# WinQuake's ~1% fudge handles (r_edge.c:493). We use a much smaller band here:
-# same-key surfaces are co-located, so a surface must be nearer by more than this
-# fraction to displace the current top; truly-coplanar pairs (1/z differing only
-# by float-eval noise) fall below it and resolve to the incumbent
-# deterministically -- which keeps coplanar lift/wall surfaces from flickering
-# (the span sweep is already deterministic frame-to-frame, no per-pixel ties).
-NEARZI_EPS = 1e-4
-
-
 class Surf:
-    __slots__ = ("key", "flags", "zi", "fill", "next", "prev",
+    __slots__ = ("key", "flags", "zi", "insubmodel", "fill", "next", "prev",
                  "spanstate", "last_u", "spans")
 
-    def __init__(self, key=0, flags=NORMAL, zi=(0.0, 0.0, 0.0)):
+    def __init__(self, key=0, flags=NORMAL, zi=(0.0, 0.0, 0.0), insubmodel=False):
         self.key = key
         self.flags = flags
         self.zi = zi              # (z00, zdx, zdy): 1/z at (x=0,y=0) and per-px steps
+        self.insubmodel = insubmodel  # brush-model surface (id's insubmodel flag)
         self.fill = None          # opaque handle render.py attaches
         self.next = self.prev = None
         self.spanstate = 0
@@ -62,6 +50,7 @@ class EdgeRaster:
     def __init__(self, width, height):
         self.width = width
         self.height = height
+        self.insubmodel = False           # id's global: set while emitting bmodels
         self.newedges = [None] * height   # newedges[y] = u-sorted list of Edge
         self.removeedges = [None] * height
 
@@ -69,13 +58,14 @@ class EdgeRaster:
         # background sentinel: always bottom of the stack, key larger than any
         # real surface so nothing sorts under it.
         self.surfaces = []
+        self.insubmodel = False
         self.bg = Surf(key=0x7FFFFFFF, flags=NORMAL)
         for y in range(self.height):
             self.newedges[y] = None
             self.removeedges[y] = None
 
     def add_surface(self, key, flags, zi_plane, screen_poly):
-        surf = Surf(key=key, flags=flags, zi=zi_plane)
+        surf = Surf(key=key, flags=flags, zi=zi_plane, insubmodel=self.insubmodel)
         self.surfaces.append(surf)
         self._emit_edges(surf, screen_poly)
         return surf
@@ -204,7 +194,7 @@ class EdgeRaster:
                     sl.last_u = u
                 else:                                # insert sl below the top
                     cur = top
-                    while cur.next is not None and self._nearer(cur.next, sl, fu, fv):
+                    while cur.next is not None and not self._nearer(sl, cur.next, fu, fv):
                         cur = cur.next
                     sl.next = cur.next
                     sl.prev = cur
@@ -231,22 +221,30 @@ class EdgeRaster:
         self._close_span(top, w, v)
 
     def _nearer(self, surf, other, fu, fv):
-        # True if `surf` should sit above `other` at sweep x=fu, row fv. Smaller
-        # key = nearer in BSP order; equal keys (coplanar brush vs world) fall to
-        # a 1/z compare with id's ~1% fudge for hysteresis (r_edge.c:488).
+        # True if the NEW surface `surf` goes in front of the already-active
+        # `other` at sweep x=fu, row fv -- id's R_LeadingEdge insert compare.
+        # Smaller key = nearer in BSP order. Equal keys are coplanar pairs:
+        # for world surfaces the already-active one is in front (no 1/z look);
+        # for brush models (two bmodels in the same leaf -- e.g. the e1m1 door
+        # halves) sort on 1/z with id's 1% fudge, an exact tie falling to the
+        # d_zistepu compare, which favours the new surface (r_edge.c:482-510).
         sk = surf.key
         ok = other.key
         if sk < ok:
             return True
         if sk > ok:
             return False
+        if not surf.insubmodel:
+            return False                  # coplanar world: incumbent in front
         z00, zdx, zdy = surf.zi
         t00, tdx, tdy = other.zi
         newzi = z00 + zdx * fu + zdy * fv
-        topzi = t00 + tdx * fu + tdy * fv
-        # nearer by more than the coplanar band displaces; within it, the
-        # incumbent (already on top) stays -- deterministic, no z-fight.
-        return newzi > topzi * (1.0 + NEARZI_EPS)
+        testzi = t00 + tdx * fu + tdy * fv
+        if newzi * 0.99 >= testzi:        # clearly nearer: new on top
+            return True
+        if newzi * 1.01 >= testzi:        # within the fudge: d_zistepu tie-break
+            return zdx >= tdx
+        return False
 
     def _close_span(self, surf, u, v):
         if surf.spanstate and surf is not self.bg and u > surf.last_u:

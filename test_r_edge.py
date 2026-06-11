@@ -69,8 +69,9 @@ def test_surface_fully_behind_emits_nothing_in_covered_area():
 def test_coplanar_equal_key_tiebreak_picks_nearer():
     er = EdgeRaster(64, 64)
     er.begin_frame()
-    # same key (coplanar brush-vs-world), same rect; A is 1% nearer than B.
-    # The fudge must let the nearer one win deterministically -- the lift case.
+    # same key (two bmodels in one leaf), same rect; B is 10% nearer than A.
+    # The 1/z sort must let the nearer one win deterministically.
+    er.insubmodel = True
     er.add_surface(15, NORMAL, (0.50, 0.0, 0.0),
                    [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
     A = er.surfaces[-1]
@@ -91,7 +92,8 @@ def test_near_but_distinct_brush_orders_exactly():
     # "func walls and lifts z-order all broken" bug.
     er = EdgeRaster(64, 64)
     er.begin_frame()
-    er.add_surface(0, NORMAL, (0.0100, 0.0, 0.0),       # world wall, added first
+    er.insubmodel = True
+    er.add_surface(0, NORMAL, (0.0100, 0.0, 0.0),       # bmodel wall, added first
                    [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
     er.add_surface(0, NORMAL, (0.01005, 0.0, 0.0),      # func_wall ~0.5% nearer
                    [(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)])
@@ -126,6 +128,33 @@ def test_coplanar_is_stable_and_deterministic():
     assert (r1[0] == 0) != (r1[1] == 0), ("coplanar overlap not cleanly owned", r1)
 
 
+def test_coplanar_bmodel_overlap_new_surface_wins():
+    # Two *exactly* coplanar brush-model surfaces with the same key, partially
+    # overlapping -- the e1m1 door halves, whose interlocking-teeth front faces
+    # share one plane and one world leaf. WinQuake sorts same-key bmodels on 1/z
+    # with a 1% fudge; an exact tie falls to `d_zistepu >=` (r_edge.c:506), which
+    # puts the surface whose leading edge the sweep meets LATER on top. The old
+    # incumbent-wins epsilon gave the overlap to the earlier surface, hiding the
+    # later door half's tooth border.
+    er = EdgeRaster(64, 64)
+    er.begin_frame()
+    er.insubmodel = True
+    er.add_surface(7, NORMAL, (0.02, 0.0, 0.0),
+                   [(0.0, 0.0), (30.0, 0.0), (30.0, 40.0), (0.0, 40.0)])
+    a = er.surfaces[-1]
+    er.add_surface(7, NORMAL, (0.02, 0.0, 0.0),
+                   [(20.0, 0.0), (50.0, 0.0), (50.0, 40.0), (20.0, 40.0)])
+    b = er.surfaces[-1]
+    er.insubmodel = False
+    er.scan()
+    a_by_row = {v: (u, n) for (u, v, n) in a.spans}
+    b_by_row = {v: (u, n) for (u, v, n) in b.spans}
+    for v in range(0, 40):
+        assert b_by_row.get(v) == (20, 30), \
+            (v, b_by_row.get(v), "later bmodel must own the coplanar overlap")
+        assert a_by_row.get(v) == (0, 20), (v, a_by_row.get(v))
+
+
 def test_offscreen_clamped():
     er = EdgeRaster(32, 32)
     er.begin_frame()
@@ -144,5 +173,6 @@ if __name__ == "__main__":
     test_coplanar_equal_key_tiebreak_picks_nearer()
     test_near_but_distinct_brush_orders_exactly()
     test_coplanar_is_stable_and_deterministic()
+    test_coplanar_bmodel_overlap_new_surface_wins()
     test_offscreen_clamped()
     print("OK")

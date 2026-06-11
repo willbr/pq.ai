@@ -238,9 +238,11 @@ The renderer now ports id's real key machinery faithfully:
   (`R_DrawSubmodelPolygons`). Straddling a plane → each face is recursively
   clipped against the world BSP in world space (`R_RecursiveClipBPoly`) and every
   fragment is emitted with the key of the leaf it lands in.
-- **Tie-break** — the surface stack orders by key; `NEARZI_EPS` 1/z hysteresis
-  only resolves same-key (coplanar) ties, which keeps the lift/wall shimmer away
-  with no depth bias.
+- **Tie-break** — the surface stack orders by key; same-key (coplanar) ties
+  follow id's `R_LeadingEdge` exactly: world surfaces keep the already-active
+  one in front, brush models sort on 1/z with the 1% fudge and the `d_zistepu`
+  compare on exact ties (so overlapping coplanar door halves — the e1m1
+  interlocking teeth — resolve like WinQuake). No depth bias, no shimmer.
 
 Verified against the pre-span per-pixel z-buffer renderer (commit 440aa3b) as an
 oracle: occlusion now matches it (residual diffs are edge/texture rasterisation

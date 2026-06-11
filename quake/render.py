@@ -1931,10 +1931,10 @@ class Renderer:
         # fill closure (attached to the surface) that the scan() pass calls per
         # span. The fill is write-only -- no `if iz > zb[idx]` test -- because the
         # surface stack already resolved occlusion; it still WRITES 1/z so alias
-        # models / particles drawn afterward occlude against the world. All world
-        # and brush surfaces share key 0, so the stack orders them purely by 1/z
-        # with the NEARZI_EPS coplanar tie-break (r_edge.c:488) -- which fixes
-        # coplanar lift/wall shimmer deterministically (no per-pixel float ties).
+        # models / particles drawn afterward occlude against the world. Surfaces
+        # are keyed by BSP order (R_RecursiveWorldNode below); the stack orders by
+        # key, same-key ties resolving per id's R_LeadingEdge (world: incumbent in
+        # front; bmodels: 1/z with the 1% fudge) -- deterministic, no z-fighting.
         edges = self.edges
 
         def emit_cached(pts, sc, csmin, ctmin, key=0):
@@ -2411,6 +2411,9 @@ class Renderer:
 
         # brush-model entities (doors, lifts, buttons), each offset to its origin
         if self.brushmodels:
+            edges.insubmodel = True      # id's insubmodel flag: same-key coplanar
+            # bmodel pairs (e.g. interlocking door halves) sort on 1/z, not
+            # incumbent-first like world surfaces (R_LeadingEdge, r_edge.c:487)
             if brush_ents is None:
                 brush_ents = [(i, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0)
                               for i in range(1, len(bsp.models))]
@@ -2457,6 +2460,7 @@ class Renderer:
                         clip_bpoly(wp, topnum, fi, rec)
                     else:
                         emit_brush_frag(wp, fi, rec, bkey)
+            edges.insubmodel = False
         # resolve world + brush occlusion in one scanline sweep, then fill each
         # surviving span (write-only -- the stack already ordered them).
         for surf in edges.scan():

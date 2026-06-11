@@ -88,6 +88,31 @@ class _SoundRecorder:
         self.samples.append(sample)
 
 
+def test_jump_plays_sound():
+    """client.qc PlayerJump plays sound(self, CHAN_BODY, "player/plyrjmp8.wav",
+    1, ATTN_NORM). The engine owns the jump impulse, so it must also own the
+    sound: exactly one per hop -- held jump (debounced) and jumpless frames
+    stay silent."""
+    from client import Client, InputState
+    c = Client("e1m1")
+    rec = _SoundRecorder()
+    c.sv.snd = rec
+
+    def jumps():
+        return len([s for s in rec.samples if s == "player/plyrjmp8.wav"])
+
+    c.onground = True
+    c._move(0.1, InputState(move_up=1.0))           # press: jump fires
+    assert jumps() == 1, "no jump sound on jump"
+    c.onground = True
+    c._move(0.1, InputState(move_up=1.0))           # held: debounced, no hop
+    assert jumps() == 1, "jump sound re-fired while held"
+    c.onground = True
+    c._move(0.1, InputState())                      # release re-arms
+    c._move(0.1, InputState(move_up=1.0))           # airborne press: no hop
+    assert jumps() == 1, "jump sound played while airborne"
+
+
 def test_no_drowning_gasp_on_spawn():
     """A freshly spawned player is on dry land with a full lungful of air, so the
     first WaterMove must not play the drowning gasp. (PutClientInServer sets
@@ -124,6 +149,7 @@ def test_watermove_toggles_inwater_flag():
 if __name__ == "__main__":
     test_jump_debounce_no_pogo()
     test_jump_impulse_is_additive()
+    test_jump_plays_sound()
     test_no_drowning_gasp_on_spawn()
     test_watermove_toggles_inwater_flag()
     print("OK")

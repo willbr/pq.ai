@@ -100,6 +100,7 @@ class Physics:
         # "don't pogo stick"). The flag is set whenever the jump button is up and
         # cleared when a jump fires, so holding jump yields exactly one hop.
         self.jump_released = True
+        self.jumped = False         # last player_move fired the jump impulse
 
     @property
     def gravity(self):
@@ -733,12 +734,14 @@ class Physics:
         # re-fires every grounded frame (pogo-sticking), unlike Quake. The impulse
         # is added to velocity_z (PM_Jump: "velocity[2] += 270"), not assigned, so
         # jumping off a riser/ascending mover keeps that upward speed.
+        self.jumped = False
         if not want_jump:
             self.jump_released = True
         if want_jump and onground and self.jump_released:
             vel[2] += JUMPSPEED
             onground = False
             self.jump_released = False
+            self.jumped = True      # host plays the PlayerJump sound off this
 
         if waterlevel <= 1:                 # no gravity while swimming
             vel[2] -= self.gravity * dt

@@ -633,6 +633,12 @@ class Client:
             self.pos, self.vel, wishdir, wishspeed,
             forward, right, fwd * speed, strafe * speed, upmove, speed,
             self.onground, jump, step)
+        if self.phys.jumped and self.sv.player:
+            # the engine owns the jump impulse, so it owns the QC's sound too:
+            # client.qc PlayerJump sound(self, CHAN_BODY, "player/plyrjmp8.wav",
+            # 1, ATTN_NORM); CHAN_BODY is 4
+            self.sv._start_sound(self.sv.player, 4, "player/plyrjmp8.wav",
+                                 1.0, 1.0)
 
     # ---- render-state toggles (shared by the hotkeys and the console) ----
     def _set_player_movetype(self, mt):

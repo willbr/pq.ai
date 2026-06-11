@@ -262,6 +262,12 @@ class Client:
                 self.mixer.precache(name, self.pak.read(snd_path))
         for name, pos, vol, atten in self.sv.ambients:
             self.mixer.start_sound(0, 0, name, vol, atten, pos, loop=True)
+        # the engine's own ambient loops (S_Init precaches these): water/sky
+        # levels come from the listener leaf each frame (update_ambients)
+        for name in snd.AMBIENT_SOUNDS:
+            snd_path = "sound/" + name
+            if snd_path in self.pak.files:
+                self.mixer.precache(name, self.pak.read(snd_path))
         self.sv.snd = self.mixer
 
         # player origin from the level's spawn point (eye sits VIEW_HEIGHT above)
@@ -953,6 +959,10 @@ class Client:
                                           bsp_ents, roll=vroll)
             nprim = len(segs)
         PROFILER.end("render")
+
+        # ambient loops follow the listener leaf (S_UpdateAmbientSounds)
+        if 0 <= leaf < len(self.bsp.leaf_ambients):
+            self.mixer.update_ambients(self.bsp.leaf_ambients[leaf], dt)
 
         particles = self._particle_sprites(eye)
 

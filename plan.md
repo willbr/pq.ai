@@ -108,7 +108,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
 
 ## Tier 3 — smaller fidelity gaps
 
-### 3.1 Audio
+### 3.1 Audio — DONE (CD music still absent; channel-0 rule was already correct)
 - Done: spatialization, attenuation, per-entity channel replace
   (`snd.py:155-205`).
 - Missing: dedicated ambient channels gated by leaf contents (water/sky

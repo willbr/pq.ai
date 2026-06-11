@@ -70,9 +70,12 @@ class Bsp:
         # node: (planenum, (child0,child1), firstface, numfaces)
         self.nodes = [(n[0], (n[1], n[2]), n[9], n[10])
                       for n in _S_NODE.iter_unpack(lump(NODES))]
-        # leaf: (contents, visofs, firstmark, nummark)
-        self.leafs = [(l[0], l[1], l[8], l[9])
-                      for l in _S_LEAF.iter_unpack(lump(LEAFS))]
+        # leaf: (contents, visofs, firstmark, nummark); the qbsp-baked ambient
+        # sound levels (water, sky, slime, lava bytes) kept alongside for
+        # S_UpdateAmbientSounds
+        leaves = list(_S_LEAF.iter_unpack(lump(LEAFS)))
+        self.leafs = [(l[0], l[1], l[8], l[9]) for l in leaves]
+        self.leaf_ambients = [(l[10], l[11], l[12], l[13]) for l in leaves]
         self.marksurfaces = [m[0] for m in _S_MARK.iter_unpack(lump(MARKSURFACES))]
         self.visdata = lump(VISIBILITY)
         self.lightdata = lump(LIGHTING)        # 8-bit luxels, indexed by lightofs

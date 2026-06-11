@@ -74,6 +74,11 @@ def _decode_wav(data):
     return out
 
 
+AMBIENT_SOUNDS = ("ambience/water1.wav", "ambience/wind2.wav")
+AMBIENT_LEVEL = 0.3         # ambient_level cvar: peak ambient volume
+AMBIENT_FADE = 100.0 / 255  # ambient_fade cvar: volume ramp per second
+
+
 class Mixer:
     def __init__(self):
         self.sounds = {}                    # name -> array('h')
@@ -82,6 +87,7 @@ class Mixer:
         self.listener = (0.0, 0.0, 0.0)
         self.right = (0.0, 1.0, 0.0)
         self.ok = False                     # a backend flips this on once live
+        self._ambients = [None, None]       # dedicated water/sky loop voices
 
     # ---- the realtime mix (called by the platform backend) ------------------
     def mix(self, nframes):
@@ -174,14 +180,48 @@ class Mixer:
                 self.channels = [c for c in self.channels
                                  if not (c["ent"] == ent and c["chan"] == channel)]
             if len(self.channels) >= MAX_CHANNELS:
-                self.channels.pop(0)        # steal the oldest voice
+                # steal the oldest voice, but never a dedicated ambient
+                for i, c in enumerate(self.channels):
+                    if c not in self._ambients:
+                        self.channels.pop(i)
+                        break
             self.channels.append(ch)
+
+    def update_ambients(self, levels, dt):
+        """S_UpdateAmbientSounds: ramp the dedicated water/sky loops toward
+        the listener leaf's qbsp-baked ambient levels (0-255 bytes), at the
+        ambient fade rate -- water murmurs near water, wind under sky."""
+        if not self.ok:
+            return
+        for i, name in enumerate(AMBIENT_SOUNDS):
+            target = AMBIENT_LEVEL * (min(255, levels[i]) / 255.0)
+            ch = self._ambients[i]
+            if ch is None:
+                if target <= 0.0:
+                    continue
+                s = self.sounds.get(name)
+                if s is None:
+                    continue
+                ch = {"samples": s, "pos": 0, "lv": 0, "rv": 0, "loop": True,
+                      "ent": -1, "chan": -1, "origin": None, "vol": 0.0,
+                      "atten": 0.0, "done": False}
+                self._ambients[i] = ch
+                with self.lock:
+                    self.channels.append(ch)
+            vol = ch["vol"]
+            if vol < target:
+                vol = min(target, vol + AMBIENT_FADE * dt)
+            elif vol > target:
+                vol = max(target, vol - AMBIENT_FADE * dt)
+            ch["vol"] = vol
+            ch["lv"] = ch["rv"] = int(vol * MASTER_VOL * 256)
 
     def stop_all(self):
         if not self.ok:
             return
         with self.lock:
             self.channels = []
+            self._ambients = [None, None]
 
     # ---- spatialization (Quake SND_Spatialize) ------------------------------
     def _spatialize(self, origin, vol, atten):

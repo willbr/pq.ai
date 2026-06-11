@@ -119,6 +119,12 @@ IT_NAILS = 512
 IT_ROCKETS = 1024
 IT_CELLS = 2048
 IT_AXE = 4096
+IT_KEY1 = 131072            # silver key
+IT_KEY2 = 262144            # gold key
+IT_INVISIBILITY = 524288
+IT_INVULNERABILITY = 1048576
+IT_SUIT = 2097152
+IT_QUAD = 4194304
 _WEAPON_NAMES = {
     IT_AXE: "Axe", IT_SHOTGUN: "Shotgun", IT_SUPER_SHOTGUN: "Super Shotgun",
     IT_NAILGUN: "Nailgun", IT_SUPER_NAILGUN: "Super Nailgun",
@@ -1912,6 +1918,14 @@ class Server:
             return None
         vm, f, e = self.vm, self.f, self.player
         g = lambda n: int(vm.fget_f(e, f[n]))
+        items = g("items")
+        keys = " ".join(name for bit, name in
+                        ((IT_KEY1, "silver key"), (IT_KEY2, "gold key"))
+                        if items & bit)
+        powerups = " ".join(name for bit, name in
+                            ((IT_INVISIBILITY, "ring"), (IT_INVULNERABILITY,
+                             "pent"), (IT_SUIT, "suit"), (IT_QUAD, "quad"))
+                            if items & bit)
         return {
             "health": g("health"),
             "armor": g("armorvalue"),
@@ -1921,6 +1935,8 @@ class Server:
             "nails": g("ammo_nails"),
             "rockets": g("ammo_rockets"),
             "cells": g("ammo_cells"),
+            "keys": keys,
+            "powerups": powerups,
         }
 
     def view_weapon(self):

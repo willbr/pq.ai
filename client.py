@@ -933,8 +933,10 @@ class Client:
         st = self.sv.hud_status()
         if st:
             status_rgb = (255, 64, 64) if st["health"] <= 25 else (255, 204, 0)
+            carried = "  ".join(s for s in (st["keys"], st["powerups"]) if s)
             status_str = (f"HEALTH {st['health']:3d}    ARMOR {st['armor']:3d}    "
-                          f"{st['weapon']}: {st['ammo']:3d}\n"
+                          f"{st['weapon']}: {st['ammo']:3d}"
+                          + (f"    [{carried}]" if carried else "") + "\n"
                           f"shells {st['shells']:3d}  nails {st['nails']:3d}  "
                           f"rockets {st['rockets']:3d}  cells {st['cells']:3d}")
             overlays.append((10, h - 8, status_str, status_rgb, "sw"))

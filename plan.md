@@ -101,7 +101,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
   recoil, landing dip. Done: view bob (`client.py:814`), death camera and
   intermission camera (`client.py:608-626`).
 
-### 2.6 HUD information gaps
+### 2.6 HUD information gaps — DONE
 - Text health/armor/ammo works (`client.py:696`), but there is no
   keys/sigils/items readout — you cannot see whether you hold the silver/gold
   key. That's gameplay information, not just sbar.c cosmetics.

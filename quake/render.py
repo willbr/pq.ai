@@ -216,6 +216,14 @@ VIEWMODEL_ZSCALE = 3.0
 # screen (a half of 0 is a single pixel).
 PARTICLE_ZBUF_RADIUS = 2.0
 PARTICLE_ZBUF_MAX = 3
+# Coplanar brush-model faces (a lift/door flush with the wall it slides across)
+# tie with the world face in the float z-buffer and shimmer. WinQuake's span
+# renderer breaks the tie categorically -- the bmodel wins (r_edge.c:357) -- and
+# even id's bmodel-vs-bmodel case nudges 1/z by a fudge (r_edge.c:493). Bias the
+# bmodel depth by a hair so it wins coplanar ties deterministically; the margin
+# is tiny, so geometry genuinely behind a surface (depth gap >> 0.1%) is
+# unaffected. (The real fix is the span renderer; this is the documented stopgap.)
+BMODEL_ZSCALE = 1.001
 
 
 def _bsp_texture_colors(bsp, palette):
@@ -1879,7 +1887,7 @@ class Renderer:
                         voz += vdx
                 y += 1
 
-        def raster_poly_cached(cam, surf, csmin, ctmin):
+        def raster_poly_cached(cam, surf, csmin, ctmin, zscale=1.0):
             # lit-surface-cached convex polygon: like raster_poly_tex but the
             # texture x lightmap product was precomputed by _surface_cache, so
             # the pixel body is one perspective divide, one fetch, one store.
@@ -1910,9 +1918,10 @@ class Renderer:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)
                 sy.append(hh - cy * focal * iz)
-                siz.append(iz)
-                suz.append((u - csmin) * iz)   # cache-space u/z
-                svz.append((v - ctmin) * iz)
+                ziz = iz * zscale              # depth biased; cancels in u,v
+                siz.append(ziz)
+                suz.append((u - csmin) * ziz)  # cache-space u/z
+                svz.append((v - ctmin) * ziz)
             grads = plane_gradients(sx, sy, (siz, suz, svz))
             if grads is None:
                 return
@@ -1995,10 +2004,12 @@ class Renderer:
                         voz += vdx
                 y += 1
 
-        def emit_face(fi, pts, rec):
+        def emit_face(fi, pts, rec, zscale=1.0):
             # dispatch a world/brush face to the right sampler: warped liquid,
             # scrolled sky, the lit-surface cache (real lightmaps -- nearly all
             # world geometry), or per-pixel lightmap sampling as the fallback.
+            # zscale biases the z-buffer depth (>1 for moving brush models, so a
+            # lift flush with a wall wins the coplanar tie instead of shimmering).
             if face_turb[fi]:
                 raster_poly_tex_turb(pts, rec)
             elif face_sky[fi]:
@@ -2006,14 +2017,14 @@ class Renderer:
                 # (no doubling); falls back to the raw miptex if it wasn't split.
                 tile = sky_tiles.get(face_sky_mt[fi])
                 srec = (tile[0], tile[1], tile[2], rec[3], rec[4]) if tile else rec
-                raster_poly_tex(pts, srec, face_lm[fi])
+                raster_poly_tex(pts, srec, face_lm[fi], zscale)
             else:
                 lm = face_lm[fi]
                 if lm[5]:
                     raster_poly_cached(pts, self._surface_cache(fi, rec),
-                                       lm[2], lm[3])
+                                       lm[2], lm[3], zscale)
                 else:
-                    raster_poly_tex(pts, rec, lm)
+                    raster_poly_tex(pts, rec, lm, zscale)
 
         def raster_alias(mdl, verts, org, ang, zscale=1.0):
             # rotate model verts into world, transform to camera, flat-shade each
@@ -2191,7 +2202,7 @@ class Renderer:
                                         dx * fx + dy * fy + dz * fz,
                                         vx * s0 + vy * s1 + vz * s2 + s3,
                                         vx * t0 + vy * t1 + vz * t2 + t3))
-                        emit_face(fi, pts, rec)
+                        emit_face(fi, pts, rec, BMODEL_ZSCALE)
                     else:
                         pts = []
                         for vi in face_verts[fi]:
@@ -2200,7 +2211,7 @@ class Renderer:
                             pts.append((dx * rx + dy * ry + dz * rz,
                                         dx * ux + dy * uy + dz * uz,
                                         dx * fx + dy * fy + dz * fz))
-                        raster_poly(pts, face_color_idx[fi])
+                        raster_poly(pts, face_color_idx[fi], BMODEL_ZSCALE)
 
         # alias (.mdl) entities -- monsters, items
         if alias_ents:

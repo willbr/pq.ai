@@ -79,12 +79,24 @@ class EdgeRaster:
         # becomes one Edge stepping u by du/dv per row. WinQuake R_EmitEdge.
         h = self.height
         n = len(poly)
+        # Normalise winding: a leading (left) edge has the polygon interior to
+        # its right. Which screen direction that is depends on the polygon's
+        # winding, which BSP faces don't guarantee after projection -- so derive
+        # it from the signed area instead of assuming. ccw True => up-going edges
+        # (start y > end y) are leading; False => down-going are leading.
+        area = 0.0
+        for i in range(n):
+            ax, ay = poly[i]
+            bx, by = poly[(i + 1) % n]
+            area += ax * by - bx * ay
+        ccw = area > 0.0
         for i in range(n):
             ax, ay = poly[i]
             bx, by = poly[(i + 1) % n]
             if ay == by:
                 continue                      # horizontal edge: no scanlines
-            leading = ay > by                 # downward in screen-space reveals surf
+            going_up = ay > by
+            leading = going_up if ccw else (not going_up)
             if ay > by:
                 ax, ay, bx, by = bx, by, ax, ay   # order top (small y) -> bottom
             ytop = int(math.ceil(ay - 0.5))
@@ -131,4 +143,118 @@ class EdgeRaster:
             lst.append(e)
 
     def scan(self):
-        raise NotImplementedError   # Task 2
+        """R_ScanEdges: sweep top->bottom, maintain a u-sorted active edge list
+        and a surface stack sorted by key (1/z tie-break on equal keys), emitting
+        one span per (top-of-stack surface, run-of-u). Returns the surfaces in the
+        order they were added, each with its .spans populated."""
+        active = []                       # u-sorted active edges this scanline
+        newedges = self.newedges
+        removeedges = self.removeedges
+        for v in range(self.height):
+            new = newedges[v]
+            if new is not None:
+                active.extend(new)
+                active.sort(key=_edge_u)
+            self._generate_spans(active, v)
+            rem = removeedges[v]
+            if rem is not None:
+                rset = set(map(id, rem))
+                active = [e for e in active if id(e) not in rset]
+            for e in active:
+                e.u += e.u_step
+            active.sort(key=_edge_u)       # full re-sort handles edge crossings
+        return self.surfaces
+
+    def _generate_spans(self, active, v):
+        # Walk active edges left->right. `top` is the nearest surface currently
+        # covering the sweep position; `bg` sits permanently underneath. A leading
+        # edge inserts its surface into the depth-sorted stack (becoming the new
+        # top if nearer); a trailing edge removes it. Each time the top changes,
+        # the old top's span [last_u, u) is closed and the new top's opened.
+        # R_GenerateSpans + R_LeadingEdge/R_TrailingEdge.
+        bg = self.bg
+        bg.next = bg.prev = None
+        bg.spanstate = 1
+        bg.last_u = 0
+        top = bg
+        w = self.width
+        fv = float(v)
+        for e in active:
+            fu = e.u
+            u = int(fu + 0.5)
+            if u < 0:
+                u = 0
+            elif u > w:
+                u = w
+            sl = e.surf_lead
+            if sl is not None:
+                if self._nearer(sl, top, fu, fv):
+                    self._close_span(top, u, v)     # sl becomes the new top
+                    sl.prev = None
+                    sl.next = top
+                    top.prev = sl
+                    top = sl
+                    sl.last_u = u
+                else:                                # insert sl below the top
+                    cur = top
+                    while cur.next is not None and self._nearer(cur.next, sl, fu, fv):
+                        cur = cur.next
+                    sl.next = cur.next
+                    sl.prev = cur
+                    if cur.next is not None:
+                        cur.next.prev = sl
+                    cur.next = sl
+                sl.spanstate = 1
+            st = e.surf_trail
+            if st is not None:
+                if top is st:                        # the visible surface ends
+                    self._close_span(st, u, v)
+                    top = st.next if st.next is not None else bg
+                    top.prev = None
+                    top.last_u = u
+                else:                                # a hidden surface ends
+                    p = st.prev
+                    nx = st.next
+                    if p is not None:
+                        p.next = nx
+                    if nx is not None:
+                        nx.prev = p
+                st.spanstate = 0
+                st.next = st.prev = None
+        self._close_span(top, w, v)
+
+    def _nearer(self, surf, other, fu, fv):
+        # True if `surf` should sit above `other` at sweep x=fu, row fv. Smaller
+        # key = nearer in BSP order; equal keys (coplanar brush vs world) fall to
+        # a 1/z compare with id's ~1% fudge for hysteresis (r_edge.c:488).
+        sk = surf.key
+        ok = other.key
+        if sk < ok:
+            return True
+        if sk > ok:
+            return False
+        z00, zdx, zdy = surf.zi
+        t00, tdx, tdy = other.zi
+        newzi = z00 + zdx * fu + zdy * fv
+        topzi = t00 + tdx * fu + tdy * fv
+        return newzi * NEARZI_FUDGE >= topzi
+
+    def _close_span(self, surf, u, v):
+        if surf.spanstate and surf is not self.bg and u > surf.last_u:
+            surf.spans.append((surf.last_u, v, u - surf.last_u))
+        surf.last_u = u
+
+
+def _edge_u(e):
+    return e.u
+
+
+if __name__ == "__main__":
+    er = EdgeRaster(32, 32)
+    er.begin_frame()
+    er.add_surface(5, NORMAL, (0.5, 0.0, 0.0),
+                   [(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)])
+    surfs = er.scan()
+    total = sum(len(s.spans) for s in surfs)
+    assert total > 0, "no spans"
+    print("OK", total, "spans")

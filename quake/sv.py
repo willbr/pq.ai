@@ -42,6 +42,7 @@ STEPSIZE = 18.0             # monsters step up/down ledges this tall (SV_moveste
 DI_NODIR = -1.0            # SV_NewChaseDir: "no direction"
 SOLID_BSP = 4
 MOVETYPE_NONE = 0
+MOVETYPE_STEP = 4           # walking monsters: freefall only when unsupported
 MOVETYPE_FLY = 5
 MOVETYPE_TOSS = 6
 MOVETYPE_PUSH = 7
@@ -51,6 +52,7 @@ MOVETYPE_BOUNCE = 10
 SV_GRAVITY = 800.0          # sv_gravity default, scaled per-entity by .gravity
 CONTENTS_EMPTY = -1
 CONTENTS_SOLID = -2
+CONTENTS_WATER = -3
 
 SVC_TEMPENTITY = 23         # broadcast effect message (gunshots, teleport fog, ...)
 # temp-entity type -> (palette colour, particle count, velocity spread u/s).
@@ -458,6 +460,8 @@ class Server:
                     elif movetime > dt:
                         movetime = dt
                 self._push_move(num, movetime)
+            elif mt == MOVETYPE_STEP:
+                self._physics_step(num, dt)
             elif mt in _MOVE_PROJECTILE:
                 self._physics_toss(num, mt, dt)
             elif mt in _MOVE_INTEGRATE:
@@ -562,6 +566,7 @@ class Server:
         vm.fset_v(num, forg, endpos)
         self._link_abs(num)
         if frac >= 1.0:
+            self.check_water_transition(num)
             return                              # flew the whole way, no contact
 
         self._sv_impact(num, hit)               # explode / wound on impact
@@ -578,6 +583,75 @@ class Server:
             vm.fset_i(num, f["groundentity"], hit)
             vm.fset_v(num, fvel, (0.0, 0.0, 0.0))
             vm.fset_v(num, favel, (0.0, 0.0, 0.0))
+        self.check_water_transition(num)
+
+    def _physics_step(self, num, dt):
+        """SV_Physics_Step: a walking monster freefalls only while nothing
+        supports it -- QC's T_Damage strips FL_ONGROUND and adds velocity for
+        knockback, and this integrates it until the monster lands (with the
+        thud of a hard fall). Locomotion itself comes from walkmove/movetogoal,
+        and the think runs from run_frame's shared dispatch."""
+        if self.phys is None:
+            return                  # no collision world (headless/test boot)
+        vm, f = self.vm, self.f
+        flags = int(vm.fget_f(num, f["flags"]))
+        if not (flags & (FL_ONGROUND | FL_FLY | FL_SWIM)):
+            vx, vy, vz = vm.fget_v(num, f["velocity"])
+            hitsound = vz < -0.1 * SV_GRAVITY
+            gs = (f["gravity"] is not None and vm.fget_f(num, f["gravity"])) or 1.0
+            vel = [vx, vy, vz - SV_GRAVITY * gs * dt]
+            # SV_FlyMove, reduced to the falling case: slide along whatever the
+            # box hits, ground out on a floor plane (n.z > 0.7)
+            org = list(vm.fget_v(num, f["origin"]))
+            time_left = dt
+            for _ in range(4):
+                if time_left <= 0.0 or not (vel[0] or vel[1] or vel[2]):
+                    break
+                end = [org[i] + vel[i] * time_left for i in range(3)]
+                tr = self._box_move(num, org, end)
+                if tr.allsolid:
+                    vel = [0.0, 0.0, 0.0]
+                    break
+                org = list(tr.endpos)
+                if tr.fraction >= 1.0:
+                    break
+                time_left *= 1.0 - tr.fraction
+                n = tr.plane_normal or (0.0, 0.0, 1.0)
+                if n[2] > 0.7:                  # landed
+                    flags |= FL_ONGROUND
+                    vm.fset_f(num, f["flags"], float(flags))
+                    vm.fset_i(num, f["groundentity"],
+                              tr.ent if tr.ent is not None else 0)
+                vel = self.phys.clip_velocity(vel, n, 1.0)
+            vm.fset_v(num, f["origin"], tuple(org))
+            vm.fset_v(num, f["velocity"], tuple(vel))
+            self._link_abs(num)
+            if (flags & FL_ONGROUND) and hitsound:
+                self._start_sound(num, 0, "demon/dland2.wav", 1.0, 1.0)
+        self.check_water_transition(num)
+
+    def check_water_transition(self, num):
+        """SV_CheckWaterTransition: stamp .watertype/.waterlevel from the point
+        contents at the origin, splashing when the entity crosses into or out
+        of a liquid (projectiles and falling monsters hitting water)."""
+        if self.phys is None:
+            return
+        vm, f = self.vm, self.f
+        cont = self.phys.point_contents_0(vm.fget_v(num, f["origin"]))
+        wt = int(vm.fget_f(num, f["watertype"]))
+        if wt == 0:                             # just spawned: no transition
+            vm.fset_f(num, f["watertype"], float(cont))
+            vm.fset_f(num, f["waterlevel"], 1.0)
+        elif cont <= CONTENTS_WATER:
+            if wt == CONTENTS_EMPTY:            # crossed into water
+                self._start_sound(num, 0, "misc/h2ohit1.wav", 1.0, 1.0)
+            vm.fset_f(num, f["watertype"], float(cont))
+            vm.fset_f(num, f["waterlevel"], 1.0)
+        else:
+            if wt != CONTENTS_EMPTY:            # crossed out of water
+                self._start_sound(num, 0, "misc/h2ohit1.wav", 1.0, 1.0)
+            vm.fset_f(num, f["watertype"], float(CONTENTS_EMPTY))
+            vm.fset_f(num, f["waterlevel"], float(cont))
 
     def _push_move(self, num, dt):
         """SV_PushMove (WinQuake sv_phys.c): advance a brush mover by velocity*dt,
@@ -1214,21 +1288,22 @@ class Server:
             self.gset_f("skill", float(self.skill))
 
     # --- sound ---
-    def _pf_sound(self):
-        # sound(entity e, float chan, string sample, float vol, float atten)
+    def _start_sound(self, ent, chan, sample, vol, atten):
+        """SV_StartSound from engine code (landing thuds, splashes): emit from
+        the entity's bbox center, like the sound() builtin."""
         if self.snd is None:
             return
-        ent = self.vm.parm_i(0)
-        chan = int(self.vm.parm_f(1))
-        sample = self.vm.parm_str(2)
-        vol = self.vm.parm_f(3)
-        atten = self.vm.parm_f(4)
-        # Quake SV_StartSound emits from the entity's bbox center
         ox, oy, oz = self.vm.fget_v(ent, self.f["origin"])
         nx, ny, nz = self.vm.fget_v(ent, self.f["mins"])
         xx, xy, xz = self.vm.fget_v(ent, self.f["maxs"])
         origin = (ox + 0.5 * (nx + xx), oy + 0.5 * (ny + xy), oz + 0.5 * (nz + xz))
         self.snd.start_sound(ent, chan, sample, vol, atten, origin)
+
+    def _pf_sound(self):
+        # sound(entity e, float chan, string sample, float vol, float atten)
+        self._start_sound(self.vm.parm_i(0), int(self.vm.parm_f(1)),
+                          self.vm.parm_str(2), self.vm.parm_f(3),
+                          self.vm.parm_f(4))
 
     def _pf_ambientsound(self):
         # ambientsound(vector pos, string sample, float vol, float atten):

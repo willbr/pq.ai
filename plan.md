@@ -50,7 +50,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
 - Fix: route to `phys` hull-0 point contents (the machinery already exists —
   physics uses it for the player).
 
-### 1.5 Save/load games
+### 1.5 Save/load games — DONE
 - Nothing corresponding to `Host_Savegame_f`/`Host_Loadgame_f`
   (host_cmd.c:465-684, `ED_Write`/`ED_ParseGlobals`/`ED_ParseEdict`).
 - Combined with 1.1, every session is one map run.

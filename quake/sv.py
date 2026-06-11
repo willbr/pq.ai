@@ -1674,6 +1674,121 @@ class Server:
         self._exec_named("SetChangeParms", self.player)
         return [self.gget_f(f"parm{i}") for i in range(1, 17)]
 
+    # ---- savegames (Host_Savegame_f / Host_Loadgame_f, host_cmd.c) ----
+    def _format_value(self, etype, ival, fvals):
+        """PR_UglyValueString: one value as savegame text. etype is the def
+        type: 1 string, 2 float, 3 vector, 4 entity, 5 field, 6 function."""
+        if etype == 1:
+            return self.pr.string(ival)
+        if etype == 2:
+            return f"{fvals[0]:.6f}"
+        if etype == 3:
+            return f"{fvals[0]:.6f} {fvals[1]:.6f} {fvals[2]:.6f}"
+        if etype == 4:
+            return str(ival)
+        if etype == 5:
+            for name, d in self.pr.field_by_name.items():
+                if d[1] == ival:
+                    return name
+            return ""
+        if etype == 6 and 0 <= ival < len(self.pr.functions):
+            return self.pr.functions[ival].name
+        return ""
+
+    def save_text(self):
+        """The body of a .sav file, laid out like Host_Savegame_f writes it:
+        version, comment, 16 spawn parms, skill, map name, time, 64 lightstyle
+        lines, then ED_WriteGlobals' block and one block per edict (free slots
+        are empty {} blocks)."""
+        out = ["5"]                                     # SAVEGAME_VERSION
+        kills = (f"kills:{int(self.gget_f('killed_monsters')):3d}/"
+                 f"{int(self.gget_f('total_monsters')):3d}")
+        out.append(f"{self.mapname} {kills}"[:39])
+        parms = self.spawn_parms or [0.0] * 16
+        out.extend(f"{parms[i]:.6f}" for i in range(16))
+        out.append(f"{float(self.cvars.get('skill', self.skill)):.6f}")
+        name = self.mapname
+        if name.startswith("maps/"):
+            name = name[len("maps/"):]
+        if name.endswith(".bsp"):
+            name = name[:-len(".bsp")]
+        out.append(name)
+        out.append(f"{self.time:.6f}")
+        out.extend(self.lightstyles.get(i) or "m" for i in range(64))
+
+        out.append("{")                                 # ED_WriteGlobals
+        for etype, ofs, gname, save in self.pr.globaldefs:
+            if not save or etype not in (1, 2, 4):
+                continue
+            val = self._format_value(etype, self.pr.gi[ofs], (self.pr.gf[ofs],))
+            out.append(f'"{gname}" "{val}"')
+        out.append("}")
+
+        for e in range(self.vm.num_edicts):             # ED_Write each edict
+            out.append("{")
+            if not self.vm.free[e]:
+                for etype, ofs, fname, _save in self.pr.fielddefs:
+                    if not fname or (len(fname) > 2 and fname[-2] == "_"):
+                        continue                        # skip _x/_y/_z members
+                    size = 3 if etype == 3 else 1
+                    if all(self.vm.fget_i(e, ofs + k) == 0 for k in range(size)):
+                        continue                        # zero: don't write it
+                    if etype == 3:
+                        val = self._format_value(3, 0, self.vm.fget_v(e, ofs))
+                    elif etype == 2:
+                        val = self._format_value(2, 0, (self.vm.fget_f(e, ofs),))
+                    else:
+                        val = self._format_value(etype, self.vm.fget_i(e, ofs), ())
+                    out.append(f'"{fname}" "{val}"')
+            out.append("}")
+        return "\n".join(out) + "\n"
+
+    def restore_save(self, time, lightstyles, body):
+        """Host_Loadgame_f's second half: the level has just been spawned
+        normally (rebuilding precaches); overwrite the globals and every
+        edict's fields with the saved blocks, then rebind the player and
+        relink everything."""
+        vm = self.vm
+        self.lightstyles = {i: s for i, s in enumerate(lightstyles)
+                            if s and s != "m"}
+        blocks = list(parse_entities(body))
+        for key, value in blocks[0].items():            # ED_ParseGlobals
+            d = self.pr.global_by_name.get(key)
+            if d is None:
+                continue
+            etype, ofs = d
+            if etype == 2:
+                self.pr.gf[ofs] = _atof(value)
+            elif etype == 1:
+                self.pr.gi[ofs] = self.pr.new_string(value)
+            elif etype == 4:
+                self.pr.gi[ofs] = int(_atof(value))
+
+        edicts = blocks[1:]
+        for e, fields in enumerate(edicts):
+            vm.clear_edict(e)
+            if not fields and e:                        # saved as free
+                vm.free_edict(e)
+                continue
+            vm.free[e] = False
+            self._parse_edict(e, fields)
+        for e in range(len(edicts), vm.num_edicts):     # not in the save
+            vm.free_edict(e)
+        if len(edicts) > vm.num_edicts:
+            vm.num_edicts = len(edicts)
+
+        self.time = time
+        self.gset_f("time", self.time)
+        self.changelevel = None
+        self.intermission_time = None
+        self.player = 0
+        for e in range(1, vm.num_edicts):
+            if vm.free[e]:
+                continue
+            if self.pr.string(vm.fget_i(e, self.f["classname"])) == "player":
+                self.player = e
+            self._link_abs(e)                           # SV_LinkEdict
+
     def spawn_player(self, origin, angles, parms=None):
         """Create a client edict so monsters have a target and shots have an
         attacker. The camera drives it each frame via update_player().

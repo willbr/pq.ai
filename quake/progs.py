@@ -110,7 +110,8 @@ class Progs:
             t, o, s_name = _S_DEF.unpack_from(data, ofs + i * _S_DEF.size)
             etype = t & ~DEF_SAVEGLOBAL
             name = self.string(s_name)
-            defs.append((etype, o, name))
+            # the save flag picks which globals ED_WriteGlobals persists
+            defs.append((etype, o, name, bool(t & DEF_SAVEGLOBAL)))
             if name:
                 by_name.setdefault(name, (etype, o))
         return defs, by_name

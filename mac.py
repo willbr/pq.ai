@@ -118,6 +118,10 @@ class CoreAudioBackend:
         err = at.AudioQueueStart(self._queue, None)
         if err:
             raise OSError(f"AudioQueueStart failed ({err})")
+        # stop the queue before the interpreter tears down, or its callback
+        # thread can fire into a half-dead process and segfault on exit
+        import atexit
+        atexit.register(self.shutdown)
 
     # ---- the realtime callback: pull from the mixer, hand to CoreAudio ------
     def _fill(self, user, aq, buf):

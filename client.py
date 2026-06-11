@@ -4,6 +4,7 @@ the frontend draws. Imports only quake.* and stdlib -- no tkinter, no ctypes -- 
 both the tkinter frontend (main.py) and the gdi32 frontend (win_gdi.py) share it."""
 
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -129,9 +130,13 @@ class Client:
         # The mixer is platform-agnostic; a backend (chosen by OS) opens the
         # output stream and flips mixer.ok on. Kept on self so its ctypes
         # callback trampoline isn't garbage-collected. No backend -> muted.
+        # PQ_AUDIO=0 skips the OS backend entirely (headless test runs: the
+        # CoreAudio callback thread can crash a sandboxed interpreter)
         self.mixer = snd.Mixer()
         self.audio = None
-        if sys.platform == "darwin":
+        if os.environ.get("PQ_AUDIO", "1") == "0":
+            pass                            # muted by request
+        elif sys.platform == "darwin":
             import mac
             self.audio = mac.CoreAudioBackend(self.mixer)
         elif sys.platform == "win32":
@@ -267,6 +272,70 @@ class Client:
         self._view_wh = (w, h)
         self.rend.resize(w, h)
 
+    # ---- save / load (Host_Savegame_f / Host_Loadgame_f) ----
+    def save_game(self, path):
+        """Write the current game to `path`. Refused (False) while dead or at
+        an intermission, like the original."""
+        if self.sv.player_health() <= 0 or self.sv.intermission_active():
+            return False
+        with open(path, "w") as fp:
+            fp.write(self.sv.save_text())
+        return True
+
+    def load_game(self, path):
+        """Restore a save: respawn its map normally (rebuilding precaches the
+        way SV_SpawnServer does before the parse), overwrite the world with
+        the saved blocks, and point the camera at the restored player.
+        Returns False on a missing/corrupt file or missing map."""
+        try:
+            with open(path) as fp:
+                lines = fp.read().split("\n")
+            if int(lines[0]) != 5:                  # SAVEGAME_VERSION
+                return False
+            parms = [float(x) for x in lines[2:18]]
+            skill = int(float(lines[18]))
+            mapname = lines[19].strip()
+            time = float(lines[20])
+            styles = lines[21:85]
+            body = "\n".join(lines[85:])
+        except (OSError, ValueError, IndexError):
+            return False
+        self.spawn_parms = parms
+        if not self._load_map(mapname, skill=skill):
+            return False
+        self.sv.restore_save(time, styles, body)
+        self.sv.spawn_parms = parms
+        org = self.sv.player_origin()
+        if org:
+            self.pos = list(org)
+            ang = self.sv.player_angles() or (0.0, 0.0, 0.0)
+            self.yaw = ang[1]
+            va = self.sv.vm.fget_v(self.sv.player, self.sv.f["v_angle"])
+            self.pitch = va[0]
+        self.vel = [0.0, 0.0, 0.0]
+        return True
+
+    def _save_path(self, name):
+        return os.path.join(os.path.dirname(PAK_PATH), name + ".sav")
+
+    def _cmd_save(self, args):
+        if not args:
+            self.con.print("usage: save <name>")
+            return
+        if self.save_game(self._save_path(args[0])):
+            self.con.print(f"saved {args[0]}")
+        else:
+            self.con.print("can't save: dead or intermission")
+
+    def _cmd_load(self, args):
+        if not args:
+            self.con.print("usage: load <name>")
+            return
+        if self.load_game(self._save_path(args[0])):
+            self.con.print(f"loaded {args[0]}")
+        else:
+            self.con.print(f"load failed: {args[0]}")
+
     def _change_level(self, target):
         """Consume a pending changelevel: load the next map, carrying the skill
         the player chose at the start-map setskill triggers and the inventory
@@ -390,6 +459,8 @@ class Client:
         con.register_command("texture", mode_cmd(self._toggle_texture), "toggle texturing")
         con.register_command("prof", mode_cmd(self._toggle_prof), "toggle the profiler HUD")
         con.register_command("map", self._cmd_map, "map <name>: load a level")
+        con.register_command("save", self._cmd_save, "save <name>: save the game")
+        con.register_command("load", self._cmd_load, "load <name>: load a save")
         con.register_command("god", self._cmd_god, "toggle god mode")
         con.register_command("give", self._cmd_give, "give <h|s|n|r|c> [amount]")
         con.register_command("set", self._cmd_set, "set <cvar> [value]: a QuakeC cvar")

@@ -2367,8 +2367,9 @@ class Server:
         offset is applied -- items rest with mins.z = 0, so without it their floor
         trace comes back allsolid."""
         mins = self.vm.fget_v(ent, self.f["mins"])
+        maxs = self.vm.fget_v(ent, self.f["maxs"])
         return self.phys.move(list(start), list(end), record=False, mins=mins,
-                              passedict=ent)
+                              maxs=maxs, passedict=ent)
 
     def _sv_movestep(self, ent, move, relink):
         """SV_movestep: try to move `ent` by `move`, stepping up to STEPSIZE over

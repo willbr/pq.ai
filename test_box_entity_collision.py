@@ -190,6 +190,56 @@ def test_player_skips_own_nails():
         "player clipped against its own nail (fault 4)"
 
 
+def test_big_monster_clips_by_its_own_size():
+    """A big monster (a fiend, +/-32) moving into the player must stop a full
+    fiend-half + player-half apart, not penetrate to the player's centre. The box
+    grow uses the *mover's* box (SV_HullForEntity: ent.mins - mover.maxs), so a
+    move() that clipped every entity as player-sized let big monsters bury
+    themselves in the player and trap them (allsolid every frame, wasd dead)."""
+    sv = _boot()
+    mon = _find_monster(sv)
+    vm, f = sv.vm, sv.f
+    vm.fset_v(mon, f["mins"], (-32.0, -32.0, -24.0))      # resize to fiend-ish
+    vm.fset_v(mon, f["maxs"], (32.0, 32.0, 40.0))
+    vm.fset_f(mon, f["nextthink"], 1.0e9)
+    po = vm.fget_v(sv.player, f["origin"])
+    vm.fset_v(mon, f["origin"], (po[0] - 90.0, po[1], po[2])); sv._link_abs(mon)
+    _wire_boxes(sv)
+    # charge the fiend along +x into the player; it must halt ~48 units short
+    for _ in range(30):
+        sv.phys.set_box_entities(sv.solid_box_entities())
+        org = list(vm.fget_v(mon, f["origin"]))
+        tr = sv._box_move(mon, org, [org[0] + 20.0, org[1], org[2]])
+        vm.fset_v(mon, f["origin"], tuple(tr.endpos)); sv._link_abs(mon)
+    gap = po[0] - vm.fget_v(mon, f["origin"])[0]
+    assert gap >= 47.0, f"big monster penetrated the player (gap {gap:.0f}, want ~48)"
+    mmn = vm.fget_v(mon, f["absmin"]); mmx = vm.fget_v(mon, f["absmax"])
+    assert not (mmn[0] < po[0] < mmx[0] and mmn[1] < po[1] < mmx[1]), \
+        "player origin ended up inside the monster box"
+
+
+def test_player_escapes_a_full_overlap():
+    """If the player does end up fully inside a box entity (spawned on a monster,
+    shoved in), wasd must still free them: fly_move slides out with a world-only
+    trace instead of freezing on allsolid. Otherwise movement is dead until the
+    entity wanders off -- the reported 'stuck, wasd doesn't work'."""
+    sv = _boot()
+    mon = _find_monster(sv)
+    vm, f = sv.vm, sv.f
+    vm.fset_f(mon, f["nextthink"], 1.0e9)
+    mo = vm.fget_v(mon, f["origin"])
+    sv.spawn_player((mo[0], mo[1], mo[2]), (0.0, 0.0, 0.0))   # right on the monster
+    sv.phys.passent = sv.player
+    sv.phys.set_box_entities(sv.solid_box_entities())
+    moved = []
+    for wx, wy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        org = list(mo)
+        sv.phys.fly_move(org, [wx * 320.0, wy * 320.0, 0.0], 0.05)
+        moved.append(((org[0] - mo[0]) ** 2 + (org[1] - mo[1]) ** 2) ** 0.5)
+    assert any(m > 1.0 for m in moved), \
+        f"player frozen inside the monster (moved {[round(m,1) for m in moved]})"
+
+
 if __name__ == "__main__":
     test_explobox_blocks_the_player()
     test_monster_blocks_the_player()
@@ -198,4 +248,6 @@ if __name__ == "__main__":
     test_monster_probe_clips_box_but_stays_silent()
     test_monster_blocked_by_player()
     test_player_skips_own_nails()
+    test_big_monster_clips_by_its_own_size()
+    test_player_escapes_a_full_overlap()
     print("OK")

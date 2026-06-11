@@ -204,18 +204,16 @@ class Physics:
 
     def set_box_entities(self, ents):
         """ents: list of (absmin, absmax, edict, owner) for solid box entities
-        (barrels, monsters, the player). Stored pre-expanded by the player clip
-        box, the Minkowski grow SV_HullForEntity applies for a box solid
-        (hullmins = ent.mins - mover.maxs, hullmaxs = ent.maxs - mover.mins):
-        tracing the player *origin point* through the grown box is equivalent to
-        sweeping the player box against the entity box. The expansion uses the
-        hull-1 clip box, matching the single player-sized hull this port traces
-        every move through. `owner` lets move() skip an entity's own missiles
-        (SV_ClipToLinks, world.c:849-855) -- e.g. the player vs. his own nails."""
-        self.box_entities = [
-            ([amn[i] - HULL1_CLIP_MAXS[i] for i in range(3)],
-             [amx[i] - HULL1_CLIP_MINS[i] for i in range(3)], ent, owner)
-            for amn, amx, ent, owner in ents]
+        (barrels, monsters, the player). Stored raw; move() applies the Minkowski
+        grow SV_HullForEntity does for a box solid (hullmins = ent.mins -
+        mover.maxs, hullmaxs = ent.maxs - mover.mins) using the *actual mover's*
+        box, so a big monster (a fiend) clips against the player by its own size
+        rather than a player-sized stand-in -- otherwise it penetrates to the
+        player's centre and traps them (allsolid every frame, wasd dead). `owner`
+        lets move() skip an entity's own missiles (SV_ClipToLinks, world.c:849-855)
+        -- e.g. the player vs. his own nails."""
+        self.box_entities = [(tuple(amn), tuple(amx), ent, owner)
+                             for amn, amx, ent, owner in ents]
 
     def _trace_box(self, bmin, bmax, p1, p2):
         """Clip segment p1->p2 against the axis-aligned box [bmin, bmax] (already
@@ -267,7 +265,8 @@ class Physics:
             tr.plane_normal = clipnormal
         return tr
 
-    def move(self, start, end, record=True, mins=None, passedict=None):
+    def move(self, start, end, record=True, mins=None, maxs=None, passedict=None,
+             world_only=False):
         """SV_Move: trace start->end (hull 1) against the world and every solid
         brush + box entity, returning the earliest impact. This is what makes
         func_walls, doors, gates, barrels and monsters block a move. `record`
@@ -294,7 +293,7 @@ class Physics:
         ls0 = [start[0] - offx, start[1] - offy, start[2] - offz]
         le0 = [end[0] - offx, end[1] - offy, end[2] - offz]
         tr = self.trace(list(ls0), list(le0))
-        if self.brush_entities:
+        if self.brush_entities and not world_only:
             for headnode, org, ent in self.brush_entities:
                 ls = [ls0[i] - org[i] for i in range(3)]
                 le = [le0[i] - org[i] for i in range(3)]
@@ -317,14 +316,20 @@ class Physics:
         # the mover itself and its own missiles. Only `record` moves (the player's
         # own) add bumped edicts to self.touched; monster/item probes clip but
         # stay silent so they don't fire player touches.
-        if self.box_entities:
+        if self.box_entities and not world_only:
             pe = passedict if passedict is not None else self.passent
-            for bmin, bmax, ent, owner in self.box_entities:
+            # the moving box, for the SV_HullForEntity grow (defaults to the
+            # player's hull-1 box). The box clip runs in world space (start/end),
+            # not the world-hull offset space, so each entity is grown by the
+            # mover's own size -- correct for a big monster vs. the player.
+            mxe = maxs if maxs is not None else HULL1_CLIP_MAXS
+            mne = mins if mins is not None else HULL1_CLIP_MINS
+            for amn, amx, ent, owner in self.box_entities:
                 if ent == pe or (owner and owner == pe):
                     continue                    # don't clip self or own missiles
-                bm = [bmin[i] - (offx, offy, offz)[i] for i in range(3)]
-                bx = [bmax[i] - (offx, offy, offz)[i] for i in range(3)]
-                t2 = self._trace_box(bm, bx, ls0, le0)
+                bm = [amn[i] - mxe[i] for i in range(3)]   # hullmins = ent.mins - mover.maxs
+                bx = [amx[i] - mne[i] for i in range(3)]   # hullmaxs = ent.maxs - mover.mins
+                t2 = self._trace_box(bm, bx, start, end)
                 if t2.startsolid:
                     tr.startsolid = True
                     if record:
@@ -333,7 +338,9 @@ class Physics:
                     tr.allsolid = True
                 if t2.fraction < tr.fraction:
                     tr.fraction = t2.fraction
-                    tr.endpos = list(t2.endpos)
+                    # box trace is world-space; back-shift so the +offset below
+                    # returns it to world (the world trace stays in hull space)
+                    tr.endpos = [t2.endpos[i] - (offx, offy, offz)[i] for i in range(3)]
                     tr.plane_normal = t2.plane_normal
                     tr.ent = ent
                     if record:
@@ -447,8 +454,17 @@ class Physics:
             tr = self.move(origin, end)
 
             if tr.allsolid:
-                vel[:] = (0.0, 0.0, 0.0)
-                return blocked, onground, stepnormal
+                # trapped inside an entity -- a monster that overlapped us, or a
+                # lift/door that rose into us. WinQuake just zeroes velocity here,
+                # which leaves the player frozen (wasd dead) until the entity
+                # moves off. Instead, try to slide free with a world-only trace so
+                # the player can always walk out of an entity overlap; only a
+                # genuine world-solid trap (stuck in level geometry) still stops.
+                esc = self.move(origin, end, world_only=True)
+                if esc.allsolid:
+                    vel[:] = (0.0, 0.0, 0.0)
+                    return blocked, onground, stepnormal
+                tr = esc
 
             if tr.fraction > 0:
                 origin[:] = tr.endpos

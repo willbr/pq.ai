@@ -87,6 +87,12 @@ class Physics:
         # pass their own passedict to move() directly; this is the fallback the
         # player move uses. Set by the host each frame to the client edict.
         self.passent = None
+        # the host's cvar dict (sv.cvars), shared by reference so sv_gravity is
+        # read live -- id's gravity sites all read sv_gravity.value at the moment
+        # they apply it (sv_phys.c SV_AddGravity), and worldspawn's
+        # cvar_set("sv_gravity","100") on e1m8 must reach the player physics.
+        # None when a Physics is built without a server (headless geometry tests).
+        self.host_cvars = None
         # edicts the player's move bumped this step (SV_Impact). Drained by the
         # host into the QC touch functions so walking into a button presses it.
         self.touched = set()
@@ -94,6 +100,15 @@ class Physics:
         # "don't pogo stick"). The flag is set whenever the jump button is up and
         # cleared when a jump fires, so holding jump yields exactly one hop.
         self.jump_released = True
+
+    @property
+    def gravity(self):
+        """sv_gravity.value: the world gravity, read live from the host's cvar
+        dict (800 default; e1m8 sets 100). Falls back to the constant when no
+        server owns this Physics."""
+        if self.host_cvars is not None:
+            return self.host_cvars.get("sv_gravity", GRAVITY)
+        return GRAVITY
 
     # ---- hull queries ----
     def hull_point_contents(self, num, p):
@@ -726,7 +741,7 @@ class Physics:
             self.jump_released = False
 
         if waterlevel <= 1:                 # no gravity while swimming
-            vel[2] -= GRAVITY * dt
+            vel[2] -= self.gravity * dt
 
         onground = self.walk_move(origin, vel, forward, dt, onground, waterlevel)
         return onground, waterlevel, watertype

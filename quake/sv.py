@@ -281,7 +281,12 @@ class Server:
         self.sound_precache = [""]
         self.lightstyles = {}
         self.cvars = {"skill": float(skill), "deathmatch": 0.0, "coop": 0.0,
-                      "teamplay": 0.0, "temp1": 0.0, "noexit": 0.0, "samelevel": 0.0}
+                      "teamplay": 0.0, "temp1": 0.0, "noexit": 0.0,
+                      "samelevel": 0.0, "sv_gravity": SV_GRAVITY}
+        # share the cvar dict with physics so it reads sv_gravity live (e1m8's
+        # worldspawn cvar_set lowers it to 100); see Physics.gravity.
+        if self.phys is not None:
+            self.phys.host_cvars = self.cvars
 
         # resolve field / global offsets once
         self.f = {name: progs.field_ofs(name) for name in _FIELDS}
@@ -577,7 +582,7 @@ class Server:
         vx, vy, vz = vm.fget_v(num, fvel)
         if mt in _MOVE_GRAVITY:
             gs = (fgrav is not None and vm.fget_f(num, fgrav)) or 1.0
-            vz -= SV_GRAVITY * gs * dt
+            vz -= self.cvars["sv_gravity"] * gs * dt
             vm.fset_v(num, fvel, (vx, vy, vz))
 
         # angular velocity spins the model regardless of translation
@@ -657,9 +662,10 @@ class Server:
         if not (flags & (FL_ONGROUND | FL_FLY | FL_SWIM)):
             self._check_velocity(num)
             vx, vy, vz = vm.fget_v(num, f["velocity"])
-            hitsound = vz < -0.1 * SV_GRAVITY
+            grav = self.cvars["sv_gravity"]
+            hitsound = vz < -0.1 * grav
             gs = (f["gravity"] is not None and vm.fget_f(num, f["gravity"])) or 1.0
-            vel = [vx, vy, vz - SV_GRAVITY * gs * dt]
+            vel = [vx, vy, vz - grav * gs * dt]
             # SV_FlyMove, reduced to the falling case: slide along whatever the
             # box hits, ground out on a floor plane (n.z > 0.7)
             org = list(vm.fget_v(num, f["origin"]))
@@ -1678,7 +1684,7 @@ class Server:
             p[0] += p[3] * dt
             p[1] += p[4] * dt
             p[2] += p[5] * dt
-            p[5] -= SV_GRAVITY * 0.05 * dt           # gentle droop
+            p[5] -= self.cvars["sv_gravity"] * 0.05 * dt   # gentle droop (r_part.c)
             live.append(p)
         self.particles = live
 

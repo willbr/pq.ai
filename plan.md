@@ -95,7 +95,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
   rocket/grenade/gib trails ARE implemented (`sv.py:1270-1396`); impact
   sprites and explosion billboards are not.
 
-### 2.5 View feel
+### 2.5 View feel — DONE (idle intermission sway intentionally skipped)
 - Missing: strafe roll (`V_CalcRoll`, view.c:81-103), damage kick
   (`V_ParseDamage` pitch/roll punch, view.c:316-380), `.punchangle` weapon
   recoil, landing dip. Done: view bob (`client.py:814`), death camera and

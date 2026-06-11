@@ -89,7 +89,7 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
            "button0", "deadflag", "enemy", "owner", "touch", "goalentity",
            "waterlevel", "watertype", "air_finished", "th_die",
-           "dmg_take", "dmg_save")
+           "dmg_take", "dmg_save", "dmg_inflictor", "punchangle")
 
 SOLID_NOT = 0
 SOLID_TRIGGER = 1
@@ -502,6 +502,7 @@ class Server:
                 except PR_RunError as ex:
                     cn = self.pr.string(vm.fget_i(num, self.f["classname"]))
                     print(f"think {cn} (edict {num}) aborted: {ex}")
+        self.run_drop_punch_angle(dt)           # SV_ClientThink: bleed weapon kick
         self.run_water_move()                   # PlayerPreThink: drown/splash/damage
         self.run_weapon_frame()                 # PlayerPostThink: drive the weapons
         self.run_player_death_think()           # PlayerPreThink's dead->respawn FSM
@@ -2008,6 +2009,21 @@ class Server:
         self.button0 = bool(button0)
         if impulse:
             self.pending_impulse = int(impulse)
+
+    def run_drop_punch_angle(self, dt):
+        """DropPunchAngle (sv_user.c): bleed the weapon-fire view kick the QC
+        set on .punchangle back to zero at 10 deg/s."""
+        if not self.player or self.vm.free[self.player]:
+            return
+        fp = self.f["punchangle"]
+        if fp is None:
+            return
+        px, py, pz = self.vm.fget_v(self.player, fp)
+        ln = math.sqrt(px * px + py * py + pz * pz)
+        if not ln:
+            return
+        s = max(0.0, ln - 10.0 * dt) / ln
+        self.vm.fset_v(self.player, fp, (px * s, py * s, pz * s))
 
     def run_water_move(self):
         """Run the QC's WaterMove for the player (the water half of PlayerPreThink):

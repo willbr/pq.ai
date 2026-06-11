@@ -131,6 +131,12 @@ class Client:
         self._tint_key = ()
         self._cshift_damage = [255, 0, 0, 0.0]   # r, g, b, percent
         self._cshift_bonus = 0.0                 # gold flash percent
+        # view feel (view.c): damage kick [time, roll, pitch], stair-step eye
+        # smoothing, and the blended (pitch, yaw, roll) the renderers use
+        self._v_dmg = [0.0, 0.0, 0.0]
+        self._eye_oldz = 0.0
+        self.view_angles = (0.0, 0.0, 0.0)
+        self.eye_z_offset = 0.0
         self._missing_warned = set()   # maps not in the pak we've already flagged
         # inventory carried across changelevel (SV_SaveSpawnparms): parm1..16
         # from the previous level's SetChangeParms, plus the episode sigils
@@ -303,6 +309,23 @@ class Client:
                 dmg[3] = min(150.0, dmg[3] + 3.0 * count)
                 dmg[:3] = ((200, 100, 100) if armor > blood else
                            (220, 50, 50) if armor else (255, 0, 0))
+                # V_ParseDamage's other half: kick the view toward whatever
+                # hurt us (decayed over v_kicktime by _update_view_feel)
+                src = vm.fget_i(e, f["dmg_inflictor"])
+                ix, iy, iz = vm.fget_v(src, f["origin"])
+                nx, ny, nz = vm.fget_v(src, f["mins"])
+                xx, xy, xz = vm.fget_v(src, f["maxs"])
+                px, py, pz = vm.fget_v(e, f["origin"])
+                fr = (ix + 0.5 * (nx + xx) - px, iy + 0.5 * (ny + xy) - py,
+                      iz + 0.5 * (nz + xz) - pz)
+                ln = math.sqrt(fr[0] ** 2 + fr[1] ** 2 + fr[2] ** 2) or 1.0
+                fwd, right, _up = angle_vectors(self.yaw, self.pitch)
+                side = (fr[0] * right[0] + fr[1] * right[1]
+                        + fr[2] * right[2]) / ln
+                self._v_dmg[1] = count * side * 0.6         # v_kickroll
+                side = (fr[0] * fwd[0] + fr[1] * fwd[1] + fr[2] * fwd[2]) / ln
+                self._v_dmg[2] = count * side * 0.6         # v_kickpitch
+                self._v_dmg[0] = 0.5                        # v_kicktime
         dmg[3] = max(0.0, dmg[3] - 150.0 * dt)
 
         if sv.bonus_flash:                      # stuffcmd "bf" (V_BonusFlash)
@@ -348,6 +371,48 @@ class Client:
                 b += (pct * (sb - b)) >> 8
             pal.append((r, g, b))
         self.view_palette = pal
+
+    def _update_view_feel(self, dt, dead):
+        """V_CalcViewRoll plus the punchangle and damage-kick parts of
+        V_CalcRefdef: blend strafe lean (cl_rollangle 2 deg at cl_rollspeed
+        200), the QC's .punchangle weapon kick, and the decaying damage kick
+        into view_angles = (pitch, yaw, roll); lag the eye 80 u/s behind
+        stair-step pops (oldz smoothing, max 12 units)."""
+        sv, f, vm = self.sv, self.sv.f, self.sv.vm
+        pitch, yaw = self.pitch, self.yaw
+        if self.intermission:
+            self.view_angles = (pitch, yaw, 0.0)
+            return
+        _fwd, right, _up = angle_vectors(yaw, pitch)
+        side = (self.vel[0] * right[0] + self.vel[1] * right[1]
+                + self.vel[2] * right[2])
+        sign = -1.0 if side < 0 else 1.0
+        side = abs(side)
+        roll = (side * 2.0 / 200.0 if side < 200.0 else 2.0) * sign
+        vd = self._v_dmg
+        if vd[0] > 0:
+            roll += vd[0] / 0.5 * vd[1]
+            pitch += vd[0] / 0.5 * vd[2]
+            vd[0] -= dt
+        if dead:
+            roll = 80.0          # V_CalcViewRoll: dead men see the floor sideways
+        e = sv.player
+        if e and not vm.free[e]:
+            px, py, pz = vm.fget_v(e, f["punchangle"])
+            pitch += px
+            yaw += py
+            roll += pz
+        self.view_angles = (pitch, yaw, roll)
+
+        z = self.pos[2]          # smooth out stair step ups (V_CalcRefdef oldz)
+        if self.onground and z - self._eye_oldz > 0:
+            self._eye_oldz = min(z, self._eye_oldz + 80.0 * dt)
+            if z - self._eye_oldz > 12.0:
+                self._eye_oldz = z - 12.0
+            self.eye_z_offset = self._eye_oldz - z
+        else:
+            self._eye_oldz = z
+            self.eye_z_offset = 0.0
 
     # ---- save / load (Host_Savegame_f / Host_Loadgame_f) ----
     def save_game(self, path):
@@ -797,18 +862,23 @@ class Client:
             view_model = self._view_model(gun_org)
 
         self._update_palette(dt)     # V_UpdatePalette: tint shifts for this frame
+        self._update_view_feel(dt, dead)   # strafe lean / punch / damage kick
+        vpitch, vyaw, vroll = self.view_angles
+        if not (self.intermission or dead):
+            eye = (eye[0], eye[1], eye[2] + self.eye_z_offset)  # stair smoothing
 
         PROFILER.begin("render")
         segs = polys = framebuffer = None
         render_mode = self.mode
         if self.mode == "zbuf":
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
-            fbdata, leaf = self.rend.render_zbuffer(eye, self.yaw, self.pitch,
+            fbdata, leaf = self.rend.render_zbuffer(eye, vyaw, vpitch,
                                                     brush_ents, alias_ents,
                                                     view_model, bsp_ents,
                                                     textured=self.textured,
                                                     lightstyles=styles,
-                                                    time=self.sv.time)
+                                                    time=self.sv.time,
+                                                    roll=vroll)
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
         elif self.mode == "flat" or self.wire_hidden:
@@ -817,16 +887,17 @@ class Client:
             # only in how the frontend paints the polys (filled vs outlined), so
             # tag the frame "wire_hidden" when it's the wireframe variant.
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
-            polys, leaf = self.rend.render_shaded(eye, self.yaw, self.pitch,
+            polys, leaf = self.rend.render_shaded(eye, vyaw, vpitch,
                                                   brush_ents, alias_ents, view_model,
-                                                  bsp_ents, lightstyles=styles)
+                                                  bsp_ents, lightstyles=styles,
+                                                  roll=vroll)
             nprim = len(polys)
             if self.mode == "wire":
                 render_mode = "wire_hidden"
         else:
-            segs, leaf = self.rend.render(eye, self.yaw, self.pitch,
+            segs, leaf = self.rend.render(eye, vyaw, vpitch,
                                           brush_ents, alias_ents, view_model,
-                                          bsp_ents)
+                                          bsp_ents, roll=vroll)
             nprim = len(segs)
         PROFILER.end("render")
 

@@ -169,7 +169,7 @@ def lightstyle_values(styles, t):
     return out
 
 
-def angle_vectors(yaw_deg, pitch_deg):
+def angle_vectors(yaw_deg, pitch_deg, roll_deg=0.0):
     yaw = math.radians(yaw_deg)
     pitch = math.radians(pitch_deg)
     cy, sy = math.cos(yaw), math.sin(yaw)
@@ -177,6 +177,11 @@ def angle_vectors(yaw_deg, pitch_deg):
     forward = (cp * cy, cp * sy, -sp)
     right = (sy, -cy, 0.0)
     up = (sp * cy, sp * sy, cp)
+    if roll_deg:                    # view roll: spin right/up about forward
+        rr = math.radians(roll_deg)
+        cr, sr = math.cos(rr), math.sin(rr)
+        right, up = (tuple(cr * right[i] - sr * up[i] for i in range(3)),
+                     tuple(sr * right[i] + cr * up[i] for i in range(3)))
     return forward, right, up
 
 
@@ -995,11 +1000,11 @@ class Renderer:
 
     # ---- main entry ----
     def render(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
-               view_model=None, bsp_ents=None):
+               view_model=None, bsp_ents=None, roll=0.0):
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
-        forward, right, up = angle_vectors(yaw, pitch)
+        forward, right, up = angle_vectors(yaw, pitch, roll)
         ox, oy, oz = origin
         fx, fy, fz = forward
         rx, ry, rz = right
@@ -1218,7 +1223,8 @@ class Renderer:
         return segments, leaf
 
     def render_shaded(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
-                      view_model=None, bsp_ents=None, lightstyles=None):
+                      view_model=None, bsp_ents=None, lightstyles=None,
+                      roll=0.0):
         """Flat-shaded polygons, back-to-front (painter's algorithm via the BSP).
         Each world/brush face is filled with its texture average modulated by the
         baked lightmap's mean level for that face (so it darkens in shadow and
@@ -1231,7 +1237,7 @@ class Renderer:
         frame = self.frame
         if lightstyles is not None:                   # animate flickering lights
             self._animate_lightmaps(lightstyles)
-        forward, right, up = angle_vectors(yaw, pitch)
+        forward, right, up = angle_vectors(yaw, pitch, roll)
         ox, oy, oz = origin
         fx, fy, fz = forward
         rx, ry, rz = right
@@ -1588,7 +1594,7 @@ class Renderer:
 
     def render_zbuffer(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
                        view_model=None, bsp_ents=None, textured=True,
-                       lightstyles=None, time=0.0):
+                       lightstyles=None, time=0.0, roll=0.0):
         """True per-pixel z-buffered software rasteriser. World/brush faces are
         perspective-correct texture-mapped (textured=True) or flat-shaded; both
         resolve occlusion with a 1/z depth buffer (no painter's ordering, so
@@ -1599,7 +1605,7 @@ class Renderer:
         bsp = self.bsp
         self.frame += 1
         frame = self.frame
-        forward, right, up = angle_vectors(yaw, pitch)
+        forward, right, up = angle_vectors(yaw, pitch, roll)
         ox, oy, oz = origin
         fx, fy, fz = forward
         rx, ry, rz = right

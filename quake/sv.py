@@ -1920,7 +1920,13 @@ class Server:
             print(f"PlayerDeathThink aborted: {ex}")
 
     def _pf_pointcontents(self):
-        self.vm.ret_f(CONTENTS_EMPTY)
+        # PF_pointcontents -> SV_PointContents (hull 0): what the point is
+        # inside of. The QC rules that hang off this include the lightning gun
+        # discharging underwater and fish/scrag water checks.
+        if self.phys is None:
+            self.vm.ret_f(CONTENTS_EMPTY)
+            return
+        self.vm.ret_f(float(self.phys.point_contents_0(self.vm.parm_v(0))))
 
     def _pf_walkmove(self):
         """PF_walkmove(yaw, dist): try to step the monster `dist` units along

@@ -8,7 +8,44 @@ framebuffer is larger than the window. The frontend then centres the result
 (letterbox). Pure logic test -- no Tk window, no pak.
 """
 
-from main import fb_fit
+from main import fb_fit, pal_channel_tables, expand_fb_to_ppm
+
+
+def _naive_ppm(fb, w, h, pal):
+    """The old per-pixel expansion: one __getitem__ per byte, joined. The
+    translate-based expand_fb_to_ppm must reproduce this exactly."""
+    lut = [bytes(c) for c in pal]
+    return b"P6 %d %d 255 " % (w, h) + b"".join(map(lut.__getitem__, fb))
+
+
+def test_present_expansion_matches_naive():
+    # full 256 palette, every index exercised; translate path == naive path
+    pal = [((i * 7) & 255, (i * 13) & 255, (i * 29) & 255) for i in range(256)]
+    fb = bytes(range(256)) * 8         # 2048 px, w*h must match
+    w, h = 64, 32
+    r, g, b = pal_channel_tables(pal)
+    assert expand_fb_to_ppm(fb, w, h, r, g, b) == _naive_ppm(fb, w, h, pal)
+
+
+def test_present_expansion_bytearray_fb():
+    # the renderer hands us a bytearray framebuffer, not bytes
+    pal = [(i, 255 - i, (i * 3) & 255) for i in range(256)]
+    fb = bytearray(b"\x00\x7f\xff\x01" * 16)   # 64 px
+    w, h = 8, 8
+    r, g, b = pal_channel_tables(pal)
+    out = expand_fb_to_ppm(fb, w, h, r, g, b)
+    assert out == _naive_ppm(fb, w, h, pal)
+    assert len(out) == len(b"P6 8 8 255 ") + 3 * 64
+
+
+def test_short_palette_padded():
+    # a palette shorter than 256 still yields full 256-byte tables (no IndexError
+    # if the fb references a high index -- it just maps to zero)
+    pal = [(10, 20, 30), (40, 50, 60)]
+    r, g, b = pal_channel_tables(pal)
+    assert len(r) == len(g) == len(b) == 256
+    assert (r[0], g[0], b[0]) == (10, 20, 30)
+    assert (r[255], g[255], b[255]) == (0, 0, 0)
 
 
 def test_auto_fills_window_exactly():
@@ -53,6 +90,9 @@ def test_all():
     test_framebuffer_larger_than_window_subsamples()
     test_subsample_factor_covers_both_dims()
     test_degenerate_sizes_are_safe()
+    test_present_expansion_matches_naive()
+    test_present_expansion_bytearray_fb()
+    test_short_palette_padded()
 
 
 if __name__ == "__main__":

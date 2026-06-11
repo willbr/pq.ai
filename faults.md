@@ -1,9 +1,12 @@
 # Faults
 
 Triaged 2026-06-11 — full root-cause writeup with file:line evidence in
-`plan.md`. Suggested fix order: 2, 3, 4 (gameplay-breaking; 3 and 4 share the
-SV_ClipToLinks skip logic), then 1, 7, 5, 9, 6. 8 is decided as a span/edge
-renderer port — its own project.
+`plan.md`.
+
+**Status:** faults 1–7 and 9 are done (fault 7 was found already-correct and
+pinned with a regression test). Each fix is its own commit with a test. Fault 8
+(lift z-fighting) remains: it is a deliberate, larger project — a port of
+WinQuake's span/edge renderer — tracked separately, not a spot fix.
 
 1. **Walking up steps, or riding lifts up, the view model is in the middle of
    the screen.**

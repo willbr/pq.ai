@@ -230,6 +230,7 @@ class Client:
                 self._missing_warned.add(mapname)
             return False
 
+        self.mapname = mapname                    # bare name, for the "map" query
         self.bsp = Bsp(self.pak.read(path))
         self.rend = Renderer(self.bsp, self.palette, self.colormap)
         self.rend.zbuf_scale = self._zbuf_scale   # keep the console's chosen scale
@@ -770,7 +771,7 @@ class Client:
 
     def _cmd_map(self, args):
         if not args:
-            self.con.print("usage: map <name>")
+            self.con.print(f"map: {self.mapname}")
             return
         # Host_Map_f starts a new game: default loadout, no episode sigils
         self.spawn_parms = None

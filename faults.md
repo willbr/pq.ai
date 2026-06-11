@@ -50,11 +50,18 @@ renderer port — its own project.
    CoreAudio: explicit and atexit-only teardown both exit cleanly across
    repeated runs. Pinned by test_mac_audio_teardown.py.
 
-6. **Particles aren't rendered to the texture buffer.**
-   `render_zbuffer()` (render.py:1666) is never given the particle list; only
-   flat/wire composite them as frontend overlays (client.py:1029). Fix: port
-   `D_DrawParticle` (d_part.c:55-96) — project, distance-scale 1-4 px, z-test
-   into the buffer, hooked after sprites (~render.py:2267). HIGH confidence.
+6. **Particles aren't rendered to the texture buffer.** FIXED.
+   `render_zbuffer()` was never given the particle list; only flat/wire
+   composited them as a frontend overlay (occluded by a coarse per-particle
+   line-of-sight trace), so textured mode showed none in the framebuffer.
+   Ported `D_DrawParticle` (d_part.c): render_zbuffer now takes the live
+   particle list and rasterises each as a small distance-scaled square with the
+   per-pixel depth test (hooked after sprites, before the view model); the
+   client passes sv.particles in zbuf mode and suppresses the overlay there (no
+   double draw), keeping the overlay for the depthless flat/wire modes.
+   Verified: a particle in clear LOS lands in the framebuffer (49 px square) and
+   one behind a wall is occluded per-pixel (≈0 px). Pinned by
+   test_particles_zbuf.py.
 
 7. **Death cam doesn't match Quake.** RESOLVED — no behavioural change needed.
    Re-checked against view.c + runtime: the death cam already matches. The 80°

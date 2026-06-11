@@ -210,6 +210,12 @@ WORLD_GAIN = 2.2           # matches Renderer's per-face brightening for the wor
 # depth test against world geometry, and its own coaxial barrel triangles -- whose
 # true depths are near-equal -- separate by 3x and stop shimmering.
 VIEWMODEL_ZSCALE = 3.0
+# z-buffered point particles (D_DrawParticle, d_part.c): each is a small square
+# scaled by distance. RADIUS is the world half-extent fed to the 1/z scale; MAX
+# caps the half-size in framebuffer pixels so a point-blank puff can't fill the
+# screen (a half of 0 is a single pixel).
+PARTICLE_ZBUF_RADIUS = 2.0
+PARTICLE_ZBUF_MAX = 3
 
 
 def _bsp_texture_colors(bsp, palette):
@@ -1671,7 +1677,8 @@ class Renderer:
 
     def render_zbuffer(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
                        view_model=None, bsp_ents=None, textured=True,
-                       lightstyles=None, time=0.0, roll=0.0, sprites=None):
+                       lightstyles=None, time=0.0, roll=0.0, sprites=None,
+                       particles=None):
         """True per-pixel z-buffered software rasteriser. World/brush faces are
         perspective-correct texture-mapped (textured=True) or flat-shaded; both
         resolve occlusion with a 1/z depth buffer (no painter's ordering, so
@@ -2278,6 +2285,40 @@ class Renderer:
                         if iz > zb[o]:
                             zb[o] = iz
                             fb[o] = c
+
+        # point-sprite particles (D_DrawParticle, d_part.c): teleport fog,
+        # rocket/blood trails, explosions. Each is a small distance-scaled square
+        # written straight into the framebuffer with the depth test, so walls
+        # occlude it per-pixel -- the flat/wire path can only overlay them with a
+        # coarse per-particle line-of-sight check, which is why textured mode
+        # showed none. particles: the live [x,y,z, vx,vy,vz, color, die] list.
+        if particles:
+            pscale = focal * PARTICLE_ZBUF_RADIUS
+            iwl = iw; ihl = ih; zbl = zb; fbl = fb
+            for p in particles:
+                dx = p[0] - ox; dy = p[1] - oy; dz = p[2] - oz
+                cz = dx * fx + dy * fy + dz * fz
+                if cz < NEAR:
+                    continue
+                iz = 1.0 / cz
+                sx = int(hw + (dx * rx + dy * ry + dz * rz) * focal * iz)
+                sy = int(hh - (dx * ux + dy * uy + dz * uz) * focal * iz)
+                half = int(pscale * iz)
+                if half > PARTICLE_ZBUF_MAX:
+                    half = PARTICLE_ZBUF_MAX
+                x0 = sx - half; x1 = sx + half + 1
+                y0 = sy - half; y1 = sy + half + 1
+                if x0 < 0: x0 = 0
+                if y0 < 0: y0 = 0
+                if x1 > iwl: x1 = iwl
+                if y1 > ihl: y1 = ihl
+                ci = p[6] & 255
+                for py in range(y0, y1):
+                    base = py * iwl
+                    for o in range(base + x0, base + x1):
+                        if iz > zbl[o]:
+                            zbl[o] = iz
+                            fbl[o] = ci
 
         # first-person weapon view model: drawn last with a 3x depth bias
         # (VIEWMODEL_ZSCALE, WinQuake's ziscale hack), so it wins the z-test

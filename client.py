@@ -1028,7 +1028,8 @@ class Client:
                                                     lightstyles=styles,
                                                     time=self.sv.time,
                                                     roll=vroll,
-                                                    sprites=self._sprite_ents())
+                                                    sprites=self._sprite_ents(),
+                                                    particles=self.sv.particles)
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
         elif self.mode == "flat" or self.wire_hidden:
@@ -1058,7 +1059,10 @@ class Client:
         if 0 <= leaf < len(self.bsp.leaf_ambients):
             self.mixer.update_ambients(self.bsp.leaf_ambients[leaf], dt)
 
-        particles = self._particle_sprites(eye)
+        # zbuf mode rasterised the particles into the framebuffer with the depth
+        # buffer (proper per-pixel occlusion); the depthless wire/flat modes get
+        # the projected overlay sprites instead, occluded by a per-particle trace.
+        particles = [] if self.mode == "zbuf" else self._particle_sprites(eye)
 
         spd = math.hypot(self.vel[0], self.vel[1])
         movemode = ("NOCLIP" if self.noclip else

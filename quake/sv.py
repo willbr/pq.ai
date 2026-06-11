@@ -590,8 +590,21 @@ class Server:
             return
         ox, oy, oz = vm.fget_v(num, forg)
         end = (ox + vx * dt, oy + vy * dt, oz + vz * dt)
-        frac, endpos, pnorm, _allsolid, _startsolid, hit = \
-            self._move_trace((ox, oy, oz), end, 0, num)
+        # An entity with a real bounding box (the player corpse, mins/maxs the
+        # player size) must sweep its BOX, like SV_PushEntity's SV_Move -- so it
+        # rests its box bottom on the floor. Point missiles (rockets, grenades,
+        # gibs: zero size) keep the cheap point trace. Tracing the corpse as a
+        # point sank its origin to the floor, dropping the death-cam eye
+        # (origin - 8) below it -- the "death cam noclips through the floor".
+        maxs = vm.fget_v(num, f["maxs"]); mins = vm.fget_v(num, f["mins"])
+        if maxs[2] - mins[2] > 16.0:
+            tr = self._box_move(num, (ox, oy, oz), end)
+            frac, endpos = tr.fraction, tr.endpos
+            pnorm = tr.plane_normal or (0.0, 0.0, 1.0)
+            hit = tr.ent if tr.ent is not None else 0
+        else:
+            frac, endpos, pnorm, _allsolid, _startsolid, hit = \
+                self._move_trace((ox, oy, oz), end, 0, num)
         vm.fset_v(num, forg, endpos)
         self._link_abs(num)
         if frac >= 1.0:

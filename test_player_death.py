@@ -75,6 +75,30 @@ def test_death_runs_and_respawns():
     assert sv.changelevel == "e1m1", "respawn did not request a level restart"
 
 
+def test_corpse_rests_on_the_floor_not_through_it():
+    """The dead player is a MOVETYPE_TOSS corpse that keeps the player bbox, so it
+    must sweep its BOX and rest its box bottom on the floor (SV_PushEntity's
+    SV_Move). Tracing it as a point sank its origin to the floor, putting the
+    death-cam eye (origin + view_ofs.z = origin - 8) below the floor -- the
+    'death cam noclips through the floor a little'."""
+    sv = _boot()
+    e, vm, f = sv.player, sv.vm, sv.f
+    floor = vm.fget_v(e, f["origin"])[2] + vm.fget_v(e, f["mins"])[2]   # living feet
+    vm.fset_f(e, f["health"], -20.0)
+    sv.gset_f("time", sv.time); sv.gset_i("self", e); sv.gset_i("other", e)
+    vm.execute(vm.fget_i(e, f["th_die"]))
+    for _ in range(40):
+        sv.run_frame(0.05)                            # let the corpse settle
+    org = vm.fget_v(e, f["origin"])
+    box_bottom = org[2] + vm.fget_v(e, f["mins"])[2]
+    eye_z = org[2] + vm.fget_v(e, f["view_ofs"])[2]
+    assert box_bottom > floor - 4.0, \
+        f"corpse sank through the floor (box bottom {box_bottom:.0f} vs floor {floor:.0f})"
+    assert eye_z > box_bottom, \
+        f"death-cam eye ({eye_z:.0f}) is below the corpse's footing ({box_bottom:.0f})"
+
+
 if __name__ == "__main__":
     test_death_runs_and_respawns()
+    test_corpse_rests_on_the_floor_not_through_it()
     print("OK")

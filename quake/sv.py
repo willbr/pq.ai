@@ -55,15 +55,17 @@ CONTENTS_SOLID = -2
 CONTENTS_WATER = -3
 
 SVC_TEMPENTITY = 23         # broadcast effect message (gunshots, teleport fog, ...)
-# temp-entity type -> (palette colour, particle count, velocity spread u/s).
-# Point effects only; beam types (lightning) just spark once at their start
-# point, which is harmless. The spread is the peak outward speed: Quake flings
-# explosion particles at ~256 u/s, so a near-static drift reads wrong.
+# temp-entity type -> (palette colour, particle count, velocity spread u/s,
+# outward accel). The spread is the peak initial outward speed; accel is the
+# per-second velocity ramp explosion particles get (r_part.c pt_explode,
+# dvel = 4*frametime). Quake flings explosion particles at (rand%512)-256
+# = +/-256 u/s and accelerates them, so anything slower reads as a near-static
+# drift. Point effects only; beam types (lightning) spark once, harmlessly.
 _TE_EFFECT = {
-    0: (0, 6, 60), 1: (0, 8, 80), 2: (0, 6, 60),    # spike, superspike, gunshot
-    3: (75, 24, 200), 4: (75, 24, 200),             # explosion, tarexplosion
-    7: (60, 10, 80), 8: (0, 8, 80),                 # wizspike (green), knightspike
-    10: (244, 32, 120), 11: (244, 30, 60),          # lavasplash, teleport fog
+    0: (0, 6, 60, 0.0), 1: (0, 8, 80, 0.0), 2: (0, 6, 60, 0.0),   # spikes, gunshot
+    3: (75, 24, 256, 4.0), 4: (75, 24, 256, 4.0),    # explosion, tarexplosion
+    7: (60, 10, 80, 0.0), 8: (0, 8, 80, 0.0),        # wizspike (green), knightspike
+    10: (244, 32, 120, 0.0), 11: (244, 30, 60, 0.0), # lavasplash, teleport fog
 }
 # beam temp entities: WriteEntity(owner) + two WriteCoord vectors, drawn as
 # chained bolt models (CL_ParseBeam). Type -> model.
@@ -1431,19 +1433,23 @@ class Server:
             if msg:
                 self.center_msg = (msg, self.time)
 
-    def _burst(self, org, vel, color, count, spread=20.0):
+    def _burst(self, org, vel, color, count, spread=20.0, accel=0.0):
         """Spawn `count` point sprites at org with a base velocity plus a random
-        outward kick of +/- `spread` u/s per axis (so explosions actually fly
-        apart rather than hang in place)."""
+        outward kick of +/- `spread` u/s per axis. `accel` is the per-second
+        velocity ramp R_DrawParticles applies to explosion particles (r_part.c
+        pt_explode/pt_explode2: vel += vel * 4*frametime): alternate particles
+        accelerate and decelerate, so an explosion bursts outward fast with a
+        lingering core instead of drifting at a flat speed."""
         count = max(1, min(count, 24))
         die = self.time + 0.6
         for i in range(count):
+            a = accel if (i & 1) == 0 else -accel   # pt_explode / pt_explode2
             self.particles.append([
                 org[0], org[1], org[2],
                 vel[0] + (random.random() * 2.0 - 1.0) * spread,
                 vel[1] + (random.random() * 2.0 - 1.0) * spread,
                 vel[2] + (random.random() * 2.0 - 1.0) * spread,
-                (color + i) & 255, die])
+                (color + i) & 255, die, a])
         if len(self.particles) > 400:                # bound the list
             del self.particles[:len(self.particles) - 400]
 
@@ -1480,8 +1486,8 @@ class Server:
                                tuple(coords[3:]))
                 self._te = None
         elif len(coords) == 3:                   # have a full position -> spark it
-            color, count, spread = _TE_EFFECT.get(te_type, (0, 6, 60))
-            self._burst(coords, (0.0, 0.0, 0.0), color, count, spread)
+            color, count, spread, accel = _TE_EFFECT.get(te_type, (0, 6, 60, 0.0))
+            self._burst(coords, (0.0, 0.0, 0.0), color, count, spread, accel)
             if te_type in (3, 4):                # explosions also flash a dlight
                 self.dlight_events.append((tuple(coords), 350.0,
                                            self.time + 0.5, 300.0))
@@ -1609,7 +1615,7 @@ class Server:
                 py + (random.random() - 0.5) * jitter,
                 pz + (random.random() - 0.5) * jitter,
                 0.0, 0.0, 0.0,
-                (color + (random.randint(0, 3) if jitter else 0)) & 255, die])
+                (color + (random.randint(0, 3) if jitter else 0)) & 255, die, 0.0])
             px += ux; py += uy; pz += uz
         if len(self.particles) > 600:                # bound the list
             del self.particles[:len(self.particles) - 600]
@@ -1622,6 +1628,10 @@ class Server:
         for p in self.particles:
             if p[7] <= t:
                 continue
+            a = p[8] if len(p) > 8 else 0.0
+            if a:                                    # pt_explode outward ramp
+                fct = 1.0 + a * dt
+                p[3] *= fct; p[4] *= fct; p[5] *= fct
             p[0] += p[3] * dt
             p[1] += p[4] * dt
             p[2] += p[5] * dt

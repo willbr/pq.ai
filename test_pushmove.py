@@ -131,9 +131,38 @@ def test_descending_pusher_crushes_a_pinned_player():
         f"descending pusher did not crush the pinned player ({h0} -> {sv.player_health()})"
 
 
+def test_descending_pusher_does_not_shove_player_down_through_gaps():
+    """A roof closing on a player with open space below (standing on a high step,
+    a staircase) must crush them where they are, not shove them DOWN into the gap
+    -- SV_TestEntityPosition tests against the pusher, so a player still inside
+    the descending brush is blocked even when the spot below isn't world solid.
+    Checking only world solid pushed the player down through the stairs."""
+    sv = _boot()
+    vm = sv.vm
+    # float the player above the floor so a downward shove doesn't immediately
+    # hit world solid (the staircase case)
+    sv.spawn_player((480.0, -352.0, 120.0), (0.0, 0.0, 0.0))
+    p = sv.player
+    po = vm.fget_v(p, _off(sv, "origin"))
+    z0 = po[2]
+    door = 41
+    vm.fset_v(door, _off(sv, "origin"),
+              (po[0] - 544, po[1] - 2248, (po[2] + 30) + 144))
+    sv._link_abs(door)
+    vm.fset_v(door, _off(sv, "velocity"), (0.0, 0.0, -100.0))
+    h0 = sv.player_health()
+    for _ in range(6):
+        sv.gset_f("time", sv.time)
+        sv._push_move(door, 0.1)
+    z1 = vm.fget_v(p, _off(sv, "origin"))[2]
+    assert z1 >= z0 - 1.0, f"roof shoved the player down through the gap ({z0} -> {z1})"
+    assert sv.player_health() < h0, "player not crushed (was shoved down instead)"
+
+
 if __name__ == "__main__":
     test_door_push_never_leaves_player_out_of_bounds()
     test_lift_carries_a_rider_standing_on_top()
     test_mover_does_not_drag_a_clear_bystander()
     test_descending_pusher_crushes_a_pinned_player()
+    test_descending_pusher_does_not_shove_player_down_through_gaps()
     print("OK")

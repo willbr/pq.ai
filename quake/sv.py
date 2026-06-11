@@ -773,7 +773,14 @@ class Server:
             old = vm.fget_v(e, forg)
             vm.fset_v(e, forg, (old[0] + move[0], old[1] + move[1], old[2] + move[2]))
             self._link_abs(e)
-            if not self._test_position(e):
+            # "moved fine" means clear of BOTH world solid and the pusher's brush
+            # (SV_TestEntityPosition tests against the solid pusher too). Checking
+            # only world solid let a roof shove a player DOWN while still inside
+            # it whenever the spot below wasn't solid -- e.g. onto/through a
+            # staircase -- instead of crushing them. A rider carried on top sits
+            # above the brush, so it stays "fine"; only something the pusher moves
+            # *into* and can't clear is blocked.
+            if not self._test_position(e) and not self._penetrates_pusher(e, num):
                 moved.append((e, old))        # pushed/carried fine
                 continue
             # blocked there -- if it can stay where it was, leave it (no carry).

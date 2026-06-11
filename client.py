@@ -66,6 +66,19 @@ def view_origins(pos, view_height, forward, bob):
     return eye, gun
 
 
+def stair_smooth(eye, gun_org, dz):
+    """Lag the eye and the gun by the same stair-step offset (V_CalcRefdef oldz,
+    view.c:975-976: the offset is added to BOTH r_refdef.vieworg[2] and
+    view->origin[2]). Applying it to the eye alone -- the old bug -- left the
+    weapon at the unsmoothed height, so it drifted up into the middle of the
+    screen while climbing steps or riding a lift up. gun_org may be None (dead /
+    intermission: no weapon)."""
+    eye = (eye[0], eye[1], eye[2] + dz)
+    if gun_org is not None:
+        gun_org = (gun_org[0], gun_org[1], gun_org[2] + dz)
+    return eye, gun_org
+
+
 def spin_yaw(flags, angles, t):
     """Bonus items (EF_ROTATE models -- weapons, keys, powerups) spin in place:
     the client overrides their yaw each frame with anglemod(100*time), ignoring
@@ -962,28 +975,32 @@ class Client:
                 self.pitch = max(-89.0, min(89.0, ang[0]))
                 self.yaw = ang[1]
             eye = (self.pos[0], self.pos[1], self.pos[2])
-            view_model = None
+            gun_org = None
         elif dead:
             # death cam: the eye sinks to the corpse on the floor (PlayerDie set
             # view_ofs z = -8), with no head-bob and no weapon model.
             vofs = self.sv.player_view_ofs()
             vz = vofs[2] if vofs else -8.0
             eye = (self.pos[0], self.pos[1], self.pos[2] + vz)
-            view_model = None
+            gun_org = None
         else:
             # head-bob: shift both the view origin and the gun by it, as Quake
             # does, so the weapon rides nearly still instead of sloshing.
             bob = self._calc_bob()
             fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
             eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
-            view_model = self._view_model(gun_org)
 
         self._update_palette(dt)     # V_UpdatePalette: tint shifts for this frame
         self._update_view_feel(dt, dead)   # strafe lean / punch / damage kick
         self._update_dlights(dt)     # muzzle flashes / explosions / glows
         vpitch, vyaw, vroll = self.view_angles
         if not (self.intermission or dead):
-            eye = (eye[0], eye[1], eye[2] + self.eye_z_offset)  # stair smoothing
+            # stair smoothing: lag the eye and the gun together (view.c:975-976),
+            # so the weapon stays locked to the view while stepping up a stair or
+            # riding a lift instead of drifting up into the middle of the screen.
+            eye, gun_org = stair_smooth(eye, gun_org, self.eye_z_offset)
+        # build the view model only now, from the smoothed gun origin
+        view_model = self._view_model(gun_org) if gun_org is not None else None
 
         PROFILER.begin("render")
         segs = polys = framebuffer = None

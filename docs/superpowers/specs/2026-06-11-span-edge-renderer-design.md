@@ -219,3 +219,29 @@ Run muted: `PQ_AUDIO=0` (CoreAudio segfaults headless).
   the `test_r_edge.py` tie-break test and the lift test.
 - **Sky/turb/animated textures** keep their existing fills; only the *iteration*
   (spans vs polygon scanlines) changes, limiting blast radius.
+
+## Postscript (2026-06-11): uniform key → faithful BSP keys
+
+The "uniform key, 1/z-only ordering" simplification chosen above was **abandoned
+after implementation**: it produced an incorrect z-buffer, so func walls, lifts,
+stairs and the items/monsters behind them rendered see-through (the 1/z compare
+at a shared silhouette edge can't order a brush object against the world surface
+it touches). A shrink-the-fudge patch did not fix it — it was architectural.
+
+The renderer now ports id's real key machinery faithfully:
+
+- **World keys** — `R_RecursiveWorldNode`: the front-to-back world walk assigns a
+  monotonic `r_currentkey` (each visible leaf takes a key, stored in `leaf_key[]`;
+  each node's surfaces share one). Front geometry → smaller keys.
+- **Brush keys** — `R_SplitEntityOnNode2` finds each bmodel's `topnode` from its
+  moved bbox. Wholly inside one leaf → every face inherits that leaf's key
+  (`R_DrawSubmodelPolygons`). Straddling a plane → each face is recursively
+  clipped against the world BSP in world space (`R_RecursiveClipBPoly`) and every
+  fragment is emitted with the key of the leaf it lands in.
+- **Tie-break** — the surface stack orders by key; `NEARZI_EPS` 1/z hysteresis
+  only resolves same-key (coplanar) ties, which keeps the lift/wall shimmer away
+  with no depth bias.
+
+Verified against the pre-span per-pixel z-buffer renderer (commit 440aa3b) as an
+oracle: occlusion now matches it (residual diffs are edge/texture rasterisation
+micro-differences between the two methods).

@@ -17,17 +17,16 @@ NORMAL = 0
 SKY = 1
 TURB = 2
 
-# Coplanar hysteresis for the surface-stack 1/z tie-break. WinQuake's fudge
-# (r_edge.c:493) is ~1%, but it only ever compares coplanar *same-key* surfaces
-# (the BSP key orders everything else). This port shares one key across all world
-# and brush surfaces -- we don't port id's BSP-key + bmodel-clip machinery -- so
-# the 1/z compare runs for *every* overlapping pair. The band must therefore be
-# tiny, just above 1/z float-eval noise, or it hides near-but-distinct brush
-# surfaces (func_walls/lifts) behind the world. A surface must be nearer by more
-# than this fraction to displace the current top; exactly-coplanar surfaces fall
-# below it and resolve to the incumbent (first-added) deterministically -- which
-# is what kills the lift/wall z-fight, since the span sweep is already
-# deterministic frame-to-frame (no per-pixel float-depth ties).
+# Coplanar hysteresis for the surface-stack 1/z tie-break. render.py keys every
+# surface by its BSP order (R_RecursiveWorldNode for the world; the leaf the
+# bmodel is clipped into for brush models), so the stack orders by key and the
+# 1/z compare only breaks ties between *same-key* surfaces -- exactly the case
+# WinQuake's ~1% fudge handles (r_edge.c:493). We use a much smaller band here:
+# same-key surfaces are co-located, so a surface must be nearer by more than this
+# fraction to displace the current top; truly-coplanar pairs (1/z differing only
+# by float-eval noise) fall below it and resolve to the incumbent
+# deterministically -- which keeps coplanar lift/wall surfaces from flickering
+# (the span sweep is already deterministic frame-to-frame, no per-pixel ties).
 NEARZI_EPS = 1e-4
 
 

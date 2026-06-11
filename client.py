@@ -885,9 +885,13 @@ class Client:
                 # refresh the brush models the player collides with (doors,
                 # func_walls, gates), at the positions last set by the QC tick
                 self.phys.set_brush_entities(self.sv.solid_brush_models())
-                # and the solid box entities (barrels, monsters) -- SV_Move clips
-                # against these too, so you can't walk through them
-                self.phys.set_box_entities(self.sv.solid_box_entities(ignore=self.sv.player))
+                # and the solid box entities (barrels, monsters, the player) --
+                # SV_Move clips against these too, so you can't walk through them.
+                # passent is the player edict: the move skips it and its own nails
+                # (SV_ClipToLinks' passedict), so firing the nailgun while walking
+                # no longer trips over the spikes spawned at the muzzle.
+                self.phys.passent = self.sv.player
+                self.phys.set_box_entities(self.sv.solid_box_entities())
                 self._move(dt, inp)
 
             # listener for 3D sound: ear at the eye, right-vector for the stereo

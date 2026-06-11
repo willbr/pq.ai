@@ -925,25 +925,29 @@ class Server:
                 out.append((models[sub]["headnodes"][1], vm.fget_v(num, forg), num))
         return out
 
-    def solid_box_entities(self, ignore=None):
-        """Solid bounding-box entities (SOLID_BBOX barrels, SOLID_SLIDEBOX
-        monsters) as (absmin, absmax, edict), for clipping the player's movement.
-        Quake's SV_ClipToLinks clips a move against every solid edict, not just the
-        SOLID_BSP brush movers; this is what stops you walking through a barrel or a
-        grunt. `ignore` (the player) is skipped -- the player is itself
-        SOLID_SLIDEBOX and must not clip against itself."""
+    def solid_box_entities(self):
+        """Solid bounding-box entities (SOLID_BBOX barrels and nails,
+        SOLID_SLIDEBOX monsters and the player) as (absmin, absmax, edict, owner),
+        for clipping moves. Quake's SV_ClipToLinks clips a move against every
+        solid edict, not just the SOLID_BSP brush movers; this is what stops you
+        walking through a barrel or a grunt -- and stops a grunt walking through
+        you. The list includes the player and every projectile: move() skips the
+        mover and its own missiles via passedict, so nothing has to be filtered
+        out here (the player must stay in the list, or monsters could not clip
+        against it)."""
         vm, f = self.vm, self.f
         if self.bsp is None:
             return []
-        famn, famx, fsol = f["absmin"], f["absmax"], f["solid"]
+        famn, famx, fsol, fown = f["absmin"], f["absmax"], f["solid"], f["owner"]
         out = []
         for num in range(1, vm.num_edicts):
-            if vm.free[num] or num == ignore:
+            if vm.free[num]:
                 continue
             sol = int(vm.fget_f(num, fsol))
             if sol != SOLID_BBOX and sol != SOLID_SLIDEBOX:
                 continue
-            out.append((vm.fget_v(num, famn), vm.fget_v(num, famx), num))
+            out.append((vm.fget_v(num, famn), vm.fget_v(num, famx),
+                        num, vm.fget_i(num, fown)))
         return out
 
     def touch_impacts(self, edicts):
@@ -2340,11 +2344,15 @@ class Server:
     # ---- SV_Move helpers for walkmonsters (sv_move.c) ----
     def _box_move(self, ent, start, end):
         """SV_Move for an entity's bounding box (hull 1), clipped against the
-        world and solid brush models. Does not record player touches. Passes the
-        entity's origin-relative mins so the hull offset is applied -- items rest
-        with mins.z = 0, so without it their floor trace comes back allsolid."""
+        world, solid brush models and solid box entities (so a monster collides
+        with the player and barrels, not just walls). passedict=ent skips the
+        mover and its own missiles; record=False keeps these probes from firing
+        player touches. Passes the entity's origin-relative mins so the hull
+        offset is applied -- items rest with mins.z = 0, so without it their floor
+        trace comes back allsolid."""
         mins = self.vm.fget_v(ent, self.f["mins"])
-        return self.phys.move(list(start), list(end), record=False, mins=mins)
+        return self.phys.move(list(start), list(end), record=False, mins=mins,
+                              passedict=ent)
 
     def _sv_movestep(self, ent, move, relink):
         """SV_movestep: try to move `ent` by `move`, stepping up to STEPSIZE over

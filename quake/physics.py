@@ -81,6 +81,12 @@ class Physics:
         # by the mover's own box, so the stored bounds are already expanded by the
         # player clip box (see set_box_entities). Refreshed each frame by the host.
         self.box_entities = []
+        # the moving edict for player-stack moves (fly_move/walk_move/push), so
+        # the box clip can skip the mover itself and anything it owns, the way
+        # SV_Move's passedict does (world.c SV_ClipToLinks). Monster/item moves
+        # pass their own passedict to move() directly; this is the fallback the
+        # player move uses. Set by the host each frame to the client edict.
+        self.passent = None
         # edicts the player's move bumped this step (SV_Impact). Drained by the
         # host into the QC touch functions so walking into a button presses it.
         self.touched = set()
@@ -197,17 +203,19 @@ class Physics:
         self.brush_entities = ents
 
     def set_box_entities(self, ents):
-        """ents: list of (absmin, absmax, edict) for solid box entities (barrels,
-        monsters). Stored pre-expanded by the player clip box, the Minkowski grow
-        SV_HullForEntity applies for a box solid (hullmins = ent.mins - mover.maxs,
-        hullmaxs = ent.maxs - mover.mins): tracing the player *origin point*
-        through the grown box is equivalent to sweeping the player box against the
-        entity box. The expansion uses the hull-1 clip box, matching the single
-        player-sized hull this port traces every move through."""
+        """ents: list of (absmin, absmax, edict, owner) for solid box entities
+        (barrels, monsters, the player). Stored pre-expanded by the player clip
+        box, the Minkowski grow SV_HullForEntity applies for a box solid
+        (hullmins = ent.mins - mover.maxs, hullmaxs = ent.maxs - mover.mins):
+        tracing the player *origin point* through the grown box is equivalent to
+        sweeping the player box against the entity box. The expansion uses the
+        hull-1 clip box, matching the single player-sized hull this port traces
+        every move through. `owner` lets move() skip an entity's own missiles
+        (SV_ClipToLinks, world.c:849-855) -- e.g. the player vs. his own nails."""
         self.box_entities = [
             ([amn[i] - HULL1_CLIP_MAXS[i] for i in range(3)],
-             [amx[i] - HULL1_CLIP_MINS[i] for i in range(3)], ent)
-            for amn, amx, ent in ents]
+             [amx[i] - HULL1_CLIP_MINS[i] for i in range(3)], ent, owner)
+            for amn, amx, ent, owner in ents]
 
     def _trace_box(self, bmin, bmax, p1, p2):
         """Clip segment p1->p2 against the axis-aligned box [bmin, bmax] (already
@@ -259,18 +267,23 @@ class Physics:
             tr.plane_normal = clipnormal
         return tr
 
-    def move(self, start, end, record=True, mins=None):
+    def move(self, start, end, record=True, mins=None, passedict=None):
         """SV_Move: trace start->end (hull 1) against the world and every solid
-        brush entity, returning the earliest impact. This is what makes
-        func_walls, doors and gates block the player. `record` adds the bumped
-        entities to self.touched (SV_Impact); monster moves pass record=False so
-        their probing traces don't fire touches meant for the player.
+        brush + box entity, returning the earliest impact. This is what makes
+        func_walls, doors, gates, barrels and monsters block a move. `record`
+        adds the bumped entities to self.touched (SV_Impact); monster moves pass
+        record=False so their probing traces don't fire touches meant for the
+        player, but they still *clip* against box solids -- a monster can't walk
+        through the player any more than the player can walk through it.
 
-        `mins` is the moving box's origin-relative lower bound. The player (and
-        the default, mins=None) matches hull 1 exactly, so no offset; other boxes
-        -- items rest on the floor with mins.z = 0 -- must be shifted by Quake's
-        SV_HullForEntity offset (hull.clip_mins - mins), or the floor trace comes
-        back startsolid and droptofloor culls the item."""
+        `passedict` is the moving edict: the box clip skips it and anything it
+        owns (its own missiles), exactly as SV_ClipToLinks does (world.c:849-855).
+        When None, falls back to self.passent (the player, for player-stack
+        moves). `mins` is the moving box's origin-relative lower bound. The player
+        (and the default, mins=None) matches hull 1 exactly, so no offset; other
+        boxes -- items rest on the floor with mins.z = 0 -- must be shifted by
+        Quake's SV_HullForEntity offset (hull.clip_mins - mins), or the floor
+        trace comes back startsolid and droptofloor culls the item."""
         if mins is None:
             offx = offy = offz = 0.0
         else:                               # offset = clip_mins - mins
@@ -299,17 +312,23 @@ class Physics:
                     tr.ent = ent                # this entity blocked the move
             if record and tr.ent is not None:
                 self.touched.add(tr.ent)        # SV_Impact: bumped while moving
-        # Box solids (barrels, monsters) are the player path only: record=True is
-        # the player's own move; monster/item probes (record=False) keep the
-        # single-hull world-only trace they always had.
-        if record and self.box_entities:
-            for bmin, bmax, ent in self.box_entities:
+        # Box solids (barrels, monsters, the player): every move clips against
+        # them (SV_ClipToLinks runs for monster and player moves alike), skipping
+        # the mover itself and its own missiles. Only `record` moves (the player's
+        # own) add bumped edicts to self.touched; monster/item probes clip but
+        # stay silent so they don't fire player touches.
+        if self.box_entities:
+            pe = passedict if passedict is not None else self.passent
+            for bmin, bmax, ent, owner in self.box_entities:
+                if ent == pe or (owner and owner == pe):
+                    continue                    # don't clip self or own missiles
                 bm = [bmin[i] - (offx, offy, offz)[i] for i in range(3)]
                 bx = [bmax[i] - (offx, offy, offz)[i] for i in range(3)]
                 t2 = self._trace_box(bm, bx, ls0, le0)
                 if t2.startsolid:
                     tr.startsolid = True
-                    self.touched.add(ent)       # already overlapping it
+                    if record:
+                        self.touched.add(ent)   # already overlapping it
                 if t2.allsolid:
                     tr.allsolid = True
                 if t2.fraction < tr.fraction:
@@ -317,7 +336,8 @@ class Physics:
                     tr.endpos = list(t2.endpos)
                     tr.plane_normal = t2.plane_normal
                     tr.ent = ent
-                    self.touched.add(ent)       # SV_Impact: bumped while moving
+                    if record:
+                        self.touched.add(ent)   # SV_Impact: bumped while moving
         # back out of hull space: endpos += offset
         tr.endpos = [tr.endpos[0] + offx, tr.endpos[1] + offy, tr.endpos[2] + offz]
         return tr

@@ -16,7 +16,8 @@ from quake.console import Console
 from quake.menu import Menu, ChoiceItem, ActionItem
 from quake.physics import Physics, VIEW_HEIGHT, MAXSPEED, CONTENTS_EMPTY
 from quake.progs import Progs
-from quake.sv import Server, anglemod
+from quake.sv import (Server, anglemod, MOVETYPE_WALK, MOVETYPE_FLY,
+                      MOVETYPE_NOCLIP)
 from quake.mdl import Mdl, EF_ROTATE
 from quake.perf import PROFILER
 from quake import snd
@@ -272,6 +273,7 @@ class Client:
         self.waterlevel = 0
         self.watertype = CONTENTS_EMPTY   # fed to the player edict for QC WaterMove
         self.noclip = False
+        self.flymode = False
         self.yaw = yaw
         self.pitch = 0.0
 
@@ -514,6 +516,17 @@ class Client:
             self.vel = [0.0, 0.0, 0.0]
             return
 
+        if self.flymode:
+            # fly cheat (Host_Fly_f, MOVETYPE_FLY): free flight along the full
+            # view direction, but clipped against the world -- no phasing
+            forward, right, up = angle_vectors(self.yaw, self.pitch)
+            speed = MAXSPEED * (1.6 if fast else 1.0)
+            self.vel = [(forward[i] * fwd + right[i] * strafe
+                         + up[i] * inp.move_up) * speed for i in range(3)]
+            self.phys.fly_move(self.pos, self.vel, dt)
+            self.onground = False
+            return
+
         speed = MAXSPEED * (1.6 if fast else 1.0)
 
         # ground/air movement uses a horizontal wish direction from yaw only
@@ -540,9 +553,26 @@ class Client:
             self.onground, jump, step)
 
     # ---- render-state toggles (shared by the hotkeys and the console) ----
+    def _set_player_movetype(self, mt):
+        """Stamp the player edict's movetype so the QC (and run_frame's
+        dispatch, which skips host-driven FLY/NOCLIP players) can tell."""
+        sv = self.sv
+        if sv.player and not sv.vm.free[sv.player]:
+            sv.vm.fset_f(sv.player, sv.f["movetype"], float(mt))
+
     def _toggle_noclip(self):
         self.noclip = not self.noclip
+        self.flymode = False
         self.vel = [0.0, 0.0, 0.0]
+        self._set_player_movetype(MOVETYPE_NOCLIP if self.noclip
+                                  else MOVETYPE_WALK)
+
+    def _toggle_fly(self):
+        self.flymode = not self.flymode
+        self.noclip = False
+        self.vel = [0.0, 0.0, 0.0]
+        self._set_player_movetype(MOVETYPE_FLY if self.flymode
+                                  else MOVETYPE_WALK)
 
     def _toggle_flat(self):
         self.flat = not self.flat
@@ -604,6 +634,13 @@ class Client:
         con.register_command("save", self._cmd_save, "save <name>: save the game")
         con.register_command("load", self._cmd_load, "load <name>: load a save")
         con.register_command("god", self._cmd_god, "toggle god mode")
+        con.register_command("notarget", self._cmd_notarget,
+                             "toggle monster blindness")
+        con.register_command("fly", mode_cmd(self._toggle_fly),
+                             "toggle fly mode (collides, unlike noclip)")
+        con.register_command("kill", self._cmd_kill, "suicide (QC ClientKill)")
+        con.register_command("impulse", self._cmd_impulse,
+                             "impulse <n>: send a QC impulse (9 = cheat)")
         con.register_command("give", self._cmd_give, "give <h|s|n|r|c> [amount]")
         con.register_command("set", self._cmd_set, "set <cvar> [value]: a QuakeC cvar")
         con.register_command("echo", lambda a: con.print(" ".join(a)), "echo text")
@@ -633,6 +670,22 @@ class Client:
         if self._view_wh != (0, 0):
             self.rend.resize(*self._view_wh)
         self.con.print(f"zbuf_scale {v}")
+
+    def _cmd_notarget(self, args):
+        on = self.sv.toggle_notarget()
+        self.con.print(f"notarget {'ON' if on else 'OFF'}")
+
+    def _cmd_kill(self, args):
+        self.sv._exec_named("ClientKill", self.sv.player)
+
+    def _cmd_impulse(self, args):
+        if not args:
+            self.con.print("usage: impulse <n>")
+            return
+        try:
+            self.sv.pending_impulse = int(args[0])
+        except ValueError:
+            self.con.print(f"impulse: not a number: {args[0]}")
 
     def _cmd_map(self, args):
         if not args:

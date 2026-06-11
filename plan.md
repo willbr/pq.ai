@@ -115,7 +115,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
   ambience plays everywhere — snd_dma.c ambient slots 0-3), the
   channel-0-never-overrides rule, CD music.
 
-### 3.2 Cheats / console commands
+### 3.2 Cheats / console commands — DONE
 - Have: `god`, `give`, `noclip`, `map`. Missing: `notarget`, `fly`, `kill`,
   impulse 9/255 (client only sends impulses 1-8). `noclip` doesn't set the
   edict's `movetype`, so QC is unaware of it.

@@ -454,6 +454,8 @@ class Server:
             # rider standing on them (SV_PushMove). Projectiles (rockets/grenades/
             # nails/fireballs/gibs) trace their move and fire touch on impact.
             mt = int(vm.fget_f(num, mtf))
+            if num == self.player and mt in (MOVETYPE_FLY, MOVETYPE_NOCLIP):
+                mt = MOVETYPE_NONE      # fly/noclip cheats: the host drives us
             if mt == MOVETYPE_PUSH:
                 # SV_Physics_Pusher: when the mover's move completes partway
                 # through this frame (its think is due), advance it by only the
@@ -1866,6 +1868,16 @@ class Server:
         flags = int(vm.fget_f(e, f["flags"])) ^ FL_GODMODE
         vm.fset_f(e, f["flags"], float(flags))
         return bool(flags & FL_GODMODE)
+
+    def toggle_notarget(self):
+        """Flip FL_NOTARGET on the player edict (QC FindTarget skips you);
+        returns the new state. No-op (False) without a live player."""
+        if not self.player:
+            return False
+        vm, f, e = self.vm, self.f, self.player
+        flags = int(vm.fget_f(e, f["flags"])) ^ FL_NOTARGET
+        vm.fset_f(e, f["flags"], float(flags))
+        return bool(flags & FL_NOTARGET)
 
     def give(self, what, amount=None):
         """Cheat: set the player's health or one of the four ammo pools.

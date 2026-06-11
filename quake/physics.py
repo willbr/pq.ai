@@ -266,7 +266,7 @@ class Physics:
         return tr
 
     def move(self, start, end, record=True, mins=None, maxs=None, passedict=None,
-             world_only=False):
+             skip_box=False, exclude_brush=None):
         """SV_Move: trace start->end (hull 1) against the world and every solid
         brush + box entity, returning the earliest impact. This is what makes
         func_walls, doors, gates, barrels and monsters block a move. `record`
@@ -293,8 +293,10 @@ class Physics:
         ls0 = [start[0] - offx, start[1] - offy, start[2] - offz]
         le0 = [end[0] - offx, end[1] - offy, end[2] - offz]
         tr = self.trace(list(ls0), list(le0))
-        if self.brush_entities and not world_only:
+        if self.brush_entities:
             for headnode, org, ent in self.brush_entities:
+                if ent == exclude_brush:
+                    continue                    # skip the pusher's own brush
                 ls = [ls0[i] - org[i] for i in range(3)]
                 le = [le0[i] - org[i] for i in range(3)]
                 t2 = self.trace_hull(headnode, ls, le)
@@ -316,7 +318,7 @@ class Physics:
         # the mover itself and its own missiles. Only `record` moves (the player's
         # own) add bumped edicts to self.touched; monster/item probes clip but
         # stay silent so they don't fire player touches.
-        if self.box_entities and not world_only:
+        if self.box_entities and not skip_box:
             pe = passedict if passedict is not None else self.passent
             # the moving box, for the SV_HullForEntity grow (defaults to the
             # player's hull-1 box). The box clip runs in world space (start/end),
@@ -454,13 +456,14 @@ class Physics:
             tr = self.move(origin, end)
 
             if tr.allsolid:
-                # trapped inside an entity -- a monster that overlapped us, or a
-                # lift/door that rose into us. WinQuake just zeroes velocity here,
-                # which leaves the player frozen (wasd dead) until the entity
-                # moves off. Instead, try to slide free with a world-only trace so
-                # the player can always walk out of an entity overlap; only a
-                # genuine world-solid trap (stuck in level geometry) still stops.
-                esc = self.move(origin, end, world_only=True)
+                # trapped inside a BOX entity -- a monster that overlapped us.
+                # WinQuake just zeroes velocity here, leaving the player frozen
+                # (wasd dead) until it moves off. Instead, retry skipping box
+                # solids so the player can walk free of a monster overlap. Brush
+                # solids (the world, floors, a closing roof, a brush-model
+                # staircase) are kept: a player genuinely crushed between a roof
+                # and the stairs must stay pinned (and die), not slip through.
+                esc = self.move(origin, end, skip_box=True)
                 if esc.allsolid:
                     vel[:] = (0.0, 0.0, 0.0)
                     return blocked, onground, stepnormal

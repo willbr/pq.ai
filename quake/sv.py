@@ -773,25 +773,24 @@ class Server:
             old = vm.fget_v(e, forg)
             vm.fset_v(e, forg, (old[0] + move[0], old[1] + move[1], old[2] + move[2]))
             self._link_abs(e)
-            # "moved fine" means clear of BOTH world solid and the pusher's brush
-            # (SV_TestEntityPosition tests against the solid pusher too). Checking
-            # only world solid let a roof shove a player DOWN while still inside
-            # it whenever the spot below wasn't solid -- e.g. onto/through a
-            # staircase -- instead of crushing them. A rider carried on top sits
-            # above the brush, so it stays "fine"; only something the pusher moves
-            # *into* and can't clear is blocked.
-            if not self._test_position(e) and not self._penetrates_pusher(e, num):
+            # "moved fine" means clear of every solid: the world, the pusher, and
+            # any OTHER mover (a brush-model staircase, a barrel, a monster).
+            # SV_TestEntityPosition tests all of these; checking only world solid
+            # let a roof shove a player DOWN through a brush-model floor (the
+            # unraised stairs) whenever the world floor below wasn't solid,
+            # instead of crushing them. A rider carried on top sits above the
+            # brush, so it stays "fine"; only something the pusher moves *into*
+            # and can't clear is blocked.
+            if not self._stuck_in_solids(e, num) and not self._penetrates_pusher(e, num):
                 moved.append((e, old))        # pushed/carried fine
                 continue
             # blocked there -- if it can stay where it was, leave it (no carry).
-            # "Can stay" means clear of BOTH world solid and the pusher's brush:
-            # SV_TestEntityPosition tests the entity against the (solid) pusher
-            # too, so a roof descending onto a player who can't move down is still
-            # stuck against the pusher at the old spot -> fire .blocked (crush).
-            # Without the pusher check the player just sits inside the closing
-            # roof and is never crushed.
+            # "Can stay" means clear of all solids and the pusher: a roof
+            # descending onto a player pinned on the (brush-model) stairs is still
+            # stuck at the old spot -> fire .blocked (crush). Without testing the
+            # stairs + pusher the player just slides down through them, uncrushed.
             vm.fset_v(e, forg, old); self._link_abs(e)
-            if not self._test_position(e) and not self._penetrates_pusher(e, num):
+            if not self._stuck_in_solids(e, num) and not self._penetrates_pusher(e, num):
                 continue
             # truly stuck: restore everyone moved so far and fire .blocked. The
             # pusher stays put (WinQuake leaves it; the QC reverses next think).
@@ -843,6 +842,24 @@ class Server:
         vm, f = self.vm, self.f
         org = vm.fget_v(e, f["origin"])
         return self.phys.test_position(org, vm.fget_v(e, f["mins"]))
+
+    def _stuck_in_solids(self, e, pusher):
+        """SV_TestEntityPosition for the push: is e embedded in the world OR any
+        other solid -- a brush model (a func_door/func_train staircase, a wall) or
+        a box entity (barrel, monster) -- but NOT the pusher itself? A descending
+        crusher must see a player it shoves down onto a *brush-model* floor (e.g.
+        the unraised stairs) as stuck, or it pushes them straight through; the
+        plain world-only test missed that and never crushed. The pusher is
+        excluded (its overlap is the separate _penetrates_pusher gate, and
+        excluding it keeps a rider from reading as stuck in its own mover)."""
+        if self.phys is None:
+            return False
+        vm, f = self.vm, self.f
+        org = vm.fget_v(e, f["origin"])
+        return self.phys.move(list(org), list(org), record=False,
+                              mins=vm.fget_v(e, f["mins"]),
+                              maxs=vm.fget_v(e, f["maxs"]),
+                              passedict=e, exclude_brush=pusher).startsolid
 
     def _penetrates_pusher(self, e, pusher):
         """True if entity `e`'s box overlaps the pusher's brush at its current

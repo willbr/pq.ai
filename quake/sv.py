@@ -418,6 +418,9 @@ class Server:
         self.player_carry = [0.0, 0.0, 0.0]   # reset rider carry for this frame
         self.gset_f("frametime", dt)
         self.gset_f("time", self.time)
+        # SV_Physics runs QC StartFrame first: id's re-reads the teamplay and
+        # skill cvars into the globals and bumps framecount; mods hook it.
+        self._exec_named("StartFrame", 0)
 
         ntf, thf, mtf = self.f["nextthink"], self.f["think"], self.f["movetype"]
         forg, fang = self.f["origin"], self.f["angles"]
@@ -1510,7 +1513,58 @@ class Server:
 
     # --- debug / dump (cheap) ---
     def _pf_aim(self):
-        self.vm.ret_v(*self.gget_v("v_forward"))
+        """PF_aim(entity, missilespeed): vertical autoaim. If the straight
+        v_forward trace lands on something damageable, shoot straight; else
+        scan every takedamage == DAMAGE_AIM entity inside the sv_aim cone
+        (0.93 dot) the shooter can trace to, and return v_forward's horizontal
+        heading pitched vertically onto the best one."""
+        vm, f = self.vm, self.f
+        ent = vm.parm_i(0)
+        fx, fy, fz = self.gget_v("v_forward")
+        ox, oy, oz = vm.fget_v(ent, f["origin"])
+        start = (ox, oy, oz + 20.0)
+
+        # try sending a trace straight
+        end = (start[0] + 2048.0 * fx, start[1] + 2048.0 * fy,
+               start[2] + 2048.0 * fz)
+        _frac, _ep, _pn, _as, _ss, hit = self._move_trace(start, end, 0, ent)
+        if hit and vm.fget_f(hit, f["takedamage"]) == DAMAGE_AIM:
+            vm.ret_v(fx, fy, fz)
+            return
+
+        # try all possible entities for the smallest turn inside the cone
+        bestdist = 0.93                     # sv_aim default
+        bestent = 0
+        for check in range(1, vm.num_edicts):
+            if vm.free[check] or check == ent:
+                continue
+            if vm.fget_f(check, f["takedamage"]) != DAMAGE_AIM:
+                continue
+            cx, cy, cz = vm.fget_v(check, f["origin"])
+            nx, ny, nz = vm.fget_v(check, f["mins"])
+            xx, xy, xz = vm.fget_v(check, f["maxs"])
+            tgt = (cx + 0.5 * (nx + xx), cy + 0.5 * (ny + xy),
+                   cz + 0.5 * (nz + xz))
+            dx, dy, dz = (tgt[0] - start[0], tgt[1] - start[1],
+                          tgt[2] - start[2])
+            ln = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+            dist = (dx * fx + dy * fy + dz * fz) / ln
+            if dist < bestdist:
+                continue                    # too far to turn
+            _frac, _ep, _pn, _as, _ss, hit = self._move_trace(start, tgt, 0, ent)
+            if hit == check:                # can shoot at this one
+                bestdist = dist
+                bestent = check
+
+        if bestent:
+            bx, by, bz = vm.fget_v(bestent, f["origin"])
+            dx, dy, dz = bx - ox, by - oy, bz - oz
+            dist = dx * fx + dy * fy + dz * fz
+            ex, ey, ez = fx * dist, fy * dist, dz   # horizontal kept, z led
+            ln = math.sqrt(ex * ex + ey * ey + ez * ez) or 1.0
+            vm.ret_v(ex / ln, ey / ln, ez / ln)
+        else:
+            vm.ret_v(fx, fy, fz)
 
     # --- traceline: world (hull 0) + entity bbox clip ---
     def _pf_traceline(self):

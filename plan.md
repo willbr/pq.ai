@@ -30,7 +30,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
 - Related: `SPAWNFLAG_NOT_DEATHMATCH` (2048) is defined but never checked in
   `_inhibited()` (`sv.py:359`) — only matters if DM is ever a goal.
 
-### 1.3 MOVETYPE_STEP physics (monster gravity/knockback)
+### 1.3 MOVETYPE_STEP physics (monster gravity/knockback) — DONE
 - Constant (4) not even defined in `sv.py:44-50`; no handler in `run_frame`.
 - Monsters navigate fine (walkmove/movetogoal → the faithful `SV_movestep`
   port at `sv.py:1899`, and thinks run regardless of movetype), but
@@ -42,7 +42,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
 - Fix: port the simple WinQuake `SV_Physics_Step`: if not `FL_ONGROUND`,
   apply gravity + `fly_move`, re-derive onground; then run think.
 
-### 1.4 pointcontents builtin stubbed
+### 1.4 pointcontents builtin stubbed — DONE
 - Always returns `CONTENTS_EMPTY` (`sv.py:1808`). Player waterlevel works
   only because the host calls `update_player_water()` directly.
 - Breaks QC's own uses: lightning-gun discharge underwater
@@ -58,12 +58,12 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
   simple and the field tables in `progs.py` make it mechanical), plus
   mapname/time/skill/lightstyles; on load, skip spawn functions.
 
-### 1.6 aim() autoaim stub
+### 1.6 aim() autoaim stub — DONE
 - Returns `v_forward` (`sv.py:1424`); original `PF_aim` (pr_cmds.c) does
   vertical aim assist toward the best target. Matters for shotgun/nailgun
   shots at monsters above/below; less critical with mouselook.
 
-### 1.7 StartFrame never called
+### 1.7 StartFrame never called — DONE
 - id's QC `StartFrame` re-reads `teamplay`/`skill` cvars each frame and bumps
   `framecount`; without it, changing skill mid-game never propagates.
 - Fix: one `vm.execute()` at the top of `run_frame()` (`sv.py:407`).

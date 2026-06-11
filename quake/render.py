@@ -1665,7 +1665,7 @@ class Renderer:
 
     def render_zbuffer(self, origin, yaw, pitch, brush_ents=None, alias_ents=None,
                        view_model=None, bsp_ents=None, textured=True,
-                       lightstyles=None, time=0.0, roll=0.0):
+                       lightstyles=None, time=0.0, roll=0.0, sprites=None):
         """True per-pixel z-buffered software rasteriser. World/brush faces are
         perspective-correct texture-mapped (textured=True) or flat-shaded; both
         resolve occlusion with a 1/z depth buffer (no painter's ordering, so
@@ -2235,6 +2235,35 @@ class Renderer:
                                         dx * ux + dy * uy + dz * uz,
                                         dx * fx + dy * fy + dz * fz))
                         raster_poly(pts, nearest((r, g, b)))
+
+        # sprite billboards (R_DrawSprite): explosions, bubbles. Each frame is
+        # a screen-aligned rect at the entity origin, scaled by 1/z, drawn
+        # texel-by-texel with the depth test; index 255 is transparent.
+        if sprites:
+            for (sofx, sofy, sw, sh, pix), (spx, spy, spz) in sprites:
+                dx, dy, dz = spx - ox, spy - oy, spz - oz
+                cz = dx * fx + dy * fy + dz * fz
+                if cz < NEAR:
+                    continue
+                iz = 1.0 / cz
+                scx = hw + (dx * rx + dy * ry + dz * rz) * focal * iz
+                scy = hh - (dx * ux + dy * uy + dz * uz) * focal * iz
+                scale = focal * iz
+                x0 = int(scx + sofx * scale)
+                y0 = int(scy - sofy * scale)
+                wpx = max(1, int(sw * scale))
+                hpx = max(1, int(sh * scale))
+                for py in range(max(0, y0), min(ih, y0 + hpx)):
+                    trow = ((py - y0) * sh // hpx) * sw
+                    base = py * iw
+                    for px in range(max(0, x0), min(iw, x0 + wpx)):
+                        c = pix[trow + (px - x0) * sw // wpx]
+                        if c == 255:
+                            continue            # transparent texel
+                        o = base + px
+                        if iz > zb[o]:
+                            zb[o] = iz
+                            fb[o] = c
 
         # first-person weapon view model: drawn last; sits at the camera so its
         # near depth wins the z-test and it reads as on top. No PVS cull.

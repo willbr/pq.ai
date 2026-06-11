@@ -20,6 +20,7 @@ from quake.progs import Progs
 from quake.sv import (Server, anglemod, MOVETYPE_WALK, MOVETYPE_FLY,
                       MOVETYPE_NOCLIP)
 from quake.mdl import Mdl, EF_ROTATE
+from quake.spr import Spr
 from quake.perf import PROFILER
 from quake import snd
 
@@ -239,6 +240,15 @@ class Client:
                     self.models[idx] = Mdl(self.pak.read(name), self.palette)
                 except Exception as e:
                     print(f"mdl load failed for {name}: {e}")
+        # sprite models (.spr): explosions, bubbles -- billboarded by the
+        # zbuf renderer, indexed by modelindex like the .mdl list
+        self.smodels = [None] * len(self.sv.model_precache)
+        for idx, name in enumerate(self.sv.model_precache):
+            if name.endswith(".spr") and name in self.pak.files:
+                try:
+                    self.smodels[idx] = Spr(self.pak.read(name))
+                except Exception as e:
+                    print(f"spr load failed for {name}: {e}")
         # load the external .bsp pickup models (health/ammo boxes -- maps/b_*.bsp),
         # also indexed by modelindex. Skip index 1, the world map itself.
         self.bmodels = [None] * len(self.sv.model_precache)
@@ -978,7 +988,8 @@ class Client:
                                                     textured=self.textured,
                                                     lightstyles=styles,
                                                     time=self.sv.time,
-                                                    roll=vroll)
+                                                    roll=vroll,
+                                                    sprites=self._sprite_ents())
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
         elif self.mode == "flat" or self.wire_hidden:
@@ -1144,6 +1155,18 @@ class Client:
                 continue
             ang = spin_yaw(m.flags, ang, now)
             out.append((m, m.frame_verts(frame, now), org, ang))
+        return out
+
+    def _sprite_ents(self):
+        """Resolve live .spr entities to (frame tuple, origin) billboards."""
+        out = []
+        smodels = self.smodels
+        n = len(smodels)
+        for mi, org, frame in self.sv.sprite_entities():
+            s = smodels[mi] if mi < n else None
+            if s is None:
+                continue
+            out.append((s.frame(frame), org))
         return out
 
     def _beam_model(self, name):

@@ -2,8 +2,10 @@
 
 Findings from a full review of the Python engine against the GPL reference
 (`quake-source/WinQuake` + `qw-qc`), focused on gameplay. Ordered by impact.
-Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
-2.1 (feedback), then 1.4, then 2.2 + 2.3.
+
+**STATUS: all items below are DONE** (see per-item notes; the only intentional
+remainders are CD music, intermission idle sway, and the documented
+div-by-zero divergence).
 
 ## Tier 1 — game rules that are broken or absent
 
@@ -90,7 +92,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
   Shambler attack are completely invisible. TE messages beyond particle
   bursts are dropped in `sv.py`'s Write* decoding.
 
-### 2.4 No .spr sprite support
+### 2.4 No .spr sprite support — DONE
 - `s_explod.spr` explosion sprite etc. (r_sprite.c). Particle bursts and
   rocket/grenade/gib trails ARE implemented (`sv.py:1270-1396`); impact
   sprites and explosion billboards are not.

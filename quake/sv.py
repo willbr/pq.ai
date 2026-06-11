@@ -994,6 +994,23 @@ class Server:
                             int(vm.fget_f(num, ffr))))
         return out
 
+    def sprite_entities(self):
+        """Live .spr entities as (modelindex, origin, frame) -- explosions
+        (BecomeExplosion's s_explod.spr), drowning bubbles, torch flames."""
+        vm = self.vm
+        mp = self.model_precache
+        fmi, forg, ffr, fmod = (self.f["modelindex"], self.f["origin"],
+                                self.f["frame"], self.f["model"])
+        out = []
+        for num in range(1, vm.num_edicts):
+            if vm.free[num] or vm.fget_i(num, fmod) == 0:
+                continue
+            mi = vm.fget_i(num, fmi)
+            if 0 < mi < len(mp) and mp[mi][-4:] == ".spr":
+                out.append((mi, vm.fget_v(num, forg),
+                            int(vm.fget_f(num, ffr))))
+        return out
+
     def bsp_model_entities(self):
         """Live external-.bsp model entities (health/ammo pickups) as
         (modelindex, origin, angles). These use standalone maps/b_*.bsp brush

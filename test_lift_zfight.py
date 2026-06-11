@@ -4,7 +4,7 @@ A moving brush model (the e1m1 lift at 552,2032,-168) sits flush with the wall i
 slides across. The old per-pixel float z-buffer resolved both faces to near-equal
 1/z, so which one won flickered pixel-to-pixel and frame-to-frame -- z-fighting.
 The span/edge renderer (quake/r_edge.py) resolves occlusion once per span via the
-surface stack, breaking coplanar ties deterministically with id's NEARZI_FUDGE
+surface stack, breaking coplanar ties deterministically with NEARZI_EPS
 (r_edge.c:488). So identical inputs give byte-identical output -- no flicker --
 and a sub-pixel camera nudge changes only ordinary edge pixels, not a large
 z-fighting region.

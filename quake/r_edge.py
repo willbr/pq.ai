@@ -17,10 +17,18 @@ NORMAL = 0
 SKY = 1
 TURB = 2
 
-# id's leading-edge depth tie-break fudge (r_edge.c:493): a surface must be ~1%
-# nearer to displace the current top of stack, giving hysteresis so coplanar
-# brush-model/world surfaces don't flicker. Replaces render.py's BMODEL_ZSCALE.
-NEARZI_FUDGE = 1.0 / 1.01
+# Coplanar hysteresis for the surface-stack 1/z tie-break. WinQuake's fudge
+# (r_edge.c:493) is ~1%, but it only ever compares coplanar *same-key* surfaces
+# (the BSP key orders everything else). This port shares one key across all world
+# and brush surfaces -- we don't port id's BSP-key + bmodel-clip machinery -- so
+# the 1/z compare runs for *every* overlapping pair. The band must therefore be
+# tiny, just above 1/z float-eval noise, or it hides near-but-distinct brush
+# surfaces (func_walls/lifts) behind the world. A surface must be nearer by more
+# than this fraction to displace the current top; exactly-coplanar surfaces fall
+# below it and resolve to the incumbent (first-added) deterministically -- which
+# is what kills the lift/wall z-fight, since the span sweep is already
+# deterministic frame-to-frame (no per-pixel float-depth ties).
+NEARZI_EPS = 1e-4
 
 
 class Surf:
@@ -237,7 +245,9 @@ class EdgeRaster:
         t00, tdx, tdy = other.zi
         newzi = z00 + zdx * fu + zdy * fv
         topzi = t00 + tdx * fu + tdy * fv
-        return newzi * NEARZI_FUDGE >= topzi
+        # nearer by more than the coplanar band displaces; within it, the
+        # incumbent (already on top) stays -- deterministic, no z-fight.
+        return newzi > topzi * (1.0 + NEARZI_EPS)
 
     def _close_span(self, surf, u, v):
         if surf.spanstate and surf is not self.bg and u > surf.last_u:

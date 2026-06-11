@@ -83,6 +83,49 @@ def test_coplanar_equal_key_tiebreak_picks_nearer():
     assert b_px > a_px, ("nearer (B) should win the coplanar tie", a_px, b_px)
 
 
+def test_near_but_distinct_brush_orders_exactly():
+    # A brush surface (func_wall/lift) only ~0.5% nearer than the world behind it
+    # must still win where they overlap. The original 1% fudge, applied to every
+    # comparison (not just coplanar same-key pairs as in WinQuake), created a
+    # depth dead-zone that hid near-but-distinct brush surfaces -- the reported
+    # "func walls and lifts z-order all broken" bug.
+    er = EdgeRaster(64, 64)
+    er.begin_frame()
+    er.add_surface(0, NORMAL, (0.0100, 0.0, 0.0),       # world wall, added first
+                   [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
+    er.add_surface(0, NORMAL, (0.01005, 0.0, 0.0),      # func_wall ~0.5% nearer
+                   [(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)])
+    F = er.surfaces[-1]
+    er.scan()
+    f_by_row = {v: (u, n) for (u, v, n) in F.spans}
+    for v in range(10, 30):
+        assert f_by_row.get(v) == (10, 20), \
+            (v, f_by_row.get(v), "nearer brush surface hidden by farther world")
+
+
+def test_coplanar_is_stable_and_deterministic():
+    # Two *exactly* coplanar surfaces (equal 1/z) must resolve deterministically
+    # to one of them with no overlap -- the property that kills z-fighting. A
+    # repeat scan must be identical.
+    def run():
+        er = EdgeRaster(64, 64)
+        er.begin_frame()
+        er.add_surface(0, NORMAL, (0.02, 0.0, 0.0),
+                       [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
+        a = er.surfaces[-1]
+        er.add_surface(0, NORMAL, (0.02, 0.0, 0.0),
+                       [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
+        b = er.surfaces[-1]
+        er.scan()
+        return (sum(n for (_u, _v, n) in a.spans),
+                sum(n for (_u, _v, n) in b.spans))
+    r1 = run()
+    r2 = run()
+    assert r1 == r2, ("coplanar resolution not deterministic", r1, r2)
+    # exactly one of them owns the overlap (no double-paint, no gap)
+    assert (r1[0] == 0) != (r1[1] == 0), ("coplanar overlap not cleanly owned", r1)
+
+
 def test_offscreen_clamped():
     er = EdgeRaster(32, 32)
     er.begin_frame()
@@ -99,5 +142,7 @@ if __name__ == "__main__":
     test_nearer_rect_occludes_farther_no_overlap_no_gap()
     test_surface_fully_behind_emits_nothing_in_covered_area()
     test_coplanar_equal_key_tiebreak_picks_nearer()
+    test_near_but_distinct_brush_orders_exactly()
+    test_coplanar_is_stable_and_deterministic()
     test_offscreen_clamped()
     print("OK")

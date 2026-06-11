@@ -1898,8 +1898,8 @@ class Renderer:
         # surface stack already resolved occlusion; it still WRITES 1/z so alias
         # models / particles drawn afterward occlude against the world. All world
         # and brush surfaces share key 0, so the stack orders them purely by 1/z
-        # with id's NEARZI_FUDGE tie-break (r_edge.c:488) -- which fixes coplanar
-        # lift/wall shimmer deterministically (no per-pixel float-depth ties).
+        # with the NEARZI_EPS coplanar tie-break (r_edge.c:488) -- which fixes
+        # coplanar lift/wall shimmer deterministically (no per-pixel float ties).
         edges = self.edges
 
         def emit_cached(pts, sc, csmin, ctmin):

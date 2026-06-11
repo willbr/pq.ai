@@ -102,18 +102,24 @@ distance-scaled pixel size (1-4 px at full res, scaled by ZBUF_SCALE), and a
 per-pixel z-test against the existing z-buffer. Hook in after sprites, before
 the view model (~render.py:2267).
 
-## 7. Death cam doesn't match Quake — HIGH confidence on the main divergence
+## 7. Death cam doesn't match Quake — RESOLVED, no change needed
 
-The 80° death roll is computed, then punchangle is added on top
-(`client.py:458-465`). In the C source `V_CalcViewRoll` (view.c:822-826)
-*assigns* ROLL = 80 and returns immediately — nothing else touches the angles
-when dead. Verified correct already: weapon hidden when dead (client.py:968),
-eye drops to view_ofs z=-8 (client.py:962-967), stair smoothing disabled when
-dead (client.py:981), mouselook still live while dead (matches original).
+On closer reading the original finding was wrong. `V_CalcViewRoll` (view.c:824)
+only sets ROLL = 80 and returns; punchangle is added *separately and
+unconditionally* back in V_CalcRefdef (view.c:958), so applying punchangle on
+top of the death roll is correct, not a bug. The port already does exactly
+this, and runtime check confirms a dead player's view_angles = (pitch, yaw, 80)
++ punch, eye dropped to view_ofs z = −8 (PlayerDie player.qc:616), weapon
+hidden, stair smoothing off, mouselook live. All correct.
 
-**Fix:** in `_update_view_feel`, when dead set
-`self.view_angles = (pitch, yaw, 80.0)` and return before the punchangle /
-damage-kick additions.
+The single genuine divergence from view.c is the head-bob the live path adds to
+the eye (view.c:893, `vieworg[2] += cl.viewheight + bob`): the port omits it
+when dead. Left omitted on purpose — `self.vel` is not refreshed while dead
+(the move is skipped), so feeding it to V_CalcBob would sway the corpse view on
+a stale velocity, which is worse than no bob. Faithfully matching it would mean
+tracking the corpse's velocity into self.vel; deferred as not worth it.
+
+Pinned by `test_view_feel.test_dead_view_rolls_to_80` so it can't regress.
 
 ## 8+9. Z-fighting: lift bmodel and nailgun view model — root causes differ
 

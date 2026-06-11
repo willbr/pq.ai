@@ -51,12 +51,16 @@ renderer port — its own project.
    `D_DrawParticle` (d_part.c:55-96) — project, distance-scale 1-4 px, z-test
    into the buffer, hooked after sprites (~render.py:2267). HIGH confidence.
 
-7. **Death cam doesn't match Quake.**
-   Punchangle is added on top of the 80° death roll (client.py:458-465);
-   `V_CalcViewRoll` (view.c:822-826) assigns ROLL=80 and returns. Everything
-   else (weapon hidden, eye at view_ofs −8, stair smoothing off) already
-   matches. Fix: when dead, set `(pitch, yaw, 80.0)` and return early. HIGH
-   confidence.
+7. **Death cam doesn't match Quake.** RESOLVED — no behavioural change needed.
+   Re-checked against view.c + runtime: the death cam already matches. The 80°
+   roll (V_CalcViewRoll view.c:824), eye drop to view_ofs −8 (PlayerDie
+   player.qc:616), hidden weapon and stair-smoothing-off are all correct, and
+   adding punchangle on top is *also* correct (view.c:958 adds it regardless of
+   death — the earlier "punchangle bug" reading was wrong). Verified at runtime:
+   dead view_angles = (pitch, yaw, 80) + punch. The only real view.c divergence
+   is head-bob on the dead eye (view.c:893), deliberately omitted because
+   self.vel isn't refreshed while dead (it would bob on a stale velocity);
+   left as-is. Pinned by test_view_feel.test_dead_view_rolls_to_80.
 
 8. **Weird z-fighting in the rendering of the lift at 552, 2032, -168.**
    Coplanar moving-bmodel and world faces share the float z-buffer at quarter

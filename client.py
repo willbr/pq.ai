@@ -978,7 +978,9 @@ class Client:
             gun_org = None
         elif dead:
             # death cam: the eye sinks to the corpse on the floor (PlayerDie set
-            # view_ofs z = -8), with no head-bob and no weapon model.
+            # view_ofs z = -8), with no weapon model. (V_CalcRefdef also adds the
+            # head-bob here, view.c:893, but the port leaves it out: self.vel is
+            # not refreshed while dead, so it would bob on a stale velocity.)
             vofs = self.sv.player_view_ofs()
             vz = vofs[2] if vofs else -8.0
             eye = (self.pos[0], self.pos[1], self.pos[2] + vz)

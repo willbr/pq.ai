@@ -84,6 +84,31 @@ def test_stair_step_smooths_eye_z():
     assert abs(c.eye_z_offset) < 1e-6, "eye never caught up"
 
 
+def test_dead_view_rolls_to_80():
+    """Death cam: V_CalcViewRoll forces ROLL = 80 once health <= 0 (view.c:824),
+    so the view tilts onto its side. punchangle is still added on top
+    (view.c:958, applied regardless of death), and the eye drops to the corpse's
+    view_ofs z = -8 set by PlayerDie. Pins the behaviour that already matched the
+    reference, so it can't silently regress."""
+    c = _boot()
+    f, vm, e = c.sv.f, c.sv.vm, c.sv.player
+    inp = client.InputState()
+    vm.fset_f(e, f["health"], -10.0)
+    c.sv.gset_f("time", c.sv.time); c.sv.gset_i("self", e); c.sv.gset_i("other", e)
+    vm.execute(vm.fget_i(e, f["th_die"]))
+    for _ in range(3):
+        c.frame(0.05, inp)
+    assert c.sv.player_health() <= 0, "player did not die"
+    assert abs(c.view_angles[2] - 80.0) < 1e-6, \
+        f"dead view roll should be 80, got {c.view_angles[2]}"
+    # punchangle still rides on top of the death roll (it decays ~0.16 deg over
+    # the frame via DropPunchAngle, so ~84.84 rather than a clean 85)
+    vm.fset_v(e, f["punchangle"], (0.0, 0.0, 5.0))
+    c.frame(0.016, inp)
+    assert 84.0 < c.view_angles[2] < 85.0, \
+        f"punchangle should add to the 80 deg death roll, got {c.view_angles[2]}"
+
+
 def test_angle_vectors_roll_tilts_the_basis():
     f0, r0, u0 = angle_vectors(0.0, 0.0)
     f1, r1, u1 = angle_vectors(0.0, 0.0, 90.0)
@@ -98,5 +123,6 @@ if __name__ == "__main__":
     test_punchangle_kicks_and_decays()
     test_damage_kick_rolls_toward_inflictor_then_decays()
     test_stair_step_smooths_eye_z()
+    test_dead_view_rolls_to_80()
     test_angle_vectors_roll_tilts_the_basis()
     print("OK")

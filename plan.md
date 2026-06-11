@@ -120,7 +120,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
   impulse 9/255 (client only sends impulses 1-8). `noclip` doesn't set the
   edict's `movetype`, so QC is unaware of it.
 
-### 3.3 VM / edict hygiene
+### 3.3 VM / edict hygiene — DONE (div-by-zero divergence kept, documented)
 - `alloc_edict` reuses freed slots immediately — no 0.5s `freetime` guard, no
   reserved client slots (pr_edict.c:87-112). Latent bug under fast
   projectile churn.

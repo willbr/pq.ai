@@ -423,6 +423,7 @@ class Server:
         vm = self.vm
         self.frametime = dt
         self.time += dt
+        vm.time = self.time      # for ED_Alloc's freed-slot reuse guard
         self.player_carry = [0.0, 0.0, 0.0]   # reset rider carry for this frame
         self.gset_f("frametime", dt)
         self.gset_f("time", self.time)
@@ -558,6 +559,7 @@ class Server:
                                           f["origin"], f["angles"], f["gravity"])
         if int(vm.fget_f(num, f["flags"])) & FL_ONGROUND:
             return                              # already at rest
+        self._check_velocity(num)
 
         vx, vy, vz = vm.fget_v(num, fvel)
         if mt in _MOVE_GRAVITY:
@@ -599,6 +601,23 @@ class Server:
             vm.fset_v(num, favel, (0.0, 0.0, 0.0))
         self.check_water_transition(num)
 
+    def _check_velocity(self, num):
+        """SV_CheckVelocity: bound each velocity component to +/-2000
+        (sv_maxvelocity) and scrub NaN to zero before physics runs it."""
+        vm, fvel = self.vm, self.f["velocity"]
+        vx, vy, vz = vm.fget_v(num, fvel)
+        out, changed = [], False
+        for v in (vx, vy, vz):
+            if v != v:                          # NaN
+                v, changed = 0.0, True
+            elif v > 2000.0:
+                v, changed = 2000.0, True
+            elif v < -2000.0:
+                v, changed = -2000.0, True
+            out.append(v)
+        if changed:
+            vm.fset_v(num, fvel, tuple(out))
+
     def _physics_step(self, num, dt):
         """SV_Physics_Step: a walking monster freefalls only while nothing
         supports it -- QC's T_Damage strips FL_ONGROUND and adds velocity for
@@ -610,6 +629,7 @@ class Server:
         vm, f = self.vm, self.f
         flags = int(vm.fget_f(num, f["flags"]))
         if not (flags & (FL_ONGROUND | FL_FLY | FL_SWIM)):
+            self._check_velocity(num)
             vx, vy, vz = vm.fget_v(num, f["velocity"])
             hitsound = vz < -0.1 * SV_GRAVITY
             gs = (f["gravity"] is not None and vm.fget_f(num, f["gravity"])) or 1.0

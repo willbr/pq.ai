@@ -57,6 +57,9 @@ class VM:
         self.free = [True] * max_edicts
         self.free[0] = False                          # world is always live
         self.num_edicts = 1                           # just the world to start
+        self.freetime = [0.0] * max_edicts  # when each slot was freed (ED_Free)
+        self.time = 0.0          # server time; the Server stamps it each frame
+        self._ed_free_flds = None   # field offsets ED_Free clears, built lazily
 
         # --- call state ---
         self.stack = []          # list of (return_statement, function)
@@ -140,9 +143,13 @@ class VM:
         self.free[num] = False
 
     def alloc_edict(self):
-        # no clients in our single-player walker, so reuse starts at edict 1
+        # no clients in our single-player walker, so reuse starts at edict 1.
+        # ED_Alloc's anti-flicker guard: don't reuse a slot freed less than
+        # half a second ago (entity references may still be in flight), except
+        # during the level's first two seconds of spawning.
         for i in range(1, self.num_edicts):
-            if self.free[i]:
+            if self.free[i] and (self.freetime[i] < 2.0
+                                 or self.time - self.freetime[i] > 0.5):
                 self.clear_edict(i)
                 return i
         i = self.num_edicts
@@ -153,10 +160,27 @@ class VM:
         return i
 
     def free_edict(self, num):
-        self.clear_edict(num)
+        """ED_Free: mark the slot free and clear only what makes the entity
+        visible/collidable (model, modelindex, colormap, skin, frame,
+        takedamage, solid, origin, angles) plus nextthink = -1 -- the rest of
+        the fields are left for any in-flight references, like the C."""
+        if self._ed_free_flds is None:
+            fld = self.pr.field_ofs
+            self._ed_free_flds = (
+                [fld(n) for n in ("model", "modelindex", "colormap", "skin",
+                                  "frame", "takedamage", "solid")],
+                [fld(n) for n in ("origin", "angles")])
+        scalars, vectors = self._ed_free_flds
+        for ofs in scalars:
+            if ofs is not None:
+                self.fset_i(num, ofs, 0)
+        for ofs in vectors:
+            if ofs is not None:
+                self.fset_v(num, ofs, (0.0, 0.0, 0.0))
         if self.fld_nextthink is not None:
             self.fset_f(num, self.fld_nextthink, -1.0)
         self.free[num] = True
+        self.freetime[num] = self.time
 
     # ======================================================================
     # call frame management

@@ -1001,6 +1001,10 @@ class Renderer:
         # object, while array('f') boxes a fresh float on every read -- one
         # allocation per depth test in the rasteriser's hot loop.
         self._zb_far = [0.0] * (self.zw * self.zh)
+        # span/edge (scanline) occlusion engine for world/brush geometry -- the
+        # r_edge.c port. Lazily imported so non-textured boots don't pay for it.
+        from .r_edge import EdgeRaster
+        self.edges = EdgeRaster(self.zw, self.zh)
 
     def resize(self, w, h):
         self.width, self.height = w, h
@@ -1727,6 +1731,7 @@ class Renderer:
         vert_frame = self.vert_frame
         vcache = self.vcache
 
+        from .r_edge import NORMAL, SKY, TURB
         iw, ih = self.zw, self.zh
         focal = self.focal * iw / self.width          # focal scaled to the small fb
         hw = iw * 0.5
@@ -1892,28 +1897,31 @@ class Renderer:
                         voz += vdx
                 y += 1
 
-        def raster_poly_cached(cam, surf, csmin, ctmin, zscale=1.0):
-            # lit-surface-cached convex polygon: like raster_poly_tex but the
-            # texture x lightmap product was precomputed by _surface_cache, so
-            # the pixel body is one perspective divide, one fetch, one store.
-            # UVs are rebased to the cache origin (csmin, ctmin) up front; the
-            # cache spans the face's whole extent, so no wrap or clamp needed.
-            # (16-px affine subdivision a la D_DrawSpans16 was tried and was a
-            # wash: spans here average under 10 pixels, so the per-segment
-            # setup costs what the cheaper pixel body saves.)
-            cw, ch, cache = surf[0], surf[1], surf[2]
+        # --- world/brush surface emission into the span/edge engine ---
+        # These mirror the raster_poly* fills above, but split into two halves:
+        # an emit_* that near-clips, projects, computes the 1/z (and u/z, v/z)
+        # gradients and registers the screen polygon with the EdgeRaster, and a
+        # fill closure (attached to the surface) that the scan() pass calls per
+        # span. The fill is write-only -- no `if iz > zb[idx]` test -- because the
+        # surface stack already resolved occlusion; it still WRITES 1/z so alias
+        # models / particles drawn afterward occlude against the world. All world
+        # and brush surfaces share key 0, so the stack orders them purely by 1/z
+        # with id's NEARZI_FUDGE tie-break (r_edge.c:488) -- which fixes coplanar
+        # lift/wall shimmer deterministically (replacing the old BMODEL_ZSCALE).
+        edges = self.edges
+
+        def emit_cached(pts, sc, csmin, ctmin):
+            cw, cache = sc[0], sc[2]
             out = []
-            A = cam[-1]; da = A[2] - NEAR
-            for B in cam:
+            A = pts[-1]; da = A[2] - NEAR
+            for B in pts:
                 db = B[2] - NEAR
                 if da >= 0.0:
                     out.append(A)
                 if (da >= 0.0) != (db >= 0.0):
                     t = da / (da - db)
-                    out.append((A[0] + (B[0] - A[0]) * t,
-                                A[1] + (B[1] - A[1]) * t,
-                                A[2] + (B[2] - A[2]) * t,
-                                A[3] + (B[3] - A[3]) * t,
+                    out.append((A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t, A[3] + (B[3] - A[3]) * t,
                                 A[4] + (B[4] - A[4]) * t))
                 A, da = B, db
             if len(out) < 3:
@@ -1923,53 +1931,42 @@ class Renderer:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)
                 sy.append(hh - cy * focal * iz)
-                ziz = iz * zscale              # depth biased; cancels in u,v
-                siz.append(ziz)
-                suz.append((u - csmin) * ziz)  # cache-space u/z
-                svz.append((v - ctmin) * ziz)
+                siz.append(iz)
+                suz.append((u - csmin) * iz)   # cache-space u/z, v/z
+                svz.append((v - ctmin) * iz)
             grads = plane_gradients(sx, sy, (siz, suz, svz))
             if grads is None:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
-            y, spans = poly_spans(sx, sy, iw, ih)
-            zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
-            for xli, xri in spans:
-                if xli < xri:
-                    xc = xli + 0.5; yc = y + 0.5
-                    iz = z00 + zdx * xc + zdy * yc
-                    uoz = u00 + udx * xc + udy * yc
-                    voz = v00 + vdx * xc + vdy * yc
-                    row = y * iwl
-                    for idx in range(row + xli, row + xri):
-                        if iz > zbl[idx]:
-                            z = 1.0 / iz
-                            zbl[idx] = iz
-                            fbl[idx] = cache[int_(voz * z) * cw + int_(uoz * z)]
-                        iz += zdx
-                        uoz += udx
-                        voz += vdx
-                y += 1
+            surf = edges.add_surface(0, NORMAL, (z00, zdx, zdy), list(zip(sx, sy)))
 
-        def raster_poly_tex_turb(cam, rec):
-            # Turbulent (liquid/teleport) polygon: same span setup as
-            # raster_poly_tex, but each pixel's texel is sine-warped in both
-            # axes and drawn full-bright (no lightmap -- special surfaces).
-            # Hot but only over liquid/sky area, so kept separate from the
-            # common path rather than branching per pixel there.
+            def fill(u, v, count):
+                zbl = zb; fbl = fb; int_ = int
+                xc = u + 0.5; yc = v + 0.5
+                iz = z00 + zdx * xc + zdy * yc
+                uoz = u00 + udx * xc + udy * yc
+                voz = v00 + vdx * xc + vdy * yc
+                row = v * iw
+                for idx in range(row + u, row + u + count):
+                    z = 1.0 / iz
+                    zbl[idx] = iz
+                    fbl[idx] = cache[int_(voz * z) * cw + int_(uoz * z)]
+                    iz += zdx; uoz += udx; voz += vdx
+            surf.fill = fill
+
+        def emit_tex(pts, rec, lm, flags=NORMAL):
             tw, th, tex = rec[0], rec[1], rec[2]
-            sintab = _TURBSIN; scale = _TURBSCALE; tt = time
+            lmw, lmh, lsmin, ltmin, lux = lm[0], lm[1], lm[2], lm[3], lm[4]
             out = []
-            A = cam[-1]; da = A[2] - NEAR
-            for B in cam:
+            A = pts[-1]; da = A[2] - NEAR
+            for B in pts:
                 db = B[2] - NEAR
                 if da >= 0.0:
                     out.append(A)
                 if (da >= 0.0) != (db >= 0.0):
                     t = da / (da - db)
-                    out.append((A[0] + (B[0] - A[0]) * t,
-                                A[1] + (B[1] - A[1]) * t,
-                                A[2] + (B[2] - A[2]) * t,
-                                A[3] + (B[3] - A[3]) * t,
+                    out.append((A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t, A[3] + (B[3] - A[3]) * t,
                                 A[4] + (B[4] - A[4]) * t))
                 A, da = B, db
             if len(out) < 3:
@@ -1986,50 +1983,149 @@ class Renderer:
             if grads is None:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
-            y, spans = poly_spans(sx, sy, iw, ih)
-            zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
-            for xli, xri in spans:
-                if xli < xri:
-                    xc = xli + 0.5; yc = y + 0.5
+            surf = edges.add_surface(0, flags, (z00, zdx, zdy), list(zip(sx, sy)))
+            if lmw == 1 and lmh == 1:                  # flat (sky / no lightmap)
+                rowtab = cmap_rows[(255 - lux[0]) >> 2]
+
+                def fill(u, v, count):
+                    zbl = zb; fbl = fb; int_ = int
+                    xc = u + 0.5; yc = v + 0.5
                     iz = z00 + zdx * xc + zdy * yc
                     uoz = u00 + udx * xc + udy * yc
                     voz = v00 + vdx * xc + vdy * yc
-                    row = y * iwl
-                    for idx in range(row + xli, row + xri):
-                        if iz > zbl[idx]:
-                            z = 1.0 / iz
-                            u = uoz * z
-                            v = voz * z
-                            su2 = u + sintab[int_((v * 0.125 + tt) * scale) & 255]
-                            sv2 = v + sintab[int_((u * 0.125 + tt) * scale) & 255]
-                            zbl[idx] = iz
-                            fbl[idx] = tex[int_(sv2) % th * tw + int_(su2) % tw]
-                        iz += zdx
-                        uoz += udx
-                        voz += vdx
-                y += 1
+                    row = v * iw
+                    for idx in range(row + u, row + u + count):
+                        z = 1.0 / iz
+                        zbl[idx] = iz
+                        fbl[idx] = rowtab[tex[int_(voz * z) % th * tw + int_(uoz * z) % tw]]
+                        iz += zdx; uoz += udx; voz += vdx
+            else:                                      # per-pixel lightmap
 
-        def emit_face(fi, pts, rec, zscale=1.0):
-            # dispatch a world/brush face to the right sampler: warped liquid,
+                def fill(u, v, count):
+                    zbl = zb; fbl = fb; int_ = int
+                    xc = u + 0.5; yc = v + 0.5
+                    iz = z00 + zdx * xc + zdy * yc
+                    uoz = u00 + udx * xc + udy * yc
+                    voz = v00 + vdx * xc + vdy * yc
+                    row = v * iw
+                    for idx in range(row + u, row + u + count):
+                        z = 1.0 / iz
+                        u_ = uoz * z; v_ = voz * z
+                        lc = int_((u_ - lsmin) * 0.0625)
+                        if lc < 0: lc = 0
+                        elif lc >= lmw: lc = lmw - 1
+                        lr = int_((v_ - ltmin) * 0.0625)
+                        if lr < 0: lr = 0
+                        elif lr >= lmh: lr = lmh - 1
+                        sh = lux[lr * lmw + lc]
+                        zbl[idx] = iz
+                        fbl[idx] = cmap[(255 - sh & 252) << 6
+                                        | tex[int_(v_) % th * tw + int_(u_) % tw]]
+                        iz += zdx; uoz += udx; voz += vdx
+            surf.fill = fill
+
+        def emit_turb(pts, rec):
+            tw, th, tex = rec[0], rec[1], rec[2]
+            sintab = _TURBSIN; scale = _TURBSCALE; tt = time
+            out = []
+            A = pts[-1]; da = A[2] - NEAR
+            for B in pts:
+                db = B[2] - NEAR
+                if da >= 0.0:
+                    out.append(A)
+                if (da >= 0.0) != (db >= 0.0):
+                    t = da / (da - db)
+                    out.append((A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t, A[3] + (B[3] - A[3]) * t,
+                                A[4] + (B[4] - A[4]) * t))
+                A, da = B, db
+            if len(out) < 3:
+                return
+            sx = []; sy = []; siz = []; suz = []; svz = []
+            for cx, cy, cz, u, v in out:
+                iz = 1.0 / cz
+                sx.append(hw + cx * focal * iz)
+                sy.append(hh - cy * focal * iz)
+                siz.append(iz)
+                suz.append(u * iz)
+                svz.append(v * iz)
+            grads = plane_gradients(sx, sy, (siz, suz, svz))
+            if grads is None:
+                return
+            (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
+            surf = edges.add_surface(0, TURB, (z00, zdx, zdy), list(zip(sx, sy)))
+
+            def fill(u, v, count):
+                zbl = zb; fbl = fb; int_ = int
+                xc = u + 0.5; yc = v + 0.5
+                iz = z00 + zdx * xc + zdy * yc
+                uoz = u00 + udx * xc + udy * yc
+                voz = v00 + vdx * xc + vdy * yc
+                row = v * iw
+                for idx in range(row + u, row + u + count):
+                    z = 1.0 / iz
+                    u_ = uoz * z; v_ = voz * z
+                    su2 = u_ + sintab[int_((v_ * 0.125 + tt) * scale) & 255]
+                    sv2 = v_ + sintab[int_((u_ * 0.125 + tt) * scale) & 255]
+                    zbl[idx] = iz
+                    fbl[idx] = tex[int_(sv2) % th * tw + int_(su2) % tw]
+                    iz += zdx; uoz += udx; voz += vdx
+            surf.fill = fill
+
+        def emit_flat(pts, ci):
+            out = []
+            A = pts[-1]; da = A[2] - NEAR
+            for B in pts:
+                db = B[2] - NEAR
+                if da >= 0.0:
+                    out.append(A)
+                if (da >= 0.0) != (db >= 0.0):
+                    t = da / (da - db)
+                    out.append((A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t,
+                                A[2] + (B[2] - A[2]) * t))
+                A, da = B, db
+            if len(out) < 3:
+                return
+            sx = []; sy = []; siz = []
+            for vx, vy, vz in out:
+                iz = 1.0 / vz
+                sx.append(hw + vx * focal * iz)
+                sy.append(hh - vy * focal * iz)
+                siz.append(iz)
+            grads = plane_gradients(sx, sy, (siz,))
+            if grads is None:
+                return
+            z00, zdx, zdy = grads[0]
+            surf = edges.add_surface(0, NORMAL, (z00, zdx, zdy), list(zip(sx, sy)))
+
+            def fill(u, v, count):
+                zbl = zb; fbl = fb
+                iz = z00 + zdx * (u + 0.5) + zdy * (v + 0.5)
+                row = v * iw
+                for idx in range(row + u, row + u + count):
+                    zbl[idx] = iz
+                    fbl[idx] = ci
+                    iz += zdx
+            surf.fill = fill
+
+        def emit_face(fi, pts, rec):
+            # dispatch a world/brush face to the right emitter: warped liquid,
             # scrolled sky, the lit-surface cache (real lightmaps -- nearly all
             # world geometry), or per-pixel lightmap sampling as the fallback.
-            # zscale biases the z-buffer depth (>1 for moving brush models, so a
-            # lift flush with a wall wins the coplanar tie instead of shimmering).
             if face_turb[fi]:
-                raster_poly_tex_turb(pts, rec)
+                emit_turb(pts, rec)
             elif face_sky[fi]:
                 # the two sky layers, composited and scrolled into one 128-tile
                 # (no doubling); falls back to the raw miptex if it wasn't split.
                 tile = sky_tiles.get(face_sky_mt[fi])
                 srec = (tile[0], tile[1], tile[2], rec[3], rec[4]) if tile else rec
-                raster_poly_tex(pts, srec, face_lm[fi], zscale)
+                emit_tex(pts, srec, face_lm[fi], SKY)
             else:
                 lm = face_lm[fi]
                 if lm[5]:
-                    raster_poly_cached(pts, self._surface_cache(fi, rec),
-                                       lm[2], lm[3], zscale)
+                    emit_cached(pts, self._surface_cache(fi, rec), lm[2], lm[3])
                 else:
-                    raster_poly_tex(pts, rec, lm, zscale)
+                    emit_tex(pts, rec, lm)
 
         def raster_alias(mdl, verts, org, ang, zscale=1.0):
             # rotate model verts into world, transform to camera, flat-shade each
@@ -2129,8 +2225,8 @@ class Renderer:
                                 vx * t0 + vy * t1 + vz * t2 + t3))
                 emit_face(fi, cam, rec)
             else:
-                raster_poly([transform(vi) for vi in face_verts[fi]],
-                            face_color_idx[fi])
+                emit_flat([transform(vi) for vi in face_verts[fi]],
+                          face_color_idx[fi])
 
         PROFILER.begin("raster")        # per-pixel fill of all visible geometry
         # world (model 0): mark the visible leaves' surfaces and their ancestor
@@ -2143,6 +2239,7 @@ class Renderer:
         node_visframe = self.node_visframe
         node_parent = self.node_parent
         leaf_parent = self.leaf_parent
+        edges.begin_frame()             # reset the span/edge engine for this frame
         for li in visible_leaves:
             _, _, firstmark, nummark = leafs[li]
             for m in range(firstmark, firstmark + nummark):
@@ -2207,7 +2304,7 @@ class Renderer:
                                         dx * fx + dy * fy + dz * fz,
                                         vx * s0 + vy * s1 + vz * s2 + s3,
                                         vx * t0 + vy * t1 + vz * t2 + t3))
-                        emit_face(fi, pts, rec, BMODEL_ZSCALE)
+                        emit_face(fi, pts, rec)
                     else:
                         pts = []
                         for vi in face_verts[fi]:
@@ -2216,7 +2313,14 @@ class Renderer:
                             pts.append((dx * rx + dy * ry + dz * rz,
                                         dx * ux + dy * uy + dz * uz,
                                         dx * fx + dy * fy + dz * fz))
-                        raster_poly(pts, face_color_idx[fi], BMODEL_ZSCALE)
+                        emit_flat(pts, face_color_idx[fi])
+        # resolve world + brush occlusion in one scanline sweep, then fill each
+        # surviving span (write-only -- the stack already ordered them).
+        for surf in edges.scan():
+            fh = surf.fill
+            if fh is not None:
+                for (su, sv, scount) in surf.spans:
+                    fh(su, sv, scount)
 
         # alias (.mdl) entities -- monsters, items
         if alias_ents:

@@ -2022,7 +2022,24 @@ class Renderer:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
             surf = edges.add_surface(key, flags, (z00, zdx, zdy), list(zip(sx, sy)))
-            if lmw == 1 and lmh == 1:                  # flat (sky / no lightmap)
+            if flags == SKY:
+                # sky is drawn UNLIT: raw composited texels, never through the
+                # colormap (D_DrawSkyScans8 writes r_skysource[] straight to the
+                # framebuffer, d_sky.c:125). Row 0 would be the 2x overbright row.
+
+                def fill(u, v, count):
+                    zbl = zb; fbl = fb; int_ = int
+                    xc = u + 0.5; yc = v + 0.5
+                    iz = z00 + zdx * xc + zdy * yc
+                    uoz = u00 + udx * xc + udy * yc
+                    voz = v00 + vdx * xc + vdy * yc
+                    row = v * iw
+                    for idx in range(row + u, row + u + count):
+                        z = 1.0 / iz
+                        zbl[idx] = iz
+                        fbl[idx] = tex[int_(voz * z) % th * tw + int_(uoz * z) % tw]
+                        iz += zdx; uoz += udx; voz += vdx
+            elif lmw == 1 and lmh == 1:                # flat (no lightmap)
                 rowtab = cmap_rows[(255 - lux[0]) >> 2]
 
                 def fill(u, v, count):

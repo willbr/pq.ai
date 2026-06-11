@@ -1902,7 +1902,7 @@ class Renderer:
         # coplanar lift/wall shimmer deterministically (no per-pixel float ties).
         edges = self.edges
 
-        def emit_cached(pts, sc, csmin, ctmin):
+        def emit_cached(pts, sc, csmin, ctmin, key=0):
             cw, ch, cache = sc[0], sc[1], sc[2]
             out = []
             A = pts[-1]; da = A[2] - NEAR
@@ -1930,7 +1930,7 @@ class Renderer:
             if grads is None:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
-            surf = edges.add_surface(0, NORMAL, (z00, zdx, zdy), list(zip(sx, sy)))
+            surf = edges.add_surface(key, NORMAL, (z00, zdx, zdy), list(zip(sx, sy)))
 
             cwm = cw - 1; chm = ch - 1
 
@@ -1957,7 +1957,7 @@ class Renderer:
                     iz += zdx; uoz += udx; voz += vdx
             surf.fill = fill
 
-        def emit_tex(pts, rec, lm, flags=NORMAL):
+        def emit_tex(pts, rec, lm, flags=NORMAL, key=0):
             tw, th, tex = rec[0], rec[1], rec[2]
             lmw, lmh, lsmin, ltmin, lux = lm[0], lm[1], lm[2], lm[3], lm[4]
             out = []
@@ -1986,7 +1986,7 @@ class Renderer:
             if grads is None:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
-            surf = edges.add_surface(0, flags, (z00, zdx, zdy), list(zip(sx, sy)))
+            surf = edges.add_surface(key, flags, (z00, zdx, zdy), list(zip(sx, sy)))
             if lmw == 1 and lmh == 1:                  # flat (sky / no lightmap)
                 rowtab = cmap_rows[(255 - lux[0]) >> 2]
 
@@ -2027,7 +2027,7 @@ class Renderer:
                         iz += zdx; uoz += udx; voz += vdx
             surf.fill = fill
 
-        def emit_turb(pts, rec):
+        def emit_turb(pts, rec, key=0):
             tw, th, tex = rec[0], rec[1], rec[2]
             sintab = _TURBSIN; scale = _TURBSCALE; tt = time
             out = []
@@ -2056,7 +2056,7 @@ class Renderer:
             if grads is None:
                 return
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
-            surf = edges.add_surface(0, TURB, (z00, zdx, zdy), list(zip(sx, sy)))
+            surf = edges.add_surface(key, TURB, (z00, zdx, zdy), list(zip(sx, sy)))
 
             def fill(u, v, count):
                 zbl = zb; fbl = fb; int_ = int
@@ -2075,7 +2075,7 @@ class Renderer:
                     iz += zdx; uoz += udx; voz += vdx
             surf.fill = fill
 
-        def emit_flat(pts, ci):
+        def emit_flat(pts, ci, key=0):
             out = []
             A = pts[-1]; da = A[2] - NEAR
             for B in pts:
@@ -2099,7 +2099,7 @@ class Renderer:
             if grads is None:
                 return
             z00, zdx, zdy = grads[0]
-            surf = edges.add_surface(0, NORMAL, (z00, zdx, zdy), list(zip(sx, sy)))
+            surf = edges.add_surface(key, NORMAL, (z00, zdx, zdy), list(zip(sx, sy)))
 
             def fill(u, v, count):
                 zbl = zb; fbl = fb
@@ -2111,24 +2111,24 @@ class Renderer:
                     iz += zdx
             surf.fill = fill
 
-        def emit_face(fi, pts, rec):
+        def emit_face(fi, pts, rec, key=0):
             # dispatch a world/brush face to the right emitter: warped liquid,
             # scrolled sky, the lit-surface cache (real lightmaps -- nearly all
             # world geometry), or per-pixel lightmap sampling as the fallback.
             if face_turb[fi]:
-                emit_turb(pts, rec)
+                emit_turb(pts, rec, key)
             elif face_sky[fi]:
                 # the two sky layers, composited and scrolled into one 128-tile
                 # (no doubling); falls back to the raw miptex if it wasn't split.
                 tile = sky_tiles.get(face_sky_mt[fi])
                 srec = (tile[0], tile[1], tile[2], rec[3], rec[4]) if tile else rec
-                emit_tex(pts, srec, face_lm[fi], SKY)
+                emit_tex(pts, srec, face_lm[fi], SKY, key)
             else:
                 lm = face_lm[fi]
                 if lm[5]:
-                    emit_cached(pts, self._surface_cache(fi, rec), lm[2], lm[3])
+                    emit_cached(pts, self._surface_cache(fi, rec), lm[2], lm[3], key)
                 else:
-                    emit_tex(pts, rec, lm)
+                    emit_tex(pts, rec, lm, NORMAL, key)
 
         def raster_alias(mdl, verts, org, ang, zscale=1.0):
             # rotate model verts into world, transform to camera, flat-shade each
@@ -2211,7 +2211,7 @@ class Renderer:
                                  (cb[0], cb[1], cb[2], s1, t1),
                                  (cc[0], cc[1], cc[2], s2, t2)], rec, lm, zscale)
 
-        def emit_world_face(fi):
+        def emit_world_face(fi, key):
             nx, ny, nz, dist = face_plane[fi]
             if ox * nx + oy * ny + oz * nz - dist <= BACKFACE_EPS:
                 return
@@ -2226,10 +2226,10 @@ class Renderer:
                     cam.append((c[0], c[1], c[2],
                                 vx * s0 + vy * s1 + vz * s2 + s3,
                                 vx * t0 + vy * t1 + vz * t2 + t3))
-                emit_face(fi, cam, rec)
+                emit_face(fi, cam, rec, key)
             else:
                 emit_flat([transform(vi) for vi in face_verts[fi]],
-                          face_color_idx[fi])
+                          face_color_idx[fi], key)
 
         PROFILER.begin("raster")        # per-pixel fill of all visible geometry
         # world (model 0): mark the visible leaves' surfaces and their ancestor
@@ -2255,22 +2255,76 @@ class Renderer:
         nodes = bsp.nodes
         planes = bsp.planes
 
-        def walk_front(num):
-            while num >= 0 and node_visframe[num] == frame:
-                planenum, children, ff, nf = nodes[num]
-                (nx, ny, nz), dist, _ = planes[planenum]
-                if ox * nx + oy * ny + oz * nz - dist >= 0:
-                    near, far = children
-                else:
-                    far, near = children
-                walk_front(near)
-                for fi in range(ff, ff + nf):
-                    if face_visframe[fi] == frame and face_frame[fi] != frame:
-                        face_frame[fi] = frame
-                        emit_world_face(fi)
-                num = far                   # tail-iterate down the far side
+        # Faithful WinQuake key numbering (R_RecursiveWorldNode, r_bsp.c): one
+        # monotonic counter walked front-to-back. Each visible leaf takes a key
+        # (stored for brush models to inherit -- their fragments sort at the depth
+        # of the world leaf they fall in), and each node's surfaces share a key.
+        # Front geometry gets smaller keys, so the surface stack orders by key
+        # (1/z only breaks same-key ties). leaf_key[]/leaf_keyframe[] persist.
+        nleafs = len(leafs)
+        if getattr(self, "leaf_key", None) is None or len(self.leaf_key) != nleafs:
+            self.leaf_key = [0] * nleafs
+            self.leaf_keyframe = [-1] * nleafs
+        leaf_key = self.leaf_key
+        leaf_keyframe = self.leaf_keyframe
+        rkey = [0]                       # boxed so the nested walk can mutate it
 
-        walk_front(self.headnode)
+        def world_node(num):
+            if num < 0:                  # leaf: take the next key (front-to-back)
+                li2 = -num - 1
+                leaf_key[li2] = rkey[0]
+                leaf_keyframe[li2] = frame
+                rkey[0] += 1
+                return
+            if node_visframe[num] != frame:
+                return
+            planenum, children, ff, nf = nodes[num]
+            (nx, ny, nz), dist, _ = planes[planenum]
+            if ox * nx + oy * ny + oz * nz - dist >= 0:
+                near, far = children
+            else:
+                far, near = children
+            world_node(near)
+            k = rkey[0]
+            for fi in range(ff, ff + nf):
+                if face_visframe[fi] == frame and face_frame[fi] != frame:
+                    face_frame[fi] = frame
+                    emit_world_face(fi, k)
+            if nf:                       # all of a node's surfaces share one key
+                rkey[0] += 1
+            world_node(far)
+
+        world_node(self.headnode)
+        far_key = rkey[0]                # past every world key == "behind everything"
+
+        def world_topnode(mins, maxs):
+            # R_SplitEntityOnNode2: walk the box down the world BSP; return
+            # ('leaf', idx) when it lands wholly in one leaf, or ('node', num) at
+            # the first plane it straddles (so the bmodel must be BSP-clipped).
+            num = self.headnode
+            while True:
+                if num < 0:
+                    li2 = -num - 1
+                    if leafs[li2][0] == -2:        # CONTENTS_SOLID
+                        return None
+                    return ("leaf", li2)
+                planenum, children, _, _ = nodes[num]
+                (nx, ny, nz), dist, _ = planes[planenum]
+                farp = (nx * (mins[0] if nx >= 0 else maxs[0]) +
+                        ny * (mins[1] if ny >= 0 else maxs[1]) +
+                        nz * (mins[2] if nz >= 0 else maxs[2])) - dist
+                nearp = (nx * (maxs[0] if nx >= 0 else mins[0]) +
+                         ny * (maxs[1] if ny >= 0 else mins[1]) +
+                         nz * (maxs[2] if nz >= 0 else mins[2])) - dist
+                if farp >= 0:
+                    num = children[0]              # box wholly in front
+                elif nearp < 0:
+                    num = children[1]              # box wholly behind
+                else:
+                    return ("node", num)           # straddles -> clip needed
+
+        def leaf_bkey(li2):
+            return leaf_key[li2] if leaf_keyframe[li2] == frame else far_key
 
         # brush-model entities (doors, lifts, buttons), each offset to its origin
         if self.brushmodels:
@@ -2284,6 +2338,20 @@ class Renderer:
                 maxs = (mx[0] + ofx, mx[1] + ofy, mx[2] + ofz)
                 if not self.box_in_pvs(mins, maxs, vis):
                     continue
+                # Key the bmodel into the world's BSP order so its surfaces sort
+                # correctly against the world (R_DrawBEntitiesOnList). If the box
+                # lands wholly in one leaf, every face inherits that leaf's key;
+                # if it straddles, it must be BSP-clipped per-fragment (Stage 3).
+                tn = world_topnode(mins, maxs)
+                if tn is None:
+                    continue
+                if tn[0] == "leaf":
+                    bkey = leaf_bkey(tn[1])
+                else:
+                    cl = self.point_leaf(((mins[0] + maxs[0]) * 0.5,
+                                          (mins[1] + maxs[1]) * 0.5,
+                                          (mins[2] + maxs[2]) * 0.5))
+                    bkey = leaf_bkey(cl)
                 ff = md["firstface"]
                 for fi in range(ff, ff + md["numfaces"]):
                     if face_frame[fi] == frame:
@@ -2307,7 +2375,7 @@ class Renderer:
                                         dx * fx + dy * fy + dz * fz,
                                         vx * s0 + vy * s1 + vz * s2 + s3,
                                         vx * t0 + vy * t1 + vz * t2 + t3))
-                        emit_face(fi, pts, rec)
+                        emit_face(fi, pts, rec, bkey)
                     else:
                         pts = []
                         for vi in face_verts[fi]:
@@ -2316,7 +2384,7 @@ class Renderer:
                             pts.append((dx * rx + dy * ry + dz * rz,
                                         dx * ux + dy * uy + dz * uz,
                                         dx * fx + dy * fy + dz * fz))
-                        emit_flat(pts, face_color_idx[fi])
+                        emit_flat(pts, face_color_idx[fi], bkey)
         # resolve world + brush occlusion in one scanline sweep, then fill each
         # surviving span (write-only -- the stack already ordered them).
         for surf in edges.scan():

@@ -757,11 +757,18 @@ class Renderer:
                         self.style_faces.setdefault(st, []).append(fi)
                     rec = (lmw, lmh, bsmin * 16.0, btmin * 16.0, bytearray(n), True)
             if rec is None:
-                # no lightmap == TEX_SPECIAL (sky / liquids / teleport): Quake
-                # draws these full-bright. The textured rasteriser samples this
-                # 1x1 luxel (255), while flat mode keeps the directional shade.
+                # lightofs == -1: no static lightmap. id's R_BuildLightMap splits
+                # these two ways:
+                #  - TEX_SPECIAL (sky / *liquids / teleport): the sky and warp
+                #    paths ignore lighting, so draw full bright (1x1 luxel 255).
+                #  - an ordinary opaque face the LIGHT tool reached no light on
+                #    (surf->samples == NULL): blocklights stay 0, so it renders
+                #    at the darkest colormap row -- DARK, not bright. The old
+                #    fallback full-brighted every -1 face, lighting up unlit
+                #    ceilings/recesses (e.g. e1m4's rock roof). luxel 0 -> row 63.
+                special = self.face_sky[fi] or self.face_turb[fi]
                 shade = min(255, self.face_shade[fi])
-                rec = (1, 1, 0.0, 0.0, bytearray((255,)), False)
+                rec = (1, 1, 0.0, 0.0, bytearray((255 if special else 0,)), False)
                 self.face_light_avg[fi] = shade        # constant; never recombined
             self.face_lm.append(rec)
             self.face_lm_styles.append(blocks)

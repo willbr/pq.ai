@@ -74,6 +74,36 @@ def test_airborne_monster_falls_and_lands():
     assert "demon/dland2.wav" in sv.snd.played, "no landing thud"
 
 
+def test_step_impact_fires_touch():
+    """SV_Physics_Step runs the touch function (SV_Impact, sv_phys.c:300) on
+    whatever the falling monster hits. Demon leaps depend on it: Demon_JumpTouch
+    is the touch set during the leap, and it's what clears the jump state and
+    sends the demon back to demon1_run1 -- without it the demon hangs mid-leap
+    and never lands properly."""
+    sv = _boot()
+    e = _find_monster(sv)
+    f, vm = sv.f, sv.vm
+    ox, oy, oz = vm.fget_v(e, f["origin"])
+    vm.fset_v(e, f["origin"], (ox, oy, oz + 60.0))      # hoist into the air
+    tr = sv._box_move(e, (ox, oy, oz + 60.0), (ox, oy, oz + 59.0))
+    assert not tr.allsolid, "test spot is inside geometry; pick another hoist"
+    flags = int(vm.fget_f(e, f["flags"]))
+    vm.fset_f(e, f["flags"], float(flags & ~FL_ONGROUND))
+
+    impacts = []
+    orig_impact = sv._sv_impact
+    def spy(a, b):
+        impacts.append((a, b))
+        return orig_impact(a, b)
+    sv._sv_impact = spy
+
+    for _ in range(40):                                 # 2s of 50ms frames
+        sv.run_frame(0.05)
+
+    assert any(a == e for a, _b in impacts), \
+        "step physics never fired touch on landing (Demon_JumpTouch never runs)"
+
+
 def test_knockback_velocity_integrates():
     sv = _boot()
     e = _find_monster(sv)
@@ -107,6 +137,7 @@ def test_water_transition_splashes():
 
 if __name__ == "__main__":
     test_airborne_monster_falls_and_lands()
+    test_step_impact_fires_touch()
     test_knockback_velocity_integrates()
     test_water_transition_splashes()
     print("OK")

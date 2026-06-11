@@ -667,6 +667,15 @@ class Server:
                     vm.fset_f(num, f["flags"], float(flags))
                     vm.fset_i(num, f["groundentity"],
                               tr.ent if tr.ent is not None else 0)
+                # SV_FlyMove runs the touch on impact (sv_phys.c:300) -- this is
+                # what fires Demon_JumpTouch so a leaping demon recovers from its
+                # jump, and wounds whatever it lands on. Origin is already at the
+                # contact point, so touch sees the entity where it hit.
+                vm.fset_v(num, f["origin"], tuple(org))
+                self._link_abs(num)
+                self._sv_impact(num, tr.ent if tr.ent is not None else 0)
+                if vm.free[num]:
+                    return                      # removed by its own touch
                 vel = self.phys.clip_velocity(vel, n, 1.0)
             vm.fset_v(num, f["origin"], tuple(org))
             vm.fset_v(num, f["velocity"], tuple(vel))

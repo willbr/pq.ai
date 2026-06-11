@@ -67,12 +67,24 @@ def test_bonus_flash_on_pickup_stuffcmd():
     assert c.view_palette is c.palette
 
 
-def test_water_contents_tint():
+def test_water_tint_only_when_eye_submerged():
+    # V_SetContentsColor keys off the view leaf: standing ankle-deep must not
+    # tint the screen -- only an underwater eye does
     c = _boot()
-    c.watertype = CONTENTS_WATER
+    from quake.sv import CONTENTS_EMPTY
+    # a water pool on e1m1 (guarded so map drift fails loudly, not weirdly)
+    x, y, surface = 544.0, 912.0, -296.0
+    assert c.phys.point_contents_0((x, y, surface - 12)) == CONTENTS_WATER
+    assert c.phys.point_contents_0((x, y, surface + 12)) == CONTENTS_EMPTY
+
+    c.pos = [x, y, surface + 10.0]      # feet wet (z-24), eye in air (z+22)
+    c.watertype = CONTENTS_WATER        # what WaterMove sees: feet are wet
     c._update_palette(0.05)
-    r, g, b = c.view_palette[0]
-    assert (r, g, b) == (65, 40, 25)            # 128/256 of (130, 80, 50)
+    assert c.view_palette is c.palette, "tinted while the head is above water"
+
+    c.pos = [x, y, surface - 30.0]      # eye 8 under the surface
+    c._update_palette(0.05)
+    assert c.view_palette[0] == (65, 40, 25)    # 128/256 of (130, 80, 50)
 
 
 def test_zbuf_renderframe_carries_view_palette():
@@ -90,6 +102,6 @@ if __name__ == "__main__":
     test_quad_tints_blue_and_clears()
     test_damage_flash_reddens_then_decays()
     test_bonus_flash_on_pickup_stuffcmd()
-    test_water_contents_tint()
+    test_water_tint_only_when_eye_submerged()
     test_zbuf_renderframe_carries_view_palette()
     print("OK")

@@ -357,7 +357,14 @@ class Client:
         self._cshift_bonus = max(0.0, self._cshift_bonus - 100.0 * dt)
 
         shifts = []
-        wt = self.watertype                     # V_SetContentsColor
+        # V_SetContentsColor keys off the *view leaf*: tint only when the eye
+        # is submerged, not when standing ankle-deep (self.watertype tracks
+        # the feet for QC WaterMove)
+        wt = CONTENTS_EMPTY
+        if self.phys is not None:
+            vofs = sv.player_view_ofs()
+            eye_z = self.pos[2] + (vofs[2] if vofs else VIEW_HEIGHT)
+            wt = self.phys.point_contents_0((self.pos[0], self.pos[1], eye_z))
         if wt == -3:
             shifts.append((130, 80, 50, 128))   # water
         elif wt == -4:

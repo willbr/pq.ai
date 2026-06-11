@@ -914,16 +914,36 @@ class Renderer:
         tmin_i = int(tmin)
         soff = smin_i % tw
         reps = (soff + cw + tw - 1) // tw
+        # Bilinearly interpolate the lightmap across each 16-texel luxel cell, as
+        # WinQuake's R_DrawSurfaceBlock does -- otherwise every cell is one flat
+        # shade and the lighting reads as 16-unit blocks. Full per-texel bilinear
+        # is too slow in Python, so blend at SUB-texel granularity: vertical blend
+        # once per cell column (left/right edge brightness), then horizontal blend
+        # per sub-span, keeping the C-level bytes.translate over each sub-span.
+        SUB = 4                                   # sub-spans/cell -> 4-texel grain
+        SW = 16 // SUB
+        lmw1, lmh1 = lmw - 1, lmh - 1
         for tc in range(ch):
             trow = ((tmin_i + tc) % th) * tw
             tiled = (tex[trow:trow + tw] * reps)[soff:soff + cw]
-            lr = (tc >> 4) * lmw
+            lr = tc >> 4
+            fy = (tc & 15) * 0.0625
+            omfy = 1.0 - fy
+            r0 = lr * lmw
+            r1 = (lr + 1 if lr < lmh1 else lr) * lmw   # clamp the bottom edge
             obase = tc * cw
             for lc in range(lmw):
-                tab = rows[(255 - lux[lr + lc]) >> 2]
-                s = lc << 4                       # 16 texels per luxel cell
-                out[obase + s:obase + s + 16] = \
-                    tiled[s:s + 16].translate(tab)
+                lc1 = lc + 1 if lc < lmw1 else lc      # clamp the right edge
+                left = lux[r0 + lc] * omfy + lux[r1 + lc] * fy
+                right = lux[r0 + lc1] * omfy + lux[r1 + lc1] * fy
+                s = lc << 4
+                for sub in range(SUB):
+                    fx = (sub * SW + SW * 0.5) * 0.0625
+                    bright = int(left * (1.0 - fx) + right * fx)
+                    tab = rows[(255 - bright) >> 2]
+                    ss = s + sub * SW
+                    out[obase + ss:obase + ss + SW] = \
+                        tiled[ss:ss + SW].translate(tab)
         ent = (cw, ch, out, tex)
         self._surf_cache_bytes += len(out)
         if self._surf_cache_bytes > 64 * 1024 * 1024:   # crude bound: flush all

@@ -204,6 +204,12 @@ _ALM = math.sqrt(_AL[0] ** 2 + _AL[1] ** 2 + _AL[2] ** 2)
 ALIAS_LIGHT = (_AL[0] / _ALM, _AL[1] / _ALM, _AL[2] / _ALM)
 ALIAS_GAIN = 2.0           # Quake skin averages are dark; brighten to be visible
 WORLD_GAIN = 2.2           # matches Renderer's per-face brightening for the world
+# WinQuake's view-model depth hack (R_AliasDrawModel, r_alias.c: ziscale *= 3 for
+# cl.viewent): scale only the z-buffer depth (not the screen projection) by this
+# for the first-person weapon, so it pushes 3x closer in z and always wins the
+# depth test against world geometry, and its own coaxial barrel triangles -- whose
+# true depths are near-equal -- separate by 3x and stop shimmering.
+VIEWMODEL_ZSCALE = 3.0
 
 
 def _bsp_texture_colors(bsp, palette):
@@ -1736,12 +1742,14 @@ class Renderer:
             vert_frame[vi] = frame
             return c
 
-        def raster_poly(cam, ci):
+        def raster_poly(cam, ci, zscale=1.0):
             # flat-shaded convex polygon filled with palette index ci:
             # near-plane clip (z >= NEAR), project, then scanline spans -- 1/z
             # is linear in screen space, so each row steps it with one add per
             # pixel (no per-pixel edge tests). The framebuffer is one index
             # byte per pixel, so the depth index doubles as the fb offset.
+            # zscale biases only the depth (the view model passes >1 to win the
+            # z-test), leaving the screen projection on the true 1/z.
             out = []
             A = cam[-1]; da = A[2] - NEAR
             for B in cam:
@@ -1761,7 +1769,7 @@ class Renderer:
                 iz = 1.0 / vz
                 sx.append(hw + vx * focal * iz)
                 sy.append(hh - vy * focal * iz)
-                siz.append(iz)
+                siz.append(iz * zscale)
             grads = plane_gradients(sx, sy, (siz,))
             if grads is None:
                 return                          # degenerate sliver: invisible
@@ -1779,13 +1787,17 @@ class Renderer:
                         iz += zdx
                 y += 1
 
-        def raster_poly_tex(cam, rec, lm):
+        def raster_poly_tex(cam, rec, lm, zscale=1.0):
             # textured convex polygon. cam: list of (cx, cy, cz, u, v). Near-clip
             # (z >= NEAR) interpolating u,v too, project, then scanline spans:
             # 1/z, u/z, v/z are linear in screen space, so each row steps them
             # with one add per pixel and recovers perspective-correct texels via
             # u,v = (u/z)/(1/z). The texel is modulated by the lightmap luxel
             # covering it (lm = (lmw, lmh, smin, tmin, luxels), sampled per px).
+            # zscale biases 1/z, u/z and v/z together: the depth written to the
+            # z-buffer is scaled (the view model passes >1 to win the test) while
+            # the projection stays on the true 1/z and the texel recovery is
+            # unchanged (zscale cancels in u/z over 1/z).
             tw, th, tex = rec[0], rec[1], rec[2]
             lmw, lmh, lsmin, ltmin, lux = lm[0], lm[1], lm[2], lm[3], lm[4]
             out = []
@@ -1807,11 +1819,12 @@ class Renderer:
             sx = []; sy = []; siz = []; suz = []; svz = []
             for cx, cy, cz, u, v in out:
                 iz = 1.0 / cz
-                sx.append(hw + cx * focal * iz)
+                sx.append(hw + cx * focal * iz)    # project on the true 1/z
                 sy.append(hh - cy * focal * iz)
-                siz.append(iz)
-                suz.append(u * iz)             # u/z, linear in screen space
-                svz.append(v * iz)
+                ziz = iz * zscale                  # depth biased; cancels in u,v
+                siz.append(ziz)
+                suz.append(u * ziz)            # u/z, linear in screen space
+                svz.append(v * ziz)
             grads = plane_gradients(sx, sy, (siz, suz, svz))
             if grads is None:
                 return                          # degenerate sliver: invisible
@@ -1995,9 +2008,10 @@ class Renderer:
                 else:
                     raster_poly_tex(pts, rec, lm)
 
-        def raster_alias(mdl, verts, org, ang):
+        def raster_alias(mdl, verts, org, ang, zscale=1.0):
             # rotate model verts into world, transform to camera, flat-shade each
             # triangle by its world normal (matches render_shaded's emit_alias).
+            # zscale biases the z-buffer depth (>1 for the view model).
             ox_e, oy_e, oz_e = org
             afwd, arr, aup = model_axes(ang)
             afx, afy, afz = afwd
@@ -2029,9 +2043,9 @@ class Renderer:
                 r = min(255, int(br * inten))
                 g = min(255, int(bg * inten))
                 bl = min(255, int(bb * inten))
-                raster_poly([cam[a], cam[b], cam[c]], nearest((r, g, bl)))
+                raster_poly([cam[a], cam[b], cam[c]], nearest((r, g, bl)), zscale)
 
-        def raster_alias_tex(mdl, verts, org, ang):
+        def raster_alias_tex(mdl, verts, org, ang, zscale=1.0):
             # textured alias model: skin-mapped per triangle, lit by the baked
             # light sampled at the model's origin (so a monster in a dark room is
             # dark) modulated by each triangle's facing.
@@ -2073,7 +2087,7 @@ class Renderer:
                 lm = (1, 1, 0.0, 0.0, bytes((shi,)))
                 raster_poly_tex([(ca[0], ca[1], ca[2], s0, t0),
                                  (cb[0], cb[1], cb[2], s1, t1),
-                                 (cc[0], cc[1], cc[2], s2, t2)], rec, lm)
+                                 (cc[0], cc[1], cc[2], s2, t2)], rec, lm, zscale)
 
         def emit_world_face(fi):
             nx, ny, nz, dist = face_plane[fi]
@@ -2265,14 +2279,16 @@ class Renderer:
                             zb[o] = iz
                             fb[o] = c
 
-        # first-person weapon view model: drawn last; sits at the camera so its
-        # near depth wins the z-test and it reads as on top. No PVS cull.
+        # first-person weapon view model: drawn last with a 3x depth bias
+        # (VIEWMODEL_ZSCALE, WinQuake's ziscale hack), so it wins the z-test
+        # against world geometry it pokes into and its own coaxial barrel
+        # triangles stop z-fighting. No PVS cull.
         if view_model:
             mdl, verts, org, ang = view_model
             if textured and mdl.skin_idx is not None:
-                raster_alias_tex(mdl, verts, org, ang)
+                raster_alias_tex(mdl, verts, org, ang, VIEWMODEL_ZSCALE)
             else:
-                raster_alias(mdl, verts, org, ang)
+                raster_alias(mdl, verts, org, ang, VIEWMODEL_ZSCALE)
         PROFILER.end("raster")
 
         return (fb, iw, ih), leaf

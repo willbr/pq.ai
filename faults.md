@@ -79,8 +79,13 @@ renderer port — its own project.
    plan.md. Interim stopgap if needed: ~1.001 bias on bmodel 1/z (id's own
    r_edge.c:493 fudge).
 
-9. **Weird z-fighting in the rendering of the nailgun.**
-   Missing WinQuake view-model depth hack: `R_AliasDrawModel` scales `ziscale`
-   by 3 for `cl.viewent` (r_alias.c); the port rasters the weapon like any
-   entity (render.py:2270-2275). Fix: `is_viewmodel=True` → multiply `iz` by
-   3.0 before the depth test. HIGH confidence.
+9. **Weird z-fighting in the rendering of the nailgun.** FIXED.
+   Ported WinQuake's view-model depth hack (`R_AliasDrawModel` scales `ziscale`
+   by 3 for `cl.viewent`, r_alias.c). The zbuf rasterisers now take a `zscale`
+   biasing only the z-buffer depth (1/z, and u/z, v/z together so the texel
+   recovery is unchanged), leaving the screen projection on the true 1/z; the
+   view-model draw passes VIEWMODEL_ZSCALE = 3.0 (render.py). The weapon's
+   coaxial barrel triangles separate 3x in depth and stop shimmering, and it
+   wins the z-test against world geometry it pokes into. Verified: the bias
+   changes the nailgun render but leaves a no-view-model frame byte-identical;
+   pinned by test_viewmodel_zbias.py. (World goldens regenerated; unchanged.)

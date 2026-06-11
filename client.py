@@ -122,6 +122,10 @@ class Client:
         # every texel through it and returns an 8-bit indexed framebuffer.
         self.colormap = self.pak.read("gfx/colormap.lmp")[:64 * 256]
         self._missing_warned = set()   # maps not in the pak we've already flagged
+        # inventory carried across changelevel (SV_SaveSpawnparms): parm1..16
+        # from the previous level's SetChangeParms, plus the episode sigils
+        self.spawn_parms = None
+        self.serverflags = 0.0
         # The mixer is platform-agnostic; a backend (chosen by OS) opens the
         # output stream and flips mixer.ok on. Kept on self so its ctypes
         # callback trampoline isn't garbage-collected. No backend -> muted.
@@ -198,7 +202,8 @@ class Client:
         # buttons and lifts are entities; their brush models are drawn at the
         # origins the QC sets, and invisible triggers no longer render.
         self.sv = Server(Progs(self.progs_data), bsp=self.bsp, mapname=path,
-                         skill=skill, physics=self.phys, pak=self.pak)
+                         skill=skill, physics=self.phys, pak=self.pak,
+                         serverflags=self.serverflags)
         self.sv.load_level()
 
         # load the .mdl models the level precached, indexed to match modelindex
@@ -252,7 +257,8 @@ class Client:
 
         # a client edict driven by the camera: gives monsters a target and gives
         # fired shots an attacker (so QC's damage/death logic runs)
-        self.sv.spawn_player(tuple(self.pos), (self.pitch, self.yaw, 0.0))
+        self.sv.spawn_player(tuple(self.pos), (self.pitch, self.yaw, 0.0),
+                             parms=self.spawn_parms)
 
         self._view_wh = (0, 0)
         return True
@@ -263,7 +269,14 @@ class Client:
 
     def _change_level(self, target):
         """Consume a pending changelevel: load the next map, carrying the skill
-        the player chose at the start-map setskill triggers."""
+        the player chose at the start-map setskill triggers and the inventory
+        SetChangeParms saves. A death restart skips the save (Host_Restart_f):
+        the player respawns with the loadout they entered the level with."""
+        if not self.sv.changelevel_restart:
+            parms = self.sv.save_spawn_parms()
+            if parms is not None:
+                self.spawn_parms = parms
+            self.serverflags = self.sv.serverflags
         skill = int(self.sv.cvars.get("skill", self.sv.skill))
         if not self._load_map(target, skill=skill):
             self.sv.changelevel = None      # missing map: don't retry every frame
@@ -412,6 +425,9 @@ class Client:
         if not args:
             self.con.print("usage: map <name>")
             return
+        # Host_Map_f starts a new game: default loadout, no episode sigils
+        self.spawn_parms = None
+        self.serverflags = 0.0
         if self._load_map(args[0]):               # rebuilds rend/sv; prints its own miss
             self.con.print(f"loading {args[0]}")
 

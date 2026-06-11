@@ -130,7 +130,8 @@ _GLOBALS = ("self", "other", "time", "frametime", "force_retouch", "skill",
             "total_secrets", "total_monsters", "found_secrets", "killed_monsters",
             "trace_allsolid", "trace_startsolid", "trace_fraction", "trace_endpos",
             "trace_plane_normal", "trace_plane_dist", "trace_ent",
-            "trace_inopen", "trace_inwater")
+            "trace_inopen", "trace_inwater",
+            "serverflags") + tuple(f"parm{i}" for i in range(1, 17))
 
 
 def anglemod(a):
@@ -222,7 +223,7 @@ def parse_entities(text):
 
 class Server:
     def __init__(self, progs, bsp=None, mapname="", skill=1, max_edicts=600,
-                 physics=None, pak=None):
+                 physics=None, pak=None, serverflags=0.0):
         self.pr = progs
         self.vm = VM(progs, max_edicts=max_edicts)
         self.bsp = bsp
@@ -238,6 +239,9 @@ class Server:
         # can fold it into the camera position it owns (SV_PushMove riders)
         self.player_carry = [0.0, 0.0, 0.0]
         self.changelevel = None     # set by the changelevel builtin; host reads it
+        self.changelevel_restart = False  # the pending change is a death restart
+        self.serverflags = serverflags  # episode sigils, carried across levels
+        self.spawn_parms = None     # parm1..16 the player spawned with
         self.intermission_time = None  # level time frozen when intermission began
         self.center_msg = None      # (text, time) from centerprint; host displays it
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
@@ -317,6 +321,7 @@ class Server:
 
         self.gset_f("time", self.time)
         self.gset_f("skill", float(self.skill))   # QC reads this for difficulty
+        self.gset_f("serverflags", float(self.serverflags))  # episode sigils
         self.gset_i("mapname", self.pr.new_string(self.mapname))
 
         spawned = inhibited = noclass = 0
@@ -1242,6 +1247,7 @@ class Server:
 
     def _pf_changelevel(self):
         self.changelevel = self.vm.parm_str(0)
+        self.changelevel_restart = False
 
     def _pf_localcmd(self):
         """localcmd(string): the QC pushes a console command. The only one we
@@ -1256,6 +1262,9 @@ class Server:
             if name.endswith(".bsp"):
                 name = name[:-len(".bsp")]
             self.changelevel = name
+            # Host_Restart_f does not re-save spawn parms: a death restart
+            # respawns with the loadout the player entered the level with.
+            self.changelevel_restart = True
 
     def _pf_centerprint(self):
         # centerprint(client, string): keep only the player's message; the host
@@ -1412,7 +1421,11 @@ class Server:
         self.particles = live
 
     def _pf_setspawnparms(self):
-        pass
+        # PF_setspawnparms(client): restore the parm1..16 globals to the values
+        # the client was spawned with (coop respawn keeps the entry loadout).
+        if self.spawn_parms:
+            for i, v in enumerate(self.spawn_parms, 1):
+                self.gset_f(f"parm{i}", float(v))
 
     def _pf_traceon(self):
         self.vm.trace = True
@@ -1503,9 +1516,40 @@ class Server:
         return frac, endpos, pnorm, allsolid, startsolid, hit_ent
 
     # ---- player edict + firing (engine-driven; QC does the damage) ----
-    def spawn_player(self, origin, angles):
+    def _exec_named(self, name, ent):
+        """Run the progs function `name` with self = ent. Returns False if
+        this progs has no such function; a PR_RunError is reported but does
+        not propagate (matching the per-think containment in run_frame)."""
+        func = self.pr.find_function(name)
+        if func is None:
+            return False
+        self.gset_f("time", self.time)
+        self.gset_i("self", ent)
+        self.gset_i("other", 0)
+        try:
+            self.vm.execute(func)
+        except PR_RunError as ex:
+            print(f"{name} aborted: {ex}")
+        return True
+
+    def save_spawn_parms(self):
+        """SV_SaveSpawnparms: grab the player's state for the transition to
+        another level. Runs QC SetChangeParms (strips keys/powerups, caps
+        health, writes parm1..parm9) and returns the parm1..16 globals for the
+        host to feed the next level's spawn_player. Also latches the
+        serverflags global (episode sigils) into self.serverflags. Returns
+        None if there is no live player."""
+        self.serverflags = self.gget_f("serverflags")
+        if not self.player or self.vm.free[self.player]:
+            return None
+        self._exec_named("SetChangeParms", self.player)
+        return [self.gget_f(f"parm{i}") for i in range(1, 17)]
+
+    def spawn_player(self, origin, angles, parms=None):
         """Create a client edict so monsters have a target and shots have an
-        attacker. The camera drives it each frame via update_player()."""
+        attacker. The camera drives it each frame via update_player().
+        `parms` is the parm1..16 list save_spawn_parms captured on the
+        previous level, or None for a fresh game's default loadout."""
         vm, f = self.vm, self.f
         e = vm.alloc_edict()
         self.player = e
@@ -1522,16 +1566,19 @@ class Server:
         die = self.pr.find_function("PlayerDie")
         if die is not None:
             vm.fset_i(e, f["th_die"], die)
-        # Quake's default loadout (client.qc SetNewParms): just the Axe and
-        # Shotgun with 25 shells. W_SetCurrentAmmo below ORs in the IT_SHELLS
-        # active-ammo bit and sets currentammo from the shell count.
-        vm.fset_f(e, f["items"], float(IT_SHOTGUN | IT_AXE))
-        vm.fset_f(e, f["weapon"], float(IT_SHOTGUN))
-        vm.fset_f(e, f["currentammo"], 25.0)
-        vm.fset_f(e, f["ammo_shells"], 25.0)
-        vm.fset_f(e, f["ammo_nails"], 0.0)
-        vm.fset_f(e, f["ammo_rockets"], 0.0)
-        vm.fset_f(e, f["ammo_cells"], 0.0)
+        # Loadout via the real QC, as PutClientInServer does: a fresh game runs
+        # SetNewParms (axe + shotgun, 25 shells); a changelevel hands us the
+        # parms SetChangeParms saved on the previous level. Either way the
+        # parm1..16 globals are filled and DecodeLevelParms restores
+        # items/health/armor/ammo/weapon from them.
+        if parms is None:
+            self._exec_named("SetNewParms", e)
+            parms = [self.gget_f(f"parm{i}") for i in range(1, 17)]
+        else:
+            for i, v in enumerate(parms, 1):
+                self.gset_f(f"parm{i}", float(v))
+        self.spawn_parms = list(parms)   # PF_setspawnparms restores from these
+        self._exec_named("DecodeLevelParms", e)
         vm.fset_v(e, f["view_ofs"], (0.0, 0.0, 22.0))
         # PutClientInServer gives the player a full 12s of air; without it the
         # first WaterMove sees air_finished == 0 < time and plays the drowning
@@ -1541,15 +1588,7 @@ class Server:
         # let the real QC pick the view model: W_SetCurrentAmmo sets .weaponmodel
         # ("progs/v_shot.mdl") and .weaponframe from .weapon, exactly as the game
         # does in PutClientInServer -- so the first-person weapon renders
-        func = self.pr.find_function("W_SetCurrentAmmo")
-        if func is not None:
-            self.gset_f("time", self.time)
-            self.gset_i("self", e)
-            self.gset_i("other", 0)
-            try:
-                vm.execute(func)
-            except PR_RunError as ex:
-                print(f"W_SetCurrentAmmo aborted: {ex}")
+        self._exec_named("W_SetCurrentAmmo", e)
         self.update_player(origin, angles)
         return e
 

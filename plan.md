@@ -7,23 +7,26 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
 
 ## Tier 1 — game rules that are broken or absent
 
-### 1.1 Inventory carry-over between levels
+### 1.1 Inventory carry-over between levels — DONE
 - `_pf_setspawnparms` is a no-op (`sv.py:1414`); `parm1–parm16` globals are
   never written or read, so QC's `SetChangeParms`/`DecodeLevelParms`
   (client.qc:62-123, host_cmd.c) never persist anything.
 - Every `changelevel` resets the player to shotgun + 25 shells. The biggest
   gameplay gap in the port.
-- Fix: on changelevel, set `self` to the player and call QC `SetChangeParms`
-  (which fills parm1..parm16); after the new level spawns the player, call
-  `DecodeLevelParms` instead of hard-coding the loadout in `spawn_player`
-  (`sv.py:1506`). Implement `setspawnparms` to copy the saved parms back
-  into the globals.
+- Done: `Server.save_spawn_parms()` ports `SV_SaveSpawnparms` (runs QC
+  `SetChangeParms`, returns parm1..16); `spawn_player(..., parms=)` writes
+  them back and runs QC `SetNewParms`/`DecodeLevelParms` instead of the
+  hard-coded loadout; `setspawnparms` builtin implemented; the host carries
+  parms across the Server rebuild in `_change_level` (death restart keeps
+  the entry loadout, `map` command resets, matching Host_Restart_f /
+  Host_Map_f). Tested in `test_spawn_parms.py`.
 
-### 1.2 serverflags / episode sigils
-- No `serverflags` global handling: rune bits set at episode ends, checked on
-  the start map (gate to END), and used by `DecodeLevelParms` to reset parms.
-- Fix: persist `serverflags` across `changelevel` in the host (like skill);
-  wire the global so QC reads/writes it.
+### 1.2 serverflags / episode sigils — DONE (with 1.1)
+- `serverflags` now persists across changelevel: `save_spawn_parms` latches
+  the global, the host hands it to the next `Server(serverflags=...)`, and
+  `load_level` seeds the global before spawn functions run (SV_SpawnServer).
+  QC sets the rune bits itself; `DecodeLevelParms`' start.bsp episode reset
+  works because the world edict's model is the map path.
 - Related: `SPAWNFLAG_NOT_DEATHMATCH` (2048) is defined but never checked in
   `_inhibited()` (`sv.py:359`) — only matters if DM is ever a goal.
 

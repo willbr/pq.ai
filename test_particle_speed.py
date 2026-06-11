@@ -1,16 +1,22 @@
-"""Particle velocity integration (sv.py _advance_particles / _burst).
+"""Per-frame particle integration (sv.py _advance_particles == r_part.c
+R_DrawParticles).
 
-Quake's R_DrawParticles ramps explosion-particle velocity each frame (r_part.c
-pt_explode / pt_explode2: vel += vel * 4*frametime), so an explosion bursts
-outward fast with a lingering core, and seeds them at (rand%512)-256 = +/-256
-u/s. The port previously drifted them at a flat +/-200 with no ramp, which read
-as near-static. These tests pin the corrected integration.
+id branches on each particle's ptype every frame (r_part.c:734):
+  pt_static    no gravity (tracers, voor trail)
+  pt_fire      vel.z += grav (rises), cools through ramp3, dies at ramp >= 6
+  pt_explode   vel += vel*dvel (dvel = 4*frametime), vel.z -= grav, ramp1
+  pt_explode2  vel -= vel*frametime (1x decel, NOT 4x), vel.z -= grav, ramp2
+  pt_blob      vel += vel*dvel, vel.z -= grav
+  pt_blob2     vel.xy -= vel.xy*dvel, vel.z -= grav
+  pt_grav/slowgrav  vel.z -= grav (falls)
+with grav = frametime * sv_gravity.value * 0.05. These tests pin that switch.
 """
 
 from quake.pak import Pak
 from quake.bsp import Bsp
 from quake.progs import Progs
-from quake.sv import Server, _TE_EFFECT
+from quake.sv import (Server, PT_STATIC, PT_FIRE, PT_GRAV, PT_SLOWGRAV,
+                      PT_EXPLODE, PT_EXPLODE2, PT_BLOB, PT_BLOB2, _RAMP3)
 from quake.physics import Physics
 
 PAK = "quake-shareware/id1/pak0.pak"
@@ -25,67 +31,84 @@ def _boot():
     return sv
 
 
-def test_positive_accel_ramps_velocity_up():
-    sv = _boot()
-    # x velocity 100, accel +4/s: after 0.1s vel.x *= (1 + 4*0.1) = 1.4
-    sv.particles[:] = [[0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 5, sv.time + 10, 4.0]]
+def _one(sv, vel, ptype, ramp=0.0, color=0):
+    """Advance a single particle one 0.1s frame and return it."""
+    sv.particles[:] = [[0.0, 0.0, 0.0, vel[0], vel[1], vel[2],
+                        color, sv.time + 10.0, ptype, ramp]]
     sv.time += 0.1
     sv._advance_particles(0.1)
-    assert abs(sv.particles[0][3] - 140.0) < 1e-6, sv.particles[0][3]
+    return sv.particles[0] if sv.particles else None
 
 
-def test_negative_accel_ramps_velocity_down():
+# grav = 800 * 0.05 * 0.1 = 4.0 on e1m1; dvel = 4 * 0.1 = 0.4
+
+def test_static_has_no_gravity():
+    p = _one(_boot(), (100.0, 0.0, 50.0), PT_STATIC)
+    assert p[3] == 100.0 and p[5] == 50.0, "static particle must not change velocity"
+    assert p[0] == 10.0, "org should still advance by vel*dt"
+
+
+def test_fire_rises_and_cools():
     sv = _boot()
-    # accel -4/s (pt_explode2): vel.x *= (1 - 4*0.1) = 0.6 -> 60
-    sv.particles[:] = [[0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 5, sv.time + 10, -4.0]]
+    p = _one(sv, (0.0, 0.0, 0.0), PT_FIRE, ramp=0.0)
+    assert abs(p[5] - 4.0) < 1e-9, "fire rises: vel.z += grav"
+    assert abs(p[9] - 0.5) < 1e-9, "ramp += time1 (5*dt)"
+    assert p[6] == _RAMP3[0], "fire colour follows ramp3"
+
+
+def test_fire_dies_when_ramp_maxes():
+    p = _one(_boot(), (0.0, 0.0, 0.0), PT_FIRE, ramp=5.8)   # 5.8 + 0.5 >= 6
+    assert p[7] == -1.0, "fire particle should be marked dead (die = -1)"
+
+
+def test_explode_accelerates_and_falls():
+    p = _one(_boot(), (100.0, 0.0, 0.0), PT_EXPLODE)
+    assert abs(p[3] - 140.0) < 1e-9, "vel += vel*dvel (4x): 100 -> 140"
+    assert abs(p[5] - (-4.0)) < 1e-9, "vel.z -= grav"
+
+
+def test_explode2_decelerates_at_1x_not_4x():
+    p = _one(_boot(), (100.0, 0.0, 0.0), PT_EXPLODE2)
+    # id: vel -= vel*frametime  => 100 - 100*0.1 = 90  (NOT 100 - 100*0.4 = 60)
+    assert abs(p[3] - 90.0) < 1e-9, f"explode2 decel should be 1x (90), got {p[3]}"
+    assert abs(p[5] - (-4.0)) < 1e-9, "vel.z -= grav"
+
+
+def test_blob_accelerates():
+    p = _one(_boot(), (100.0, 0.0, 0.0), PT_BLOB)
+    assert abs(p[3] - 140.0) < 1e-9
+
+
+def test_blob2_decelerates_xy_only():
+    p = _one(_boot(), (100.0, 100.0, 100.0), PT_BLOB2)
+    # xy use dvel (0.4): 100 - 100*0.4 = 60 ; z only gets gravity
+    assert abs(p[3] - 60.0) < 1e-9 and abs(p[4] - 60.0) < 1e-9
+    assert abs(p[5] - (100.0 - 4.0)) < 1e-9, "blob2 z: gravity only, no decel"
+
+
+def test_grav_and_slowgrav_fall():
+    for pt in (PT_GRAV, PT_SLOWGRAV):
+        p = _one(_boot(), (0.0, 0.0, 0.0), pt)
+        assert abs(p[5] - (-4.0)) < 1e-9, "grav/slowgrav fall by -grav"
+
+
+def test_short_particle_is_treated_as_static():
+    # the zbuf/overlay renderers inject 8-field particles; advancing must not crash
+    sv = _boot()
+    sv.particles[:] = [[0.0, 0.0, 0.0, 10.0, 0.0, 20.0, 5, sv.time + 10.0]]
     sv.time += 0.1
     sv._advance_particles(0.1)
-    assert abs(sv.particles[0][3] - 60.0) < 1e-6, sv.particles[0][3]
-
-
-def test_zero_accel_keeps_constant_horizontal_velocity():
-    sv = _boot()
-    sv.particles[:] = [[0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 5, sv.time + 10, 0.0]]
-    sv.time += 0.1
-    sv._advance_particles(0.1)
-    assert abs(sv.particles[0][3] - 100.0) < 1e-6, "no-accel particle changed speed"
-
-
-def test_explosion_te_is_fast_and_accelerating():
-    # the explosion temp-entity (type 3) seeds +/-256 and a non-zero outward ramp
-    _color, _count, spread, accel = _TE_EFFECT[3]
-    assert spread == 256, f"explosion spread should be 256, got {spread}"
-    assert accel > 0, "explosion particles should accelerate outward"
-
-
-def test_explosion_burst_outruns_constant_velocity():
-    sv = _boot()
-    sv.particles[:] = []
-    sv._burst((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 75, 24, 256, 4.0)
-    init_max = max((p[3] ** 2 + p[4] ** 2 + p[5] ** 2) ** 0.5 for p in sv.particles)
-    for _ in range(10):                              # 0.5 s
-        sv.time += 0.05
-        sv._advance_particles(0.05)
-    far = max((p[0] ** 2 + p[1] ** 2 + p[2] ** 2) ** 0.5 for p in sv.particles)
-    # without acceleration the farthest a particle could get in 0.5s is
-    # init_speed * 0.5; the ramp must carry the leading particles well past that
-    assert far > init_max * 0.5 * 1.5, \
-        f"explosion did not accelerate (reached {far:.0f}, flat bound {init_max*0.5:.0f})"
-
-
-def test_trail_particles_do_not_accelerate():
-    sv = _boot()
-    sv.particles[:] = []
-    sv._rocket_trail((0.0, 0.0, 0.0), (96.0, 0.0, 0.0), 0)   # a trail segment
-    assert sv.particles, "no trail particles spawned"
-    assert all(p[8] == 0.0 for p in sv.particles), "trail particles must not accelerate"
+    assert sv.particles[0][5] == 20.0, "8-field particle should not get gravity"
 
 
 if __name__ == "__main__":
-    test_positive_accel_ramps_velocity_up()
-    test_negative_accel_ramps_velocity_down()
-    test_zero_accel_keeps_constant_horizontal_velocity()
-    test_explosion_te_is_fast_and_accelerating()
-    test_explosion_burst_outruns_constant_velocity()
-    test_trail_particles_do_not_accelerate()
+    test_static_has_no_gravity()
+    test_fire_rises_and_cools()
+    test_fire_dies_when_ramp_maxes()
+    test_explode_accelerates_and_falls()
+    test_explode2_decelerates_at_1x_not_4x()
+    test_blob_accelerates()
+    test_blob2_decelerates_xy_only()
+    test_grav_and_slowgrav_fall()
+    test_short_particle_is_treated_as_static()
     print("OK")

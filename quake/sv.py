@@ -55,18 +55,29 @@ CONTENTS_SOLID = -2
 CONTENTS_WATER = -3
 
 SVC_TEMPENTITY = 23         # broadcast effect message (gunshots, teleport fog, ...)
-# temp-entity type -> (palette colour, particle count, velocity spread u/s,
-# outward accel). The spread is the peak initial outward speed; accel is the
-# per-second velocity ramp explosion particles get (r_part.c pt_explode,
-# dvel = 4*frametime). Quake flings explosion particles at (rand%512)-256
-# = +/-256 u/s and accelerates them, so anything slower reads as a near-static
-# drift. Point effects only; beam types (lightning) spark once, harmlessly.
-_TE_EFFECT = {
-    0: (0, 6, 60, 0.0), 1: (0, 8, 80, 0.0), 2: (0, 6, 60, 0.0),   # spikes, gunshot
-    3: (75, 24, 256, 4.0), 4: (75, 24, 256, 4.0),    # explosion, tarexplosion
-    7: (60, 10, 80, 0.0), 8: (0, 8, 80, 0.0),        # wizspike (green), knightspike
-    10: (244, 32, 120, 0.0), 11: (244, 30, 60, 0.0), # lavasplash, teleport fog
-}
+
+# --- particles (r_part.c) ---------------------------------------------------
+# colour-ramp tables explosions and fire animate through as they cool (r_part.c:29)
+_RAMP1 = (0x6f, 0x6d, 0x6b, 0x69, 0x67, 0x65, 0x63, 0x61)   # pt_explode
+_RAMP2 = (0x6f, 0x6e, 0x6d, 0x6c, 0x6b, 0x6a, 0x68, 0x66)   # pt_explode2
+_RAMP3 = (0x6d, 0x6b, 6, 5, 4, 3)                           # pt_fire (rocket smoke)
+
+# particle types (r_part.c ptype_t): pick the per-frame gravity/decel/colour path
+PT_STATIC   = 0     # no gravity (tracers, voor trail)
+PT_GRAV     = 1     # falls (blood)
+PT_SLOWGRAV = 2     # falls (gunshots, splashes) -- same integration as pt_grav
+PT_FIRE     = 3     # rises, cools via ramp3, dies at ramp >= 6 (rocket/grenade smoke)
+PT_EXPLODE  = 4     # accelerates, cools via ramp1, dies at ramp >= 8
+PT_EXPLODE2 = 5     # decelerates (1x), cools via ramp2, dies at ramp >= 8
+PT_BLOB     = 6     # accelerates (tarbaby/quad)
+PT_BLOB2    = 7     # decelerates in x/y (tarbaby/quad)
+
+MAX_PARTICLES = 2048    # id's pool size (r_part.c MAX_PARTICLES); drop the oldest past it
+# id spawns ~1024 particles per explosion/splash; the pure-Python point rasteriser
+# can't carry that, so the big bursts are subsampled to this many while keeping
+# id's exact per-particle physics, colours, lifetimes and jitter. The small
+# effects (spikes, gunshots, trails) keep their full id counts.
+_BIG_BURST = 128
 # beam temp entities: WriteEntity(owner) + two WriteCoord vectors, drawn as
 # chained bolt models (CL_ParseBeam). Type -> model.
 _TE_BEAMS = {
@@ -264,7 +275,8 @@ class Server:
         self.spawn_parms = None     # parm1..16 the player spawned with
         self.intermission_time = None  # level time frozen when intermission began
         self.center_msg = None      # (text, time) from centerprint; host displays it
-        self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
+        self.particles = []         # live points: [x,y,z, vx,vy,vz, color, die, type, ramp]
+        self._tracercount = 0       # R_RocketTrail's static counter (tracer zigzag)
         self._te = None             # in-progress temp-entity message being parsed
         self.beams = []             # live lightning beams (CL_ParseBeam state)
         self.dlight_events = []     # one-shot dynamic lights (explosions);
@@ -1482,31 +1494,116 @@ class Server:
             if msg:
                 self.center_msg = (msg, self.time)
 
-    def _burst(self, org, vel, color, count, spread=20.0, accel=0.0):
-        """Spawn `count` point sprites at org with a base velocity plus a random
-        outward kick of +/- `spread` u/s per axis. `accel` is the per-second
-        velocity ramp R_DrawParticles applies to explosion particles (r_part.c
-        pt_explode/pt_explode2: vel += vel * 4*frametime): alternate particles
-        accelerate and decelerate, so an explosion bursts outward fast with a
-        lingering core instead of drifting at a flat speed."""
-        count = max(1, min(count, 24))
-        die = self.time + 0.6
-        for i in range(count):
-            a = accel if (i & 1) == 0 else -accel   # pt_explode / pt_explode2
+    def _cap_particles(self):
+        """Bound the live list at MAX_PARTICLES, dropping the oldest. id stops
+        spawning when its fixed pool is exhausted; trimming the front is the
+        visually gentler equivalent for our growable list."""
+        n = len(self.particles)
+        if n > MAX_PARTICLES:
+            del self.particles[:n - MAX_PARTICLES]
+
+    def _run_particle_effect(self, org, dirv, color, count):
+        """R_RunParticleEffect: gunshots/spikes. Each particle is pt_slowgrav,
+        seeded at dir*15 (barely moving -- the random kick is commented out in
+        id), coloured (color & ~7) + rand&7, jittered +/-8 about org. count==1024
+        is id's rocket-explosion shorthand and routes to R_ParticleExplosion."""
+        if count == 1024:
+            self._particle_explosion(org)
+            return
+        t = self.time
+        for _ in range(count):
             self.particles.append([
-                org[0], org[1], org[2],
-                vel[0] + (random.random() * 2.0 - 1.0) * spread,
-                vel[1] + (random.random() * 2.0 - 1.0) * spread,
-                vel[2] + (random.random() * 2.0 - 1.0) * spread,
-                (color + i) & 255, die, a])
-        if len(self.particles) > 400:                # bound the list
-            del self.particles[:len(self.particles) - 400]
+                org[0] + (random.randint(0, 15) - 8),
+                org[1] + (random.randint(0, 15) - 8),
+                org[2] + (random.randint(0, 15) - 8),
+                dirv[0] * 15.0, dirv[1] * 15.0, dirv[2] * 15.0,
+                ((color & ~7) + random.randint(0, 7)) & 255,
+                t + 0.1 * random.randint(0, 4), PT_SLOWGRAV, 0.0])
+        self._cap_particles()
+
+    def _particle_explosion(self, org):
+        """R_ParticleExplosion: rocket/grenade blast. Alternating pt_explode /
+        pt_explode2 (one accelerates and cools through ramp1, the other
+        decelerates through ramp2), seeded +/-256 u/s, +/-16 about org, ramp
+        rand&3. id spawns 1024; we subsample to _BIG_BURST."""
+        t = self.time
+        for i in range(_BIG_BURST):
+            ptype = PT_EXPLODE if (i & 1) else PT_EXPLODE2
+            self.particles.append([
+                org[0] + (random.randint(0, 31) - 16),
+                org[1] + (random.randint(0, 31) - 16),
+                org[2] + (random.randint(0, 31) - 16),
+                float(random.randint(0, 511) - 256),
+                float(random.randint(0, 511) - 256),
+                float(random.randint(0, 511) - 256),
+                _RAMP1[0], t + 5.0, ptype, float(random.randint(0, 3))])
+        self._cap_particles()
+
+    def _blob_explosion(self, org):
+        """R_BlobExplosion: tarbaby/Quad blast. Alternating pt_blob (colour
+        66+rand%6) / pt_blob2 (150+rand%6), +/-256 u/s, +/-16 about org. id
+        spawns 1024; we subsample to _BIG_BURST."""
+        t = self.time
+        for i in range(_BIG_BURST):
+            die = t + 1.0 + random.randint(0, 1) * 8 * 0.05   # (rand&8)*0.05: 0 or .4
+            if i & 1:
+                ptype, col = PT_BLOB, 66 + random.randint(0, 5)
+            else:
+                ptype, col = PT_BLOB2, 150 + random.randint(0, 5)
+            self.particles.append([
+                org[0] + (random.randint(0, 31) - 16),
+                org[1] + (random.randint(0, 31) - 16),
+                org[2] + (random.randint(0, 31) - 16),
+                float(random.randint(0, 511) - 256),
+                float(random.randint(0, 511) - 256),
+                float(random.randint(0, 511) - 256),
+                col & 255, die, ptype, 0.0])
+        self._cap_particles()
+
+    def _lava_splash(self, org):
+        """R_LavaSplash: a ring of pt_slowgrav jets shooting up (dir.z = 256),
+        colour 224+rand&7. id walks a 32x32 grid (1024); we step it coarser."""
+        t = self.time
+        for i in range(-16, 16, 3):
+            for j in range(-16, 16, 3):
+                dx = j * 8 + random.randint(0, 7)
+                dy = i * 8 + random.randint(0, 7)
+                dz = 256.0
+                n = math.sqrt(dx * dx + dy * dy + dz * dz)
+                vel = 50 + random.randint(0, 63)
+                s = vel / n
+                self.particles.append([
+                    org[0] + dx, org[1] + dy, org[2] + random.randint(0, 63),
+                    dx * s, dy * s, dz * s,
+                    (224 + random.randint(0, 7)) & 255,
+                    t + 2.0 + random.randint(0, 31) * 0.02, PT_SLOWGRAV, 0.0])
+        self._cap_particles()
+
+    def _teleport_splash(self, org):
+        """R_TeleportSplash: a box of pt_slowgrav sparks, colour 7+rand&7. id
+        walks a 8x8x14 grid (~896); we step it coarser."""
+        t = self.time
+        for i in range(-16, 16, 8):
+            for j in range(-16, 16, 8):
+                for k in range(-24, 32, 8):
+                    dx, dy, dz = j * 8.0, i * 8.0, k * 8.0
+                    n = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+                    vel = 50 + random.randint(0, 63)
+                    s = vel / n
+                    self.particles.append([
+                        org[0] + i + random.randint(0, 3),
+                        org[1] + j + random.randint(0, 3),
+                        org[2] + k + random.randint(0, 3),
+                        dx * s, dy * s, dz * s,
+                        (7 + random.randint(0, 7)) & 255,
+                        t + 0.2 + random.randint(0, 7) * 0.02, PT_SLOWGRAV, 0.0])
+        self._cap_particles()
 
     def _pf_particle(self):
-        # particle(origin, dir, color, count): spawn point sprites the host draws
+        # particle(origin, dir, color, count): R_RunParticleEffect via SVC_PARTICLE
         vm = self.vm
-        self._burst(vm.parm_v(0), vm.parm_v(1), int(vm.parm_f(2)),
-                    int(vm.parm_f(3)))
+        self._run_particle_effect(vm.parm_v(0), vm.parm_v(1), int(vm.parm_f(2)),
+                                  int(vm.parm_f(3)))
 
     def _pf_writebyte(self):
         # decode broadcast temp-entity messages (gunshots, teleport fog, ...) into
@@ -1535,12 +1632,28 @@ class Server:
                                tuple(coords[3:]))
                 self._te = None
         elif len(coords) == 3:                   # have a full position -> spark it
-            color, count, spread, accel = _TE_EFFECT.get(te_type, (0, 6, 60, 0.0))
-            self._burst(coords, (0.0, 0.0, 0.0), color, count, spread, accel)
-            if te_type in (3, 4):                # explosions also flash a dlight
-                self.dlight_events.append((tuple(coords), 350.0,
-                                           self.time + 0.5, 300.0))
+            self._spawn_te(te_type, tuple(coords))
             self._te = None
+
+    def _spawn_te(self, te_type, pos):
+        """CL_ParseTEnt: dispatch a point temp-entity to its r_part.c effect.
+        Beam types are handled separately; unknown types spark nothing."""
+        z = (0.0, 0.0, 0.0)
+        if te_type in (0, 1, 2):                 # spike / superspike / gunshot
+            self._run_particle_effect(pos, z, 0, 10 if te_type == 0 else 20)
+        elif te_type == 7:                       # wizspike (green)
+            self._run_particle_effect(pos, z, 20, 30)
+        elif te_type == 8:                       # knightspike
+            self._run_particle_effect(pos, z, 226, 20)
+        elif te_type == 3:                       # rocket explosion (+ dlight)
+            self._particle_explosion(pos)
+            self.dlight_events.append((pos, 350.0, self.time + 0.5, 300.0))
+        elif te_type == 4:                       # tarbaby explosion (no dlight)
+            self._blob_explosion(pos)
+        elif te_type == 10:                      # lava splash
+            self._lava_splash(pos)
+        elif te_type == 11:                      # teleport fog
+            self._teleport_splash(pos)
 
     def _add_beam(self, te_type, ent, start, end):
         """CL_ParseBeam: one live beam per owner entity (continuous lightning
@@ -1580,20 +1693,6 @@ class Server:
         if self.beams:
             self.beams = [b for b in self.beams if b["die"] >= self.time]
         return self.beams
-
-    # trail type -> (palette colour base, jitter, step units). Mirrors WinQuake
-    # R_RocketTrail's six cases: smoke for rocket/grenade, blood for gibs, and
-    # the coloured tracer streams. Stepped along the move so the trail follows
-    # the projectile's path rather than just marking its current spot.
-    _TRAILS = {
-        0: (8, 6.0, 4.0),       # rocket: grey smoke
-        1: (6, 6.0, 4.0),       # grenade: dark smoke
-        2: (67, 6.0, 4.0),      # gib: blood (red)
-        3: (52, 0.0, 4.0),      # tracer: green (scrag)
-        4: (67, 6.0, 4.0),      # zombie gib: blood
-        5: (230, 0.0, 4.0),     # tracer2: orange (hellknight)
-        6: (146, 0.0, 4.0),     # tracer3: purple (vore)
-    }
 
     def _trail_type(self, modelindex):
         """Trail type for a model (by precache index) from its .mdl effect flags,
@@ -1645,46 +1744,110 @@ class Server:
         self._ent_lastorg = newlast
 
     def _rocket_trail(self, start, end, ttype):
-        color, jitter, step = self._TRAILS.get(ttype, self._TRAILS[0])
-        dx, dy, dz = end[0] - start[0], end[1] - start[1], end[2] - start[2]
-        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if dist < 0.01:
+        """R_RocketTrail: lay particles from start to end, one per unit step
+        (id advances `start` by the unit direction each iteration while burning
+        `dec` units of remaining length -- so the trail is dense and covers ~1/3
+        of the move, by design). Per-type: pt_fire smoke (rocket/grenade), pt_grav
+        blood (gibs), pt_static tracers with a perpendicular kick, voor sparkle."""
+        sx, sy, sz = start
+        dx, dy, dz = end[0] - sx, end[1] - sy, end[2] - sz
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length < 1e-6:
             return
-        n = int(dist / step)
-        if n <= 0:
-            n = 1
-        if n > 48:                                   # cap a long teleport jump
-            n = 48
-        ux, uy, uz = dx / n, dy / n, dz / n
-        die = self.time + 0.5
-        px, py, pz = start
-        for i in range(n):
-            self.particles.append([
-                px + (random.random() - 0.5) * jitter,
-                py + (random.random() - 0.5) * jitter,
-                pz + (random.random() - 0.5) * jitter,
-                0.0, 0.0, 0.0,
-                (color + (random.randint(0, 3) if jitter else 0)) & 255, die, 0.0])
-            px += ux; py += uy; pz += uz
-        if len(self.particles) > 600:                # bound the list
-            del self.particles[:len(self.particles) - 600]
+        vx, vy, vz = dx / length, dy / length, dz / length   # unit direction
+        dec = 3.0
+        t = self.time
+        guard = 0
+        while length > 0.0 and guard < 1024:         # guard a pathological teleport
+            guard += 1
+            length -= dec
+            if ttype in (0, 1):                      # rocket / grenade smoke (fire)
+                ramp = float(random.randint(0, 3) + (2 if ttype == 1 else 0))
+                self.particles.append([
+                    sx + (random.randint(0, 5) - 3),
+                    sy + (random.randint(0, 5) - 3),
+                    sz + (random.randint(0, 5) - 3),
+                    0.0, 0.0, 0.0, _RAMP3[int(ramp)], t + 2.0, PT_FIRE, ramp])
+            elif ttype in (2, 4):                    # blood / slight blood (grav)
+                self.particles.append([
+                    sx + (random.randint(0, 5) - 3),
+                    sy + (random.randint(0, 5) - 3),
+                    sz + (random.randint(0, 5) - 3),
+                    0.0, 0.0, 0.0,
+                    67 + random.randint(0, 3), t + 2.0, PT_GRAV, 0.0])
+                if ttype == 4:
+                    length -= 3.0                    # slight blood: sparser
+            elif ttype in (3, 5):                    # tracer / tracer2 (static)
+                self._tracercount += 1
+                col = (52 if ttype == 3 else 230) + ((self._tracercount & 4) << 1)
+                if self._tracercount & 1:
+                    pvx, pvy = 30.0 * vy, 30.0 * -vx
+                else:
+                    pvx, pvy = 30.0 * -vy, 30.0 * vx
+                self.particles.append([
+                    sx, sy, sz, pvx, pvy, 0.0,
+                    col & 255, t + 0.5, PT_STATIC, 0.0])
+            else:                                    # ttype 6: voor trail (static)
+                self.particles.append([
+                    sx + (random.randint(0, 15) - 8),
+                    sy + (random.randint(0, 15) - 8),
+                    sz + (random.randint(0, 15) - 8),
+                    0.0, 0.0, 0.0,
+                    9 * 16 + 8 + random.randint(0, 3), t + 0.3, PT_STATIC, 0.0])
+            sx += vx; sy += vy; sz += vz
+        self._cap_particles()
 
     def _advance_particles(self, dt):
+        """R_DrawParticles: integrate and age each live particle, branching on
+        its type for gravity, velocity ramp and colour fade (r_part.c:697)."""
         if not self.particles:
             return
         t = self.time
+        grav = self.cvars["sv_gravity"] * 0.05 * dt        # frametime*sv_gravity*0.05
+        dvel = 4.0 * dt
+        time1, time2, time3 = 5.0 * dt, 10.0 * dt, 15.0 * dt
         live = []
         for p in self.particles:
             if p[7] <= t:
                 continue
-            a = p[8] if len(p) > 8 else 0.0
-            if a:                                    # pt_explode outward ramp
-                fct = 1.0 + a * dt
-                p[3] *= fct; p[4] *= fct; p[5] *= fct
+            # move by current velocity, then apply this type's per-frame physics
             p[0] += p[3] * dt
             p[1] += p[4] * dt
             p[2] += p[5] * dt
-            p[5] -= self.cvars["sv_gravity"] * 0.05 * dt   # gentle droop (r_part.c)
+            ptype = p[8] if len(p) > 8 else PT_STATIC
+            if ptype == PT_STATIC:
+                pass
+            elif ptype == PT_FIRE:
+                p[9] += time1
+                if p[9] >= 6.0:
+                    p[7] = -1.0
+                else:
+                    p[6] = _RAMP3[int(p[9])]
+                p[5] += grav                           # fire rises
+            elif ptype == PT_EXPLODE:
+                p[9] += time2
+                if p[9] >= 8.0:
+                    p[7] = -1.0
+                else:
+                    p[6] = _RAMP1[int(p[9])]
+                p[3] += p[3] * dvel; p[4] += p[4] * dvel; p[5] += p[5] * dvel
+                p[5] -= grav
+            elif ptype == PT_EXPLODE2:
+                p[9] += time3
+                if p[9] >= 8.0:
+                    p[7] = -1.0
+                else:
+                    p[6] = _RAMP2[int(p[9])]
+                p[3] -= p[3] * dt; p[4] -= p[4] * dt; p[5] -= p[5] * dt   # 1x decel
+                p[5] -= grav
+            elif ptype == PT_BLOB:
+                p[3] += p[3] * dvel; p[4] += p[4] * dvel; p[5] += p[5] * dvel
+                p[5] -= grav
+            elif ptype == PT_BLOB2:
+                p[3] -= p[3] * dvel; p[4] -= p[4] * dvel                  # x/y only
+                p[5] -= grav
+            else:                                       # PT_GRAV / PT_SLOWGRAV
+                p[5] -= grav
             live.append(p)
         self.particles = live
 

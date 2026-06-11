@@ -2526,7 +2526,8 @@ class Renderer:
         # written straight into the framebuffer with the depth test, so walls
         # occlude it per-pixel -- the flat/wire path can only overlay them with a
         # coarse per-particle line-of-sight check, which is why textured mode
-        # showed none. particles: the live [x,y,z, vx,vy,vz, color, die] list.
+        # showed none. particles: live [x,y,z, vx,vy,vz, color, die, type, ramp]
+        # (only position and colour are read here).
         if particles:
             pscale = focal * PARTICLE_ZBUF_RADIUS
             iwl = iw; ihl = ih; zbl = zb; fbl = fb

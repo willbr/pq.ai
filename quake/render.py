@@ -463,6 +463,7 @@ class Renderer:
         # in one bytes.translate through its colormap row.
         self._surf_cache_map = {}
         self._surf_cache_bytes = 0
+        self._dlit_faces = set()    # faces brightened by dlights this frame
 
         # per-face lightmaps from the LIGHTING lump (baked static light). Each
         # entry: (lmw, lmh, smin, tmin, luxels, has_real). For surfaces with a
@@ -796,6 +797,76 @@ class Renderer:
                 dirty.update(faces)
         for fi in dirty:
             self._combine_face(fi, styleval)
+
+    def apply_dlights(self, dlights, styleval):
+        """R_MarkLights + R_AddDynamicLights (r_light.c / r_surf.c): restore
+        last frame's dlit faces to their static lightmaps, then walk the BSP
+        marking faces each light sphere touches and add its radius falloff
+        into their luxels for this frame. dlights: (x, y, z, radius,
+        minlight) tuples in world space."""
+        if self._dlit_faces:
+            for fi in self._dlit_faces:
+                if self.face_lm_styles[fi] is not None:
+                    self._combine_face(fi, styleval)
+            self._dlit_faces.clear()
+        if not dlights:
+            return
+        bsp = self.bsp
+        planes, nodes, faces, texinfo = (bsp.planes, bsp.nodes, bsp.faces,
+                                         bsp.texinfo)
+        for (lx, ly, lz, radius, minl) in dlights:
+            marked = []
+            stack = [self.headnode]
+            while stack:                        # R_MarkLights
+                ni = stack.pop()
+                if ni < 0:
+                    continue
+                planenum, children, firstface, numfaces = nodes[ni]
+                (nx, ny, nz), pd, _t = planes[planenum]
+                dist = lx * nx + ly * ny + lz * nz - pd
+                if dist > radius:
+                    stack.append(children[0])
+                elif dist < -radius:
+                    stack.append(children[1])
+                else:
+                    marked.extend(range(firstface, firstface + numfaces))
+                    stack.append(children[0])
+                    stack.append(children[1])
+            for fi in marked:                   # R_AddDynamicLights
+                rec = self.face_lm[fi]
+                if not rec[5]:
+                    continue                    # sky/liquid: fullbright anyway
+                (nx, ny, nz), pd, _t = planes[faces[fi][0]]
+                dist = lx * nx + ly * ny + lz * nz - pd
+                rad = radius - abs(dist)
+                if rad < minl:
+                    continue
+                thresh = rad - minl
+                ix, iy, iz = lx - nx * dist, ly - ny * dist, lz - nz * dist
+                ti = faces[fi][4]
+                s0, s1, s2, s3 = texinfo[ti][2]
+                t0, t1, t2, t3 = texinfo[ti][3]
+                lmw, lmh, smin, tmin, buf, _real = rec
+                ls = ix * s0 + iy * s1 + iz * s2 + s3 - smin
+                lt = ix * t0 + iy * t1 + iz * t2 + t3 - tmin
+                touched = False
+                for t in range(lmh):
+                    td = lt - (t << 4)
+                    if td < 0:
+                        td = -td
+                    base = t * lmw
+                    for s in range(lmw):
+                        sd = ls - (s << 4)
+                        if sd < 0:
+                            sd = -sd
+                        d = sd + td * 0.5 if sd > td else td + sd * 0.5
+                        if d < thresh:
+                            v = buf[base + s] + int(rad - d)
+                            buf[base + s] = 255 if v > 255 else v
+                            touched = True
+                if touched:
+                    self._surf_cache_map.pop(fi, None)
+                    self._dlit_faces.add(fi)
 
     def _surface_cache(self, fi, rec):
         """Lit surface for face fi (Quake's D_CacheSurface, r_surf.c): the

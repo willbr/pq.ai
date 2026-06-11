@@ -97,7 +97,7 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
            "button0", "deadflag", "enemy", "owner", "touch", "goalentity",
            "waterlevel", "watertype", "air_finished", "th_die",
-           "dmg_take", "dmg_save", "dmg_inflictor", "punchangle")
+           "dmg_take", "dmg_save", "dmg_inflictor", "punchangle", "effects")
 
 SOLID_NOT = 0
 SOLID_TRIGGER = 1
@@ -265,6 +265,8 @@ class Server:
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
         self._te = None             # in-progress temp-entity message being parsed
         self.beams = []             # live lightning beams (CL_ParseBeam state)
+        self.dlight_events = []     # one-shot dynamic lights (explosions);
+                                    # (origin, radius, die, decay) for the host
         self._ent_lastorg = {}      # edict -> last origin, for trail segments
         self._model_trail = {}      # modelindex -> trail type (or None), cached
         self.snd = None             # sound mixer (set by host after precache); None -> muted
@@ -1450,6 +1452,9 @@ class Server:
         elif len(coords) == 3:                   # have a full position -> spark it
             color, count, spread = _TE_EFFECT.get(te_type, (0, 6, 60))
             self._burst(coords, (0.0, 0.0, 0.0), color, count, spread)
+            if te_type in (3, 4):                # explosions also flash a dlight
+                self.dlight_events.append((tuple(coords), 350.0,
+                                           self.time + 0.5, 300.0))
             self._te = None
 
     def _add_beam(self, te_type, ent, start, end):
@@ -1464,6 +1469,26 @@ class Server:
                     return
         self.beams.append({"ent": ent, "model": model,
                            "start": start, "end": end, "die": die})
+
+    def light_entities(self):
+        """Entities carrying engine light effects this frame: (edict, origin,
+        effects bits, is_rocket) per CL_RelinkEntities. Clears one-shot
+        EF_MUZZLEFLASH after reporting it (SV_CleanupEnts). Rocket glow comes
+        from the model's smoke-trail flag, like model->flags & EF_ROCKET."""
+        out = []
+        vm, f = self.vm, self.f
+        fe, fmi = f["effects"], f["modelindex"]
+        for e in range(1, vm.num_edicts):
+            if vm.free[e]:
+                continue
+            eff = int(vm.fget_f(e, fe))
+            rocket = self._trail_type(int(vm.fget_f(e, fmi))) == 0
+            if not eff and not rocket:
+                continue
+            out.append((e, vm.fget_v(e, f["origin"]), eff, rocket))
+            if eff & 2:                          # EF_MUZZLEFLASH is one-shot
+                vm.fset_f(e, fe, float(eff & ~2))
+        return out
 
     def live_beams(self):
         """Live beam temp entities for the client, pruning expired ones."""

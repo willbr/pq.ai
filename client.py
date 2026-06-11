@@ -141,6 +141,8 @@ class Client:
         self.eye_z_offset = 0.0
         self._missing_warned = set()   # maps not in the pak we've already flagged
         self._beam_models = {}         # bolt .mdl cache for lightning beams
+        self.dlights = {}              # CL_AllocDlight pool: key -> [x,y,z,
+        self._dlight_seq = 0           #   radius, die, decay, minlight]
         # inventory carried across changelevel (SV_SaveSpawnparms): parm1..16
         # from the previous level's SetChangeParms, plus the episode sigils
         self.spawn_parms = None
@@ -282,6 +284,7 @@ class Client:
         self.watertype = CONTENTS_EMPTY   # fed to the player edict for QC WaterMove
         self.noclip = False
         self.flymode = False
+        self.dlights = {}           # old map's lights die with it
         self.yaw = yaw
         self.pitch = 0.0
 
@@ -381,6 +384,37 @@ class Client:
                 b += (pct * (sb - b)) >> 8
             pal.append((r, g, b))
         self.view_palette = pal
+
+    def _update_dlights(self, dt):
+        """CL_AllocDlight / CL_DecayLights: refresh the dynamic-light pool
+        from entity effects (muzzle flash one-shot, bright/dim light, rocket
+        glow via the model flag) and the server's one-shot explosion events;
+        decay radii and expire dead lights."""
+        now = self.sv.time
+        dl = self.dlights
+        for e, org, eff, rocket in self.sv.light_entities():
+            x, y, z = org
+            if eff & 2:                          # EF_MUZZLEFLASH
+                dl[e] = [x, y, z + 16.0, 200.0 + random.random() * 32.0,
+                         now + 0.1, 0.0, 32.0]
+            elif eff & 4:                        # EF_BRIGHTLIGHT
+                dl[e] = [x, y, z + 16.0, 400.0 + random.random() * 32.0,
+                         now + 0.001, 0.0, 0.0]
+            elif eff & 8:                        # EF_DIMLIGHT (powerups)
+                dl[e] = [x, y, z, 200.0 + random.random() * 32.0,
+                         now + 0.001, 0.0, 0.0]
+            elif rocket:
+                dl[e] = [x, y, z, 200.0, now + 0.01, 0.0, 0.0]
+        for org, radius, die, decay in self.sv.dlight_events:
+            self._dlight_seq += 1
+            dl[("ev", self._dlight_seq)] = [org[0], org[1], org[2], radius,
+                                            die, decay, 0.0]
+        self.sv.dlight_events.clear()
+        for k in list(dl):                       # CL_DecayLights
+            L = dl[k]
+            L[3] -= L[5] * dt
+            if L[4] < now or L[3] <= 0.0:
+                del dl[k]
 
     def _update_view_feel(self, dt, dead):
         """V_CalcViewRoll plus the punchangle and damage-kick parts of
@@ -925,6 +959,7 @@ class Client:
 
         self._update_palette(dt)     # V_UpdatePalette: tint shifts for this frame
         self._update_view_feel(dt, dead)   # strafe lean / punch / damage kick
+        self._update_dlights(dt)     # muzzle flashes / explosions / glows
         vpitch, vyaw, vroll = self.view_angles
         if not (self.intermission or dead):
             eye = (eye[0], eye[1], eye[2] + self.eye_z_offset)  # stair smoothing
@@ -934,6 +969,9 @@ class Client:
         render_mode = self.mode
         if self.mode == "zbuf":
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
+            self.rend.apply_dlights(
+                [(L[0], L[1], L[2], L[3], L[6]) for L in self.dlights.values()],
+                styles)
             fbdata, leaf = self.rend.render_zbuffer(eye, vyaw, vpitch,
                                                     brush_ents, alias_ents,
                                                     view_model, bsp_ents,
@@ -949,6 +987,9 @@ class Client:
             # only in how the frontend paints the polys (filled vs outlined), so
             # tag the frame "wire_hidden" when it's the wireframe variant.
             styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
+            self.rend.apply_dlights(
+                [(L[0], L[1], L[2], L[3], L[6]) for L in self.dlights.values()],
+                styles)
             polys, leaf = self.rend.render_shaded(eye, vyaw, vpitch,
                                                   brush_ents, alias_ents, view_model,
                                                   bsp_ents, lightstyles=styles,

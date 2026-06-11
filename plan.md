@@ -78,7 +78,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
   Highest bang-for-buck client work: a full-screen blend in the rasteriser
   (or a tint pass on the framebuffer) driven from player fields each frame.
 
-### 2.2 Dynamic lights — completely absent
+### 2.2 Dynamic lights — DONE
 - cl_main.c:317-365 (`CL_AllocDlight`): rocket glow, explosion flash
   (radius 350, 0.5s), `EF_MUZZLEFLASH`, `EF_BRIGHTLIGHT`/`EF_DIMLIGHT`
   powerup glow. Lighting is static lightmaps only.

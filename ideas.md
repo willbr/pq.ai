@@ -3,12 +3,6 @@
 Ordered by recommended sequence: chase the wins (profiler's already in place to
 measure against), then gate the expensive, uncertain work behind data.
 
-1. **Dynamic resolution, target 60fps** — textured z-buffer mode only (it already renders
-   at `1/ZBUF_SCALE`). Closed loop: measure frametime → nudge scale toward a ~16.7ms
-   budget with hysteresis + clamped range. Pre-allocate one framebuffer/PhotoImage set per
-   scale level (don't reallocate in the hot path). Does NOT help wireframe (Tk-bound);
-   its lever is segment/detail culling.
-
 2. **Minimize garbage collection** — continuous companion to 1. Kill per-frame
    allocations in hot loops (temp tuples/lists/arrays), reuse preallocated
    `array`/`bytearray` buffers, consider `gc.disable()` + manual `gc.collect()` at level
@@ -31,8 +25,7 @@ measure against), then gate the expensive, uncertain work behind data.
 
 qcc
 map tools, bsp, light, vis, quaked
-skip tkinter, use ctypes and gdi32
 headless mode for testing
 headless server mode
 bots
-review d3d9 on windows
+

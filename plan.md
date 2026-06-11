@@ -70,7 +70,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
 
 ## Tier 2 — gameplay feedback that's missing (the game plays blind)
 
-### 2.1 Screen flashes / palette tints — completely absent
+### 2.1 Screen flashes / palette tints — DONE
 - view.c:316-473 + `V_UpdatePalette` (view.c:527-672): red damage flash,
   gold bonus/pickup flash, quad/pent/ring/suit powerup tints,
   water/slime/lava underwater tint.

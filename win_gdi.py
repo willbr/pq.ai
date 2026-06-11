@@ -410,6 +410,7 @@ def run(mapname):
     try:
         blitter = win_ui.GdiBlitter(win.hwnd)
         blitter.set_palette(client.palette)   # 8bpp palettised framebuffer blits
+        pal_version = 0                       # view-palette (tint) the DIB matches
         cw, ch = win.client_size()
         client.resize(cw, ch)
         last_wh = (cw, ch)
@@ -435,6 +436,9 @@ def run(mapname):
             # no sleep: present/present_vector provide implicit back-pressure
             PROFILER.begin("present")
             if rf.mode == "zbuf":
+                if rf.palette_version != pal_version:   # tint shift changed
+                    blitter.set_palette(rf.palette or client.palette)
+                    pal_version = rf.palette_version
                 fb, fw, fh = rf.framebuffer
                 blitter.present(fb, fw, fh, cw, ch, texts=texts,
                                 particles=rf.particles)

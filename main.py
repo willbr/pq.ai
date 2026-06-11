@@ -179,6 +179,7 @@ class App:
         # hidden until the mode is on. self.fb_photo holds the live PhotoImage.
         self.fb_photo = None
         self._pal_lut = None             # index -> 3-byte RGB, built on first use
+        self._pal_lut_version = -1       # view-palette version the LUT matches
         self.fb_item = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
         # reusable line-item pool; unused items are parked off-screen with a
         # cheap coords() call (no itemconfig state churn, no extra item count)
@@ -462,7 +463,7 @@ class App:
             self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
             self.canvas.itemconfig(self.fb_item, state="hidden")
         else:                                # 'zbuf'
-            self._draw_fb(rf.framebuffer)
+            self._draw_fb(rf.framebuffer, rf.palette, rf.palette_version)
             self._park(self.pool, self.prev_n, 4); self.prev_n = 0
             self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
             self._park(self.hwpool, self.hw_prev, 6); self.hw_prev = 0
@@ -575,7 +576,7 @@ class App:
             coords(pool[i], -10, -10, -10, -10, -10, -10)
         self.hw_prev = n
 
-    def _draw_fb(self, fbdata):
+    def _draw_fb(self, fbdata, palette=None, palette_version=0):
         """Expand the renderer's 8-bit palette-indexed framebuffer to RGB via a
         256-entry lookup (one C-level map+join), wrap it in a PPM PhotoImage,
         scale it to the *window* with the largest integer factor that fits
@@ -584,8 +585,10 @@ class App:
         cheap; the costly part is the per-pixel fill the renderer already did."""
         fb, w, h = fbdata
         lut = self._pal_lut
-        if lut is None:
-            lut = self._pal_lut = [bytes(c) for c in self.client.palette]
+        if lut is None or palette_version != self._pal_lut_version:
+            pal = palette or self.client.palette
+            lut = self._pal_lut = [bytes(c) for c in pal]
+            self._pal_lut_version = palette_version
         ppm = b"P6 %d %d 255 " % (w, h) + b"".join(map(lut.__getitem__, fb))
         photo = tk.PhotoImage(data=ppm, format="ppm")
         W = self.canvas.winfo_width()

@@ -105,6 +105,8 @@ class RenderFrame:
     segs: list = None                       # mode 'wire': line segments
     polys: list = None                      # mode 'flat': (points, color)
     framebuffer: tuple = None               # mode 'zbuf': (bytes, w, h)
+    palette: list = None     # zbuf: tinted view palette (V_UpdatePalette)
+    palette_version: int = 0  # bumps when palette changes; frontends key LUTs on it
     particles: list = field(default_factory=list)
     overlays: list = field(default_factory=list)
     crosshair: tuple = (0, 0)
@@ -122,6 +124,13 @@ class Client:
         # 64 light rows x 256 palette indices; the z-buffer renderer lights
         # every texel through it and returns an 8-bit indexed framebuffer.
         self.colormap = self.pak.read("gfx/colormap.lmp")[:64 * 256]
+        # screen colour shifts (view.c): contents/damage/bonus/powerup blend
+        # the base palette into view_palette each frame (V_UpdatePalette)
+        self.view_palette = self.palette
+        self.palette_version = 0
+        self._tint_key = ()
+        self._cshift_damage = [255, 0, 0, 0.0]   # r, g, b, percent
+        self._cshift_bonus = 0.0                 # gold flash percent
         self._missing_warned = set()   # maps not in the pak we've already flagged
         # inventory carried across changelevel (SV_SaveSpawnparms): parm1..16
         # from the previous level's SetChangeParms, plus the episode sigils
@@ -271,6 +280,74 @@ class Client:
     def resize(self, w, h):
         self._view_wh = (w, h)
         self.rend.resize(w, h)
+
+    # ---- screen colour shifts (view.c V_UpdatePalette) ----
+    def _update_palette(self, dt):
+        """Blend the four colour shifts over the base palette: contents
+        (water/slime/lava), damage (red, fed by the player's dmg_take/dmg_save
+        and decaying 150/s), bonus (gold pickup flash, 100/s) and powerup
+        (quad/suit/ring/pent from .items). Rebuilds view_palette and bumps
+        palette_version only when the blend actually changes."""
+        sv, f, vm = self.sv, self.sv.f, self.sv.vm
+        e = sv.player
+
+        # damage: T_Damage stamps dmg_take/dmg_save; consume like svc_damage
+        dmg = self._cshift_damage
+        if e and not vm.free[e]:
+            blood = vm.fget_f(e, f["dmg_take"])
+            armor = vm.fget_f(e, f["dmg_save"])
+            if blood or armor:
+                vm.fset_f(e, f["dmg_take"], 0.0)
+                vm.fset_f(e, f["dmg_save"], 0.0)
+                count = max(10.0, 0.5 * blood + 0.5 * armor)
+                dmg[3] = min(150.0, dmg[3] + 3.0 * count)
+                dmg[:3] = ((200, 100, 100) if armor > blood else
+                           (220, 50, 50) if armor else (255, 0, 0))
+        dmg[3] = max(0.0, dmg[3] - 150.0 * dt)
+
+        if sv.bonus_flash:                      # stuffcmd "bf" (V_BonusFlash)
+            sv.bonus_flash = False
+            self._cshift_bonus = 50.0
+        self._cshift_bonus = max(0.0, self._cshift_bonus - 100.0 * dt)
+
+        shifts = []
+        wt = self.watertype                     # V_SetContentsColor
+        if wt == -3:
+            shifts.append((130, 80, 50, 128))   # water
+        elif wt == -4:
+            shifts.append((0, 25, 5, 150))      # slime
+        elif wt <= -5:
+            shifts.append((255, 80, 0, 150))    # lava (and sky, like the C)
+        if dmg[3] > 0:
+            shifts.append((dmg[0], dmg[1], dmg[2], int(dmg[3])))
+        if self._cshift_bonus > 0:
+            shifts.append((215, 186, 69, int(self._cshift_bonus)))
+        items = int(vm.fget_f(e, f["items"])) if e and not vm.free[e] else 0
+        if items & 4194304:                     # IT_QUAD
+            shifts.append((0, 0, 255, 30))
+        elif items & 2097152:                   # IT_SUIT
+            shifts.append((0, 255, 0, 20))
+        elif items & 524288:                    # IT_INVISIBILITY
+            shifts.append((100, 100, 100, 100))
+        elif items & 1048576:                   # IT_INVULNERABILITY
+            shifts.append((255, 255, 0, 30))
+
+        key = tuple(s for s in shifts if s[3] > 0)
+        if key == self._tint_key:
+            return
+        self._tint_key = key
+        self.palette_version += 1
+        if not key:
+            self.view_palette = self.palette
+            return
+        pal = []
+        for r, g, b in self.palette:
+            for sr, sg, sb, pct in key:
+                r += (pct * (sr - r)) >> 8
+                g += (pct * (sg - g)) >> 8
+                b += (pct * (sb - b)) >> 8
+            pal.append((r, g, b))
+        self.view_palette = pal
 
     # ---- save / load (Host_Savegame_f / Host_Loadgame_f) ----
     def save_game(self, path):
@@ -719,6 +796,8 @@ class Client:
             eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
             view_model = self._view_model(gun_org)
 
+        self._update_palette(dt)     # V_UpdatePalette: tint shifts for this frame
+
         PROFILER.begin("render")
         segs = polys = framebuffer = None
         render_mode = self.mode
@@ -817,7 +896,9 @@ class Client:
         return RenderFrame(mode=render_mode, segs=segs, polys=polys,
                            framebuffer=framebuffer, particles=particles,
                            overlays=overlays, crosshair=(w // 2, h // 2),
-                           console=console, menu=menu)
+                           console=console, menu=menu,
+                           palette=self.view_palette,
+                           palette_version=self.palette_version)
 
     def _particle_sprites(self, eye):
         """Project the live particles to screen and return a list of (x, y, half,

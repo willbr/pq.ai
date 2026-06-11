@@ -88,7 +88,8 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "attack_finished", "currentammo", "ammo_shells", "ammo_nails",
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
            "button0", "deadflag", "enemy", "owner", "touch", "goalentity",
-           "waterlevel", "watertype", "air_finished", "th_die")
+           "waterlevel", "watertype", "air_finished", "th_die",
+           "dmg_take", "dmg_save")
 
 SOLID_NOT = 0
 SOLID_TRIGGER = 1
@@ -241,6 +242,7 @@ class Server:
         # can fold it into the camera position it owns (SV_PushMove riders)
         self.player_carry = [0.0, 0.0, 0.0]
         self.changelevel = None     # set by the changelevel builtin; host reads it
+        self.bonus_flash = False    # stuffcmd "bf": pickup flash; host consumes
         self.changelevel_restart = False  # the pending change is a death restart
         self.serverflags = serverflags  # episode sigils, carried across levels
         self.spawn_parms = None     # parm1..16 the player spawned with
@@ -988,7 +990,7 @@ class Server:
             self._pf_sound, self._pf_normalize, self._pf_error, self._pf_objerror,
             self._pf_vlen, self._pf_vectoyaw, self._pf_spawn, self._pf_remove,
             self._pf_traceline, self._pf_checkclient, self._pf_find,
-            self._pf_precache_sound, self._pf_precache_model, self._pf_noop,  # stuffcmd
+            self._pf_precache_sound, self._pf_precache_model, self._pf_stuffcmd,
             self._pf_findradius, self._pf_bprint, self._pf_noop2, self._pf_dprint,  # sprint
             self._pf_ftos, self._pf_vtos, self._pf_noop, self._pf_traceon,
             self._pf_traceoff, self._pf_noop, self._pf_walkmove, fixme,        # 32,33
@@ -1343,6 +1345,13 @@ class Server:
             # Host_Restart_f does not re-save spawn parms: a death restart
             # respawns with the loadout the player entered the level with.
             self.changelevel_restart = True
+
+    def _pf_stuffcmd(self):
+        # stuffcmd(client, string): pushes console text at a client. The one
+        # gameplay use we honour is items.qc's "bf\n" -- the gold bonus flash
+        # on every pickup (V_BonusFlash).
+        if self.vm.parm_i(0) == self.player and "bf" in self.vm.parm_str(1):
+            self.bonus_flash = True
 
     def _pf_centerprint(self):
         # centerprint(client, string): keep only the player's message; the host

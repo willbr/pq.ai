@@ -5,6 +5,7 @@ both the tkinter frontend (main.py) and the gdi32 frontend (win_gdi.py) share it
 
 import math
 import os
+import random
 import sys
 from dataclasses import dataclass, field
 
@@ -139,6 +140,7 @@ class Client:
         self.view_angles = (0.0, 0.0, 0.0)
         self.eye_z_offset = 0.0
         self._missing_warned = set()   # maps not in the pak we've already flagged
+        self._beam_models = {}         # bolt .mdl cache for lightning beams
         # inventory carried across changelevel (SV_SaveSpawnparms): parm1..16
         # from the previous level's SetChangeParms, plus the episode sigils
         self.spawn_parms = None
@@ -891,6 +893,7 @@ class Client:
         PROFILER.end("server")
         brush_ents = self.sv.brush_models()
         alias_ents = self._alias_ents()
+        alias_ents.extend(self._beam_ents())   # lightning bolts (CL_UpdateTEnts)
         bsp_ents = self._bsp_ents()
 
         if self.intermission:
@@ -1100,6 +1103,58 @@ class Client:
                 continue
             ang = spin_yaw(m.flags, ang, now)
             out.append((m, m.frame_verts(frame, now), org, ang))
+        return out
+
+    def _beam_model(self, name):
+        """Lazily load a bolt/beam .mdl from the pak (they're QC-precached on
+        maps with the weapons, but the beam may cross maps via cheats)."""
+        if name not in self._beam_models:
+            m = None
+            if name in self.pak.files:
+                try:
+                    m = Mdl(self.pak.read(name), self.palette)
+                except Exception as e:
+                    print(f"beam mdl load failed for {name}: {e}")
+            self._beam_models[name] = m
+        return self._beam_models[name]
+
+    def _beam_ents(self):
+        """CL_UpdateTEnts: chop each live beam into 30-unit bolt-model
+        segments aimed along it with a random roll, riding the normal
+        alias-model render path."""
+        beams = self.sv.live_beams()
+        if not beams:
+            return []
+        out = []
+        now = self.sv.time
+        for b in beams:
+            m = self._beam_model(b["model"])
+            if m is None:
+                continue
+            sx, sy, sz = b["start"]
+            dx = b["end"][0] - sx
+            dy = b["end"][1] - sy
+            dz = b["end"][2] - sz
+            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if dist < 1e-6:
+                continue
+            if not dx and not dy:
+                yaw = 0.0
+                pitch = 90.0 if dz > 0 else 270.0
+            else:
+                yaw = math.degrees(math.atan2(dy, dx)) % 360.0
+                pitch = math.degrees(math.atan2(dz, math.hypot(dx, dy))) % 360.0
+            ux, uy, uz = dx / dist, dy / dist, dz / dist
+            verts = m.frame_verts(0, now)
+            x, y, z = sx, sy, sz
+            d = dist
+            while d > 0:
+                out.append((m, verts, (x, y, z),
+                            (pitch, yaw, random.random() * 360.0)))
+                x += ux * 30.0
+                y += uy * 30.0
+                z += uz * 30.0
+                d -= 30.0
         return out
 
     def _bsp_ents(self):

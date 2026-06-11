@@ -85,7 +85,7 @@ Suggested attack order: 1.1 + 1.2 (campaign), then 1.3 (combat feel), then
 - (Lightstyle animation *is* implemented — `render.py:1232`
   `_animate_lightmaps`.)
 
-### 2.3 Lightning beams not rendered
+### 2.3 Lightning beams not rendered — DONE
 - cl_tent.c:216-231 (`CL_ParseBeam`, `progs/bolt.mdl`): the lightning gun and
   Shambler attack are completely invisible. TE messages beyond particle
   bursts are dropped in `sv.py`'s Write* decoding.

@@ -65,6 +65,14 @@ _TE_EFFECT = {
     7: (60, 10, 80), 8: (0, 8, 80),                 # wizspike (green), knightspike
     10: (244, 32, 120), 11: (244, 30, 60),          # lavasplash, teleport fog
 }
+# beam temp entities: WriteEntity(owner) + two WriteCoord vectors, drawn as
+# chained bolt models (CL_ParseBeam). Type -> model.
+_TE_BEAMS = {
+    5: "progs/bolt.mdl",        # TE_LIGHTNING1 (shambler)
+    6: "progs/bolt2.mdl",       # TE_LIGHTNING2 (player lightning gun)
+    9: "progs/bolt3.mdl",       # TE_LIGHTNING3 (boss)
+    13: "progs/beam.mdl",       # TE_BEAM (grappling hook mods)
+}
 
 # movetypes the engine integrates each frame (origin += velocity*dt)
 _MOVE_INTEGRATE = frozenset((MOVETYPE_PUSH, MOVETYPE_NOCLIP, MOVETYPE_FLY,
@@ -256,6 +264,7 @@ class Server:
         self.center_msg = None      # (text, time) from centerprint; host displays it
         self.particles = []         # live point sprites: [x,y,z, vx,vy,vz, color, die]
         self._te = None             # in-progress temp-entity message being parsed
+        self.beams = []             # live lightning beams (CL_ParseBeam state)
         self._ent_lastorg = {}      # edict -> last origin, for trail segments
         self._model_trail = {}      # modelindex -> trail type (or None), cached
         self.snd = None             # sound mixer (set by host after precache); None -> muted
@@ -1029,7 +1038,7 @@ class Server:
             self._pf_cvar, self._pf_localcmd, self._pf_nextent, self._pf_particle,  # localcmd, particle
             self._pf_changeyaw, fixme, self._pf_vectoangles,                   # 49,50,51
             self._pf_writebyte, self._pf_noop2, self._pf_noop2, self._pf_noop2,  # WriteByte/Char/Short/Long
-            self._pf_writecoord, self._pf_noop2, self._pf_noop2, self._pf_noop2,  # WriteCoord/Angle/String/Entity
+            self._pf_writecoord, self._pf_noop2, self._pf_noop2, self._pf_writeentity,  # WriteCoord/Angle/String/Entity
             fixme, fixme, fixme, fixme, fixme, fixme, fixme,                   # 60..66
             self._pf_movetogoal, self._pf_precache_file, self._pf_makestatic,  # 67,68,69
             self._pf_changelevel, fixme, self._pf_cvar_set, self._pf_centerprint,  # 70..73
@@ -1418,20 +1427,49 @@ class Server:
         v = int(self.vm.parm_f(1))
         if self._te is None:
             if v == SVC_TEMPENTITY:
-                self._te = [None, []]            # [type, collected coords]
+                self._te = [None, [], 0]         # [type, coords, owner entity]
         elif self._te[0] is None:
             self._te[0] = v                      # the temp-entity type
         # any further bytes (counts/colours) are ignored; coords come via WriteCoord
 
+    def _pf_writeentity(self):
+        # beam temp entities carry their owner before the two endpoints
+        if self._te is not None and self._te[0] is not None:
+            self._te[2] = self.vm.parm_i(1)
+
     def _pf_writecoord(self):
         if self._te is None or self._te[0] is None:
             return
-        coords = self._te[1]
+        te_type, coords, ent = self._te
         coords.append(self.vm.parm_f(1))
-        if len(coords) == 3:                     # have a full position -> spark it
-            color, count, spread = _TE_EFFECT.get(self._te[0], (0, 6, 60))
+        if te_type in _TE_BEAMS:                 # entity + start + end
+            if len(coords) == 6:
+                self._add_beam(te_type, ent, tuple(coords[:3]),
+                               tuple(coords[3:]))
+                self._te = None
+        elif len(coords) == 3:                   # have a full position -> spark it
+            color, count, spread = _TE_EFFECT.get(te_type, (0, 6, 60))
             self._burst(coords, (0.0, 0.0, 0.0), color, count, spread)
             self._te = None
+
+    def _add_beam(self, te_type, ent, start, end):
+        """CL_ParseBeam: one live beam per owner entity (continuous lightning
+        fire re-feeds it rather than stacking), 0.2 s lifetime."""
+        model = _TE_BEAMS[te_type]
+        die = self.time + 0.2
+        if ent:
+            for b in self.beams:
+                if b["ent"] == ent:
+                    b.update(model=model, start=start, end=end, die=die)
+                    return
+        self.beams.append({"ent": ent, "model": model,
+                           "start": start, "end": end, "die": die})
+
+    def live_beams(self):
+        """Live beam temp entities for the client, pruning expired ones."""
+        if self.beams:
+            self.beams = [b for b in self.beams if b["die"] >= self.time]
+        return self.beams
 
     # trail type -> (palette colour base, jitter, step units). Mirrors WinQuake
     # R_RocketTrail's six cases: smoke for rocket/grenade, blood for gibs, and

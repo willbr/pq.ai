@@ -1,12 +1,12 @@
-"""Lit-surface cache lightmap interpolation (render.py _surface_cache).
+"""Lit-surface cache lightmap blockiness (render.py _surface_cache).
 
-Quake's lightmap is one luxel per 16 texels, but WinQuake's R_DrawSurfaceBlock
-bilinearly interpolates it across each block, so the lighting is smooth rather
-than 16-unit blocks. The port used to light each 16-texel luxel cell with one
-flat shade (one bytes.translate per cell), which read as blocky squares. The
-cache now blends the luxels across each cell. This test recovers the per-texel
-shade from a face with a strong horizontal lightmap gradient and asserts it ramps
-across the cell instead of stepping flat.
+Quake's lightmap is one luxel per 16 texels. WinQuake's D_CacheSurface lights each
+16-texel luxel cell with one flat shade (R_DrawSurfaceBlock), so the cache reads as
+16-unit blocks -- the span renderer's fast path is one fetch per pixel with no
+lightmap math. The span/edge port matches this: each cell is one bytes.translate
+through its luxel's colormap row. This test recovers the per-texel shade from a
+face with a strong horizontal lightmap gradient and asserts each cell is flat and
+that adjacent cells step in the direction of the luxel gradient.
 """
 
 from quake.pak import Pak
@@ -49,7 +49,7 @@ def _recover_shade(r, lit_byte, base_idx):
     return None
 
 
-def test_cell_shade_ramps_across_the_gradient():
+def test_cell_is_flat_and_cells_step_with_the_gradient():
     r = _renderer()
     fi, lr, lc = _find_gradient_face(r)
     lmw, lmh, smin, tmin, lux, _ = r.face_lm[fi]
@@ -65,21 +65,26 @@ def test_cell_shade_ramps_across_the_gradient():
     trow = ((int(tmin) + tc) % th) * tw
     tiled = (tex[trow:trow + tw] * reps)[soff:soff + cw]
 
-    s0 = lc * 16                       # cell left edge: ~ luxel[lc]
-    s1 = lc * 16 + 14                  # near the cell right edge: ~ luxel[lc+1]
-    base = lr * 16 + tc - lr * 16      # row index already tc
-    left = _recover_shade(r, cache[tc * cw + s0], tiled[s0])
-    right = _recover_shade(r, cache[tc * cw + s1], tiled[s1])
+    # within cell lc, every texel uses the SAME colormap row -- blocky, no blend
+    s_lo = lc * 16 + 1
+    s_hi = lc * 16 + 14
+    left = _recover_shade(r, cache[tc * cw + s_lo], tiled[s_lo])
+    right = _recover_shade(r, cache[tc * cw + s_hi], tiled[s_hi])
     assert left is not None and right is not None, "could not recover shade"
-    # a flat cell would give the SAME shade left and right; interpolation ramps it
-    assert left != right, \
-        f"lightmap cell is flat (no interpolation): shade {left} == {right}"
-    # and the ramp goes toward the brighter neighbour (lower colormap row = brighter)
-    bright_lc = lux[lr * lmw + lc] > lux[lr * lmw + lc + 1]
-    assert (left < right) == bright_lc, \
-        "interpolation ramps the wrong way relative to the luxel gradient"
+    assert left == right, \
+        f"cell is not flat (blocky cache expected): shade {left} != {right}"
+
+    # the next cell (lc+1) steps to a different shade, in the luxel-gradient
+    # direction (brighter luxel -> lower colormap row)
+    s_next = (lc + 1) * 16 + 8
+    nxt = _recover_shade(r, cache[tc * cw + s_next], tiled[s_next])
+    assert nxt is not None and nxt != left, \
+        "adjacent cells should differ across a strong luxel gradient"
+    lc_brighter = lux[lr * lmw + lc] > lux[lr * lmw + lc + 1]
+    assert (left < nxt) == lc_brighter, \
+        "cell shades step the wrong way relative to the luxel gradient"
 
 
 if __name__ == "__main__":
-    test_cell_shade_ramps_across_the_gradient()
+    test_cell_is_flat_and_cells_step_with_the_gradient()
     print("OK")

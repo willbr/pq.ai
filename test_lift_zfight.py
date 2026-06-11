@@ -1,25 +1,19 @@
-"""Brush-model depth bias (render.py BMODEL_ZSCALE): stop coplanar lift/door
-faces z-fighting the world in the textured z-buffer renderer.
+"""Coplanar lift/wall z-fighting, fixed structurally by the span/edge renderer.
 
-A moving brush model (the e1m1 lift at 552,2032,-168) sits flush with the wall
-it slides across. In the float z-buffer both faces resolve to near-equal 1/z, so
-which one wins flickers pixel-to-pixel and frame-to-frame -- z-fighting. WinQuake
-doesn't have this: its span renderer breaks coplanar ties categorically in the
-bmodel's favour (r_edge.c:357). The port biases the bmodel depth by a hair so it
-wins the tie deterministically (the documented stopgap; the span renderer is the
-eventual structural fix).
-
-The test measures z-fight instability directly: between two camera positions a
-sub-pixel apart, a z-fighting region flips a large number of pixels. The bias
-must cut that sharply.
+A moving brush model (the e1m1 lift at 552,2032,-168) sits flush with the wall it
+slides across. The old per-pixel float z-buffer resolved both faces to near-equal
+1/z, so which one won flickered pixel-to-pixel and frame-to-frame -- z-fighting.
+The span/edge renderer (quake/r_edge.py) resolves occlusion once per span via the
+surface stack, breaking coplanar ties deterministically with id's NEARZI_FUDGE
+(r_edge.c:488). So identical inputs give byte-identical output -- no flicker --
+and a sub-pixel camera nudge changes only ordinary edge pixels, not a large
+z-fighting region.
 """
 
 import os
 
 os.environ.setdefault("PQ_AUDIO", "0")
 
-import client
-import quake.render as R
 from client import Client, InputState
 
 
@@ -35,31 +29,30 @@ def _boot_near_lift():
     return c
 
 
-def _flip_count(c, bias):
-    """Pixels that change between two sub-pixel-apart camera positions: high when
-    coplanar faces z-fight, low when the depth tie is resolved."""
-    R.BMODEL_ZSCALE = bias
+def test_fixed_camera_is_byte_identical():
+    # The direct z-fight signal: at a fixed camera, two renders must be identical.
+    # The float z-buffer flickered here; the surface-stack tie-break does not.
+    c = _boot_near_lift()
+    a = bytes(c.frame(0.0, InputState(mouselook=True)).framebuffer[0])
+    b = bytes(c.frame(0.0, InputState(mouselook=True)).framebuffer[0])
+    flips = sum(1 for x, y in zip(a, b) if x != y)
+    assert flips == 0, f"lift region flickers at a fixed camera: {flips} pixels"
+
+
+def test_subpixel_move_changes_only_edges():
+    # A sub-pixel camera nudge over the coplanar lift/wall seam must change only a
+    # small number of edge pixels -- not the large region (~2100 on a 320x240
+    # frame) the float z-buffer z-fought. ~465 here is ordinary edge change.
+    c = _boot_near_lift()
     frames = []
     for dpos in (0.0, 0.03):
         c.pos[1] = 2032.0 + 120 + dpos
         frames.append(bytes(c.frame(0.0, InputState(mouselook=True)).framebuffer[0]))
-    return sum(1 for a, b in zip(frames[0], frames[1]) if a != b)
-
-
-def test_bias_suppresses_lift_zfighting():
-    c = _boot_near_lift()
-    try:
-        unbiased = _flip_count(c, 1.0)
-        biased = _flip_count(c, 1.001)
-    finally:
-        R.BMODEL_ZSCALE = 1.001
-    # the depth tie was flipping a large region; the bias must cut it by well
-    # over half (here ~2100 -> ~465, the residual being ordinary edge change
-    # from the camera move, not z-fighting)
-    assert biased < unbiased * 0.5, \
-        f"bias did not suppress lift z-fighting: {unbiased} -> {biased} flips"
+    flips = sum(1 for a, b in zip(frames[0], frames[1]) if a != b)
+    assert flips < 1000, f"coplanar lift/wall region looks unstable: {flips} flips"
 
 
 if __name__ == "__main__":
-    test_bias_suppresses_lift_zfighting()
+    test_fixed_camera_is_byte_identical()
+    test_subpixel_move_changes_only_edges()
     print("OK")

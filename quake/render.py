@@ -216,14 +216,6 @@ VIEWMODEL_ZSCALE = 3.0
 # screen (a half of 0 is a single pixel).
 PARTICLE_ZBUF_RADIUS = 2.0
 PARTICLE_ZBUF_MAX = 3
-# Coplanar brush-model faces (a lift/door flush with the wall it slides across)
-# tie with the world face in the float z-buffer and shimmer. WinQuake's span
-# renderer breaks the tie categorically -- the bmodel wins (r_edge.c:357) -- and
-# even id's bmodel-vs-bmodel case nudges 1/z by a fudge (r_edge.c:493). Bias the
-# bmodel depth by a hair so it wins coplanar ties deterministically; the margin
-# is tiny, so geometry genuinely behind a surface (depth gap >> 0.1%) is
-# unaffected. (The real fix is the span renderer; this is the documented stopgap.)
-BMODEL_ZSCALE = 1.001
 
 
 def _bsp_texture_colors(bsp, palette):
@@ -1907,11 +1899,11 @@ class Renderer:
         # models / particles drawn afterward occlude against the world. All world
         # and brush surfaces share key 0, so the stack orders them purely by 1/z
         # with id's NEARZI_FUDGE tie-break (r_edge.c:488) -- which fixes coplanar
-        # lift/wall shimmer deterministically (replacing the old BMODEL_ZSCALE).
+        # lift/wall shimmer deterministically (no per-pixel float-depth ties).
         edges = self.edges
 
         def emit_cached(pts, sc, csmin, ctmin):
-            cw, cache = sc[0], sc[2]
+            cw, ch, cache = sc[0], sc[1], sc[2]
             out = []
             A = pts[-1]; da = A[2] - NEAR
             for B in pts:
@@ -1940,6 +1932,8 @@ class Renderer:
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
             surf = edges.add_surface(0, NORMAL, (z00, zdx, zdy), list(zip(sx, sy)))
 
+            cwm = cw - 1; chm = ch - 1
+
             def fill(u, v, count):
                 zbl = zb; fbl = fb; int_ = int
                 xc = u + 0.5; yc = v + 0.5
@@ -1949,8 +1943,17 @@ class Renderer:
                 row = v * iw
                 for idx in range(row + u, row + u + count):
                     z = 1.0 / iz
+                    # clamp to the cache extent: the engine's span boundaries can
+                    # round a sub-pixel past the projected polygon, sampling just
+                    # outside the finite surface cache (WinQuake clamps to bbextents)
+                    cu = int_(uoz * z)
+                    if cu < 0: cu = 0
+                    elif cu > cwm: cu = cwm
+                    cv = int_(voz * z)
+                    if cv < 0: cv = 0
+                    elif cv > chm: cv = chm
                     zbl[idx] = iz
-                    fbl[idx] = cache[int_(voz * z) * cw + int_(uoz * z)]
+                    fbl[idx] = cache[cv * cw + cu]
                     iz += zdx; uoz += udx; voz += vdx
             surf.fill = fill
 

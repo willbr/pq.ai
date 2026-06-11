@@ -763,9 +763,15 @@ class Server:
             if not self._test_position(e):
                 moved.append((e, old))        # pushed/carried fine
                 continue
-            # blocked there -- if it can stay where it was, leave it (no carry)
+            # blocked there -- if it can stay where it was, leave it (no carry).
+            # "Can stay" means clear of BOTH world solid and the pusher's brush:
+            # SV_TestEntityPosition tests the entity against the (solid) pusher
+            # too, so a roof descending onto a player who can't move down is still
+            # stuck against the pusher at the old spot -> fire .blocked (crush).
+            # Without the pusher check the player just sits inside the closing
+            # roof and is never crushed.
             vm.fset_v(e, forg, old); self._link_abs(e)
-            if not self._test_position(e):
+            if not self._test_position(e) and not self._penetrates_pusher(e, num):
                 continue
             # truly stuck: restore everyone moved so far and fire .blocked. The
             # pusher stays put (WinQuake leaves it; the QC reverses next think).

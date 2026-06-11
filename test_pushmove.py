@@ -104,8 +104,36 @@ def test_mover_does_not_drag_a_clear_bystander():
     assert sv.player_carry == [0.0, 0.0, 0.0]
 
 
+def test_descending_pusher_crushes_a_pinned_player():
+    """A roof/door closing onto a player who can't move out of its way fires the
+    pusher's .blocked (door_blocked -> T_Damage), crushing them. SV_PushMove
+    tests the shoved entity against the pusher itself (SV_TestEntityPosition);
+    the port previously checked only world solid, so a player pinned between the
+    floor and a descending brush was never registered as stuck and never crushed."""
+    sv = _boot()
+    vm = sv.vm
+    sv.spawn_player((480.0, -352.0, 88.0), (0.0, 0.0, 0.0))   # on the spawn floor
+    p = sv.player
+    po = vm.fget_v(p, _off(sv, "origin"))
+    # a door with a brush hull + .blocked (door_blocked, dmg 2); reposition its
+    # brush to straddle the player's head, then drive it straight down
+    door = 41
+    vm.fset_v(door, _off(sv, "origin"),
+              (po[0] - 544, po[1] - 2248, (po[2] + 30) + 144))
+    sv._link_abs(door)
+    assert sv._penetrates_pusher(p, door), "test setup: door should overlap player"
+    vm.fset_v(door, _off(sv, "velocity"), (0.0, 0.0, -120.0))
+    h0 = sv.player_health()
+    for _ in range(8):
+        sv.gset_f("time", sv.time)
+        sv._push_move(door, 0.1)
+    assert sv.player_health() < h0, \
+        f"descending pusher did not crush the pinned player ({h0} -> {sv.player_health()})"
+
+
 if __name__ == "__main__":
     test_door_push_never_leaves_player_out_of_bounds()
     test_lift_carries_a_rider_standing_on_top()
     test_mover_does_not_drag_a_clear_bystander()
+    test_descending_pusher_crushes_a_pinned_player()
     print("OK")

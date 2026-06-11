@@ -38,12 +38,17 @@ renderer port — its own project.
    `solid_box_entities`, also skip entities whose `.owner == ignore` (and the
    reverse owner check), per world.c. HIGH confidence.
 
-5. **Fix the audio teardown errors on close on mac.**
-   `shutdown()` (mac.py:136-140) uses async stop — `AudioQueueStop(q, 1)` — so
-   the callback thread can fire into a half-dead interpreter (also the
-   documented test segfault), and the queue is never disposed. Fix: synchronous
-   stop + `AudioQueueDispose`, called explicitly from the quit path before
-   `root.destroy()`, atexit as backstop, idempotent. HIGH confidence.
+5. **Fix the audio teardown errors on close on mac.** FIXED.
+   (Correction: `AudioQueueStop(q, 1)` was already the *synchronous* stop —
+   inImmediate=true returns once the callback thread has stopped — so the
+   "async stop" reading was wrong and the flag was left at 1.) The real gaps:
+   the queue was never `AudioQueueDispose`d, shutdown wasn't idempotent, the
+   callback had no guard, and teardown relied solely on atexit. Fix: shutdown()
+   now stops (1) then disposes (1) once, sets a `_closed` flag the callback
+   checks before touching the queue, and the host calls Client.shutdown() on
+   quit (main.py / win_gdi.py) with atexit as backstop. Verified on real
+   CoreAudio: explicit and atexit-only teardown both exit cleanly across
+   repeated runs. Pinned by test_mac_audio_teardown.py.
 
 6. **Particles aren't rendered to the texture buffer.**
    `render_zbuffer()` (render.py:1666) is never given the particle list; only

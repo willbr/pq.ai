@@ -460,6 +460,7 @@ def run(mapname):
             PROFILER.frame_end()     # roll this frame's section times into the HUD readout
     finally:
         sys.stdout = real_stdout
+        client.shutdown()            # stop+dispose audio while the process is healthy
         if blitter is not None:
             blitter.close()
         win.shutdown()

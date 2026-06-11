@@ -82,11 +82,20 @@ queue is never `AudioQueueDispose`d. The callback (`mac.py:127-134`) calls
 triggered only by the atexit hook; `main.py` does no explicit audio shutdown
 before `root.destroy()`.
 
-**Fix:** stop synchronously (`AudioQueueStop(q, 0)` — wait flag per Apple docs:
-0 = stop immediately/synchronously) then `AudioQueueDispose(q, 1)`; declare
-argtypes/restype for Dispose in `_open_stream`; call `shutdown()` explicitly
-from the frontend quit path before `root.destroy()`, keep atexit as backstop,
-and make shutdown idempotent.
+**Correction during fix:** the flag was already right. Apple's AudioQueueStop
+`inImmediate` is true(1) = *synchronous* (returns once the queue/callback has
+stopped), false(0) = async (plays out buffers). The original `AudioQueueStop(q,
+1)` was therefore the correct synchronous stop; the "1 = async" reading was
+wrong. Flag left at 1.
+
+**Fix applied:** add `AudioQueueDispose(q, 1)` after the stop (argtypes declared
+in `_open_stream`); a `_closed` flag set first in shutdown() that the `_fill`
+callback checks before mixing (so a callback that races the stop bails); make
+shutdown() idempotent; add `Client.shutdown()` and call it from the frontend
+quit paths (main.py before `root.destroy()`, win_gdi.py in its `finally`), with
+atexit kept as the backstop. Verified on real CoreAudio hardware: both the
+explicit-shutdown and atexit-only paths exit cleanly across repeated runs.
+Pinned by `test_mac_audio_teardown.py` (fake AudioToolbox, runs anywhere).
 
 ## 6. Particles not rendered in the texture buffer — HIGH confidence
 

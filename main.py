@@ -436,6 +436,7 @@ class App:
         self.client.resize(self.canvas.winfo_width(), self.canvas.winfo_height())
         rf = self.client.frame(dt, self._input())
         if self.client.quit_requested:        # console `quit`/`exit` or menu Quit
+            self.client.shutdown()            # stop+dispose audio while healthy
             self.root.destroy()
             return
         with PROFILER.section("present"):

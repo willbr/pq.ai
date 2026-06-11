@@ -65,6 +65,7 @@ class CoreAudioBackend:
 
     def __init__(self, mixer):
         self.mixer = mixer
+        self._closed = False
         try:
             self._open_stream()
             mixer.ok = True
@@ -88,6 +89,8 @@ class CoreAudioBackend:
         at.AudioQueueStart.restype = c_int32
         at.AudioQueueStop.argtypes = [_AQRef, c_uint32]
         at.AudioQueueStop.restype = c_int32
+        at.AudioQueueDispose.argtypes = [_AQRef, c_uint32]
+        at.AudioQueueDispose.restype = c_int32
         self._at = at
 
         fmt = _ASBD(mSampleRate=float(OUT_RATE), mFormatID=_FMT_LPCM,
@@ -125,6 +128,11 @@ class CoreAudioBackend:
 
     # ---- the realtime callback: pull from the mixer, hand to CoreAudio ------
     def _fill(self, user, aq, buf):
+        # bail the instant shutdown begins: AudioQueueStop(..., immediate) waits
+        # for an in-flight callback to return, so a callback that's already
+        # entered must not start mixing into a queue about to be disposed.
+        if self._closed:
+            return
         try:
             data = self.mixer.mix(FRAMES_PER_BUF).tobytes()
             ctypes.memmove(buf.contents.mAudioData, data, len(data))
@@ -134,10 +142,25 @@ class CoreAudioBackend:
             print(f"snd: enqueue error {e}")
 
     def shutdown(self):
+        """Stop and dispose the queue, synchronously, exactly once. The host
+        calls this on quit (before the interpreter tears down) and atexit is the
+        backstop. AudioQueueStop(q, 1) is the *immediate/synchronous* stop -- it
+        returns only once the callback thread has stopped -- and Dispose then
+        frees the buffers and the queue. Without the synchronous stop + dispose,
+        the callback thread could fire into half-freed ctypes state on exit and
+        segfault (the nondeterministic crash CLAUDE.md warns about)."""
+        if getattr(self, "_closed", False):
+            return                          # idempotent: atexit + explicit call
+        self._closed = True                 # stop new callbacks from doing work
+        q = getattr(self, "_queue", None)
+        at = getattr(self, "_at", None)
+        if q is None or at is None:
+            return                          # _open_stream failed before the queue
         try:
-            self._at.AudioQueueStop(self._queue, 1)
-        except Exception:
-            pass
+            at.AudioQueueStop(q, 1)         # 1 = immediate: waits for the thread
+            at.AudioQueueDispose(q, 1)      # 1 = immediate: free buffers + queue
+        except Exception as e:
+            print(f"snd: audio shutdown error {e}")
 
 
 # ---- standalone audible self-test: python3 mac.py [sound/path.wav ...] ------

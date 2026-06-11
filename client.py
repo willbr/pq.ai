@@ -323,6 +323,15 @@ class Client:
         self._view_wh = (w, h)
         self.rend.resize(w, h)
 
+    def shutdown(self):
+        """Tear down the audio backend deterministically on quit, before the
+        frontend destroys its window and the interpreter exits. Doing it here
+        (rather than leaving it to the backend's atexit backstop) stops the
+        CoreAudio callback thread while the process is still healthy. Idempotent
+        and safe to call with no backend."""
+        if self.audio is not None:
+            self.audio.shutdown()
+
     # ---- screen colour shifts (view.c V_UpdatePalette) ----
     def _update_palette(self, dt):
         """Blend the four colour shifts over the base palette: contents

@@ -230,7 +230,14 @@ class GameView(AppKit.NSView):
                 self._pal_version = rf.palette_version
             rgba = mac_ui.expand_fb_rgba(fb, fw, fh, *self._pal_luts)
             img = mac_ui.fb_cgimage(rgba, fw, fh)
-            ox, oy, ow, oh = letterbox_rect(fw, fh, w, h)
+            # CRT aspect: stretch the destination rect to fh/pixel_aspect rows;
+            # CoreGraphics scales the CGImage into whatever rect it's drawn to.
+            # zbuf mode has no overlay particles (the client rasterises them
+            # into the framebuffer and returns []), so fit_particles below
+            # never sees aspect-stretched coordinates that matter.
+            pa = rf.pixel_aspect
+            disp_h = round(fh / pa) if pa < 1.0 else fh
+            ox, oy, ow, oh = letterbox_rect(fw, disp_h, w, h)
             mac_ui.draw_fb(ctx, img, ox, oy, ow, oh, h)
             if ox or oy:
                 particles = mac_ui.fit_particles(particles, ox, oy, ow, oh, w, h)

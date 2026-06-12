@@ -445,7 +445,8 @@ def run(mapname):
                     pal_version = rf.palette_version
                 fb, fw, fh = rf.framebuffer
                 blitter.present(fb, fw, fh, cw, ch, texts=texts,
-                                particles=rf.particles)
+                                particles=rf.particles,
+                                pixel_aspect=rf.pixel_aspect)
             elif rf.mode == "wire":
                 blitter.present_vector(rf.segs, None, rf.particles, cw, ch,
                                        texts=texts)

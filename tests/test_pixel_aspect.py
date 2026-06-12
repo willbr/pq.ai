@@ -117,6 +117,27 @@ def test_menu_aspect_item_drives_client():
     assert item.value_label == "CRT"
 
 
+def test_letterbox_stretched_height_fills_4_3():
+    # 320x200 at CRT aspect displays as 320x240 art: in an 800x600 window the
+    # letterbox must fill it edge-to-edge (4:3 in 4:3)
+    import mac_ui
+    disp_h = round(200 / CRT)                  # 240
+    ox, oy, ow, oh = mac_ui.letterbox_rect(320, disp_h, 800, 600)
+    assert (ox, oy, ow, oh) == (0, 0, 800, 600)
+
+
+def test_aspect_row_map():
+    import main as tkmain
+    m = tkmain.aspect_row_map(200, CRT)
+    assert len(m) == 240                       # 200 rows shown as 240
+    assert m[0] == 0 and m[-1] == 199
+    assert all(m[i] <= m[i+1] for i in range(len(m) - 1))   # monotonic
+    assert all(0 <= r < 200 for r in m)
+    counts = [m.count(r) for r in range(200)]
+    assert set(counts) <= {1, 2}               # each row once or twice
+    assert tkmain.aspect_row_map(200, 1.0) is None          # square: no-op
+
+
 if __name__ == "__main__":
     test_crt_aspect_widens_vertical_fov()
     test_wire_mode_ignores_pixel_aspect()
@@ -124,4 +145,6 @@ if __name__ == "__main__":
     test_pixel_aspect_persists_across_map_change()
     test_pixel_aspect_clamped()
     test_menu_aspect_item_drives_client()
+    test_letterbox_stretched_height_fills_4_3()
+    test_aspect_row_map()
     print("OK")

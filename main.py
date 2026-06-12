@@ -98,6 +98,16 @@ def expand_fb_to_ppm(fb, w, h, pal_r, pal_g, pal_b):
     return bytes(buf)
 
 
+def aspect_row_map(h, pixel_aspect):
+    """Source-row indices that stretch h framebuffer rows to h/pixel_aspect
+    display rows by duplication (nearest row) -- the CRT vertical stretch for
+    the integer-zoom-only Tk path. None when square (no work to do)."""
+    if pixel_aspect >= 1.0:
+        return None
+    out_h = round(h / pixel_aspect)
+    return [min(h - 1, int(y * pixel_aspect)) for y in range(out_h)]
+
+
 def fb_fit(win_w, win_h, fb_w, fb_h):
     """Pick how to integer-scale an fb_w x fb_h framebuffer into a win_w x win_h
     window with a Tk PhotoImage, which only scales by integer factors. Returns
@@ -510,7 +520,8 @@ class App:
             self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
             self.canvas.itemconfig(self.fb_item, state="hidden")
         else:                                # 'zbuf'
-            self._draw_fb(rf.framebuffer, rf.palette, rf.palette_version)
+            self._draw_fb(rf.framebuffer, rf.palette, rf.palette_version,
+                          rf.pixel_aspect)
             self._park(self.pool, self.prev_n, 4); self.prev_n = 0
             self._park(self.polypool, self.poly_prev, 6); self.poly_prev = 0
             self._park(self.hwpool, self.hw_prev, 6); self.hw_prev = 0
@@ -653,7 +664,8 @@ class App:
             coords(pool[i], -10, -10, -10, -10, -10, -10)
         self.hw_prev = n
 
-    def _draw_fb(self, fbdata, palette=None, palette_version=0):
+    def _draw_fb(self, fbdata, palette=None, palette_version=0,
+                 pixel_aspect=1.0):
         """Expand the renderer's 8-bit palette-indexed framebuffer to RGB and
         wrap it in a PPM PhotoImage, scale it to the *window* with the largest
         integer factor that fits (fb_fit -- the framebuffer is a fixed render
@@ -668,6 +680,13 @@ class App:
             pal = palette or self.client.palette
             self._pal_r, self._pal_g, self._pal_b = pal_channel_tables(pal)
             self._pal_lut_version = palette_version
+        # CRT aspect: stretch to h/pixel_aspect display rows by duplicating
+        # source rows (PhotoImage zoom is integer-only, so it can't do it).
+        # Everything downstream (fb_fit, centring) works from the new h.
+        rmap = aspect_row_map(h, pixel_aspect)
+        if rmap:
+            fb = b"".join(fb[r * w:(r + 1) * w] for r in rmap)
+            h = len(rmap)
         ppm = expand_fb_to_ppm(fb, w, h, self._pal_r, self._pal_g, self._pal_b)
         photo = tk.PhotoImage(data=ppm, format="ppm")
         W = self.canvas.winfo_width()

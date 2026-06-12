@@ -310,7 +310,8 @@ class GdiBlitter:
             bmi.bmiColors[i] = b | (g << 8) | (r << 16)
         self._bmi8 = bmi
 
-    def present(self, fb, w, h, dst_w, dst_h, texts=(), particles=()):
+    def present(self, fb, w, h, dst_w, dst_h, texts=(), particles=(),
+                pixel_aspect=1.0):
         g, u = self.gdi32, self.user32
         if self._bmi8 is not None and len(fb) == w * h:
             # 8bpp palette-indexed framebuffer: GDI maps indices through the
@@ -329,7 +330,10 @@ class GdiBlitter:
         # scale the framebuffer into the largest aspect-correct rect; an off-ratio
         # mode (e.g. 80x40 in a 4:3 window) gets centered with black bars rather
         # than stretched, so pixels stay square.
-        ox, oy, ow, oh = letterbox_rect(w, h, dst_w, dst_h)
+        # CRT aspect: letterbox as if the source were h/pixel_aspect rows tall;
+        # StretchDIBits below still reads the real h source rows and stretches.
+        disp_h = round(h / pixel_aspect) if pixel_aspect < 1.0 else h
+        ox, oy, ow, oh = letterbox_rect(w, disp_h, dst_w, dst_h)
         hdc = u.GetDC(self.hwnd)
         if not hdc:
             return

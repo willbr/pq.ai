@@ -172,6 +172,27 @@ def test_bars_nests_child_under_parent_in_order():
     assert "total" in lines[-1], lines
 
 
+def test_bars_sorts_hottest_first_within_level():
+    """Siblings list in descending time at every depth (flame-graph order):
+    the slowest top-level section leads, and within a parent the slowest
+    child leads -- regardless of the order the sections ran."""
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=1.0)
+    p.begin("render")
+    with p.section("cool"):
+        clk.advance(1.0)
+    with p.section("hot"):
+        clk.advance(5.0)
+    p.end("render")
+    with p.section("big"):
+        clk.advance(20.0)
+    p.frame_end()
+    lines = p.bars().splitlines()
+    idx = lambda sub: next(i for i, l in enumerate(lines) if sub in l)
+    assert idx("big") < idx("render"), lines      # 20ms before 6ms, ran later
+    assert idx("hot") < idx("cool"), lines        # 5ms child before 1ms child
+
+
 if __name__ == "__main__":
     test_section_accumulates_elapsed()
     test_same_name_sums_within_frame()
@@ -183,4 +204,5 @@ if __name__ == "__main__":
     test_bars_full_width_at_target()
     test_bars_length_scales_with_time()
     test_bars_nests_child_under_parent_in_order()
+    test_bars_sorts_hottest_first_within_level()
     print("OK")

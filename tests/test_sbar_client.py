@@ -121,6 +121,25 @@ def test_hud_timers_reset_on_level_change():
     c.frame(0.016, client.InputState())  # and the new level still renders
 
 
+def test_gun_raised_when_sbar_active():
+    # V_CalcRefdef's viewsize fudge ("keep amount of weapon visible roughly
+    # equal with different FOV", view.c): +2 on the gun z when the status bar
+    # is up, else the shrunken view clips the weapon to a sliver.
+    def gun_z(c):
+        c.frame(0.016, client.InputState())      # sync rend.sbar_lines
+        seen = {}
+        orig = c._view_model
+        def spy(org):
+            seen["z"] = org[2]
+            return orig(org)
+        c._view_model = spy
+        c.frame(0.016, client.InputState())
+        c._view_model = orig
+        return seen["z"] - c.pos[2]              # same spawn; factor out pos
+    assert (gun_z(_boot_zbuf((320, 200)))
+            == gun_z(_boot_zbuf((240, 160))) + 2.0)
+
+
 if __name__ == "__main__":
     test_hud_status_raw_fields()
     test_renderer_sbar_lines_shrinks_view()
@@ -130,4 +149,5 @@ if __name__ == "__main__":
     test_wire_mode_keeps_text_bar()
     test_pain_face_timer_set_on_damage()
     test_hud_timers_reset_on_level_change()
+    test_gun_raised_when_sbar_active()
     print("OK")

@@ -1051,6 +1051,13 @@ class Client:
             bob = self._calc_bob()
             fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
             eye, gun_org = view_origins(self.pos, VIEW_HEIGHT, fwd, bob)
+            if self.rend.sbar_lines:
+                # V_CalcRefdef: "fudge position around to keep amount of
+                # weapon visible roughly equal with different FOV" -- +2 at
+                # viewsize 100 (status bar shown). Without it the bar-shrunken
+                # view clips the gun to a sliver. (Stale sbar_lines for one
+                # frame after a mode switch; self-heals with the render sync.)
+                gun_org = (gun_org[0], gun_org[1], gun_org[2] + 2.0)
 
         self._update_palette(dt)     # V_UpdatePalette: tint shifts for this frame
         self._update_view_feel(dt, dead)   # strafe lean / punch / damage kick

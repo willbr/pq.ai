@@ -1,5 +1,3 @@
-tidy tests into a tests folder
-
 # Ideas / backlog
 
 Ordered by recommended sequence: chase the wins (profiler's already in place to

@@ -21,16 +21,18 @@ thinks (monster AI, etc.) fire at their own ~10 Hz cadence.
 python setup.py                 # fetch shareware data + GPL reference source (one-shot, idempotent)
 python main.py e1m1             # run the game (gdi32 on Windows, tkinter elsewhere)
 python main.py --tk e1m1        # force tkinter on Windows  (e1m1..e1m8, or "start")
-python test_pushmove.py         # run one test (prints "OK", or asserts)
-export PQ_AUDIO=0; for t in test_*.py; do python "$t"; done   # run all tests
+python tests/test_pushmove.py   # run one test (prints "OK", or asserts)
+export PQ_AUDIO=0; for t in tests/test_*.py; do python "$t"; done   # run all tests
 # PQ_AUDIO=0 skips the OS audio backend: headless/sandboxed runs otherwise
 # segfault nondeterministically in the CoreAudio callback thread (often after
-# printing OK). test_zbuffer_raster.py needs goldens (--regen once).
+# printing OK). tests/test_zbuffer_raster.py needs goldens (--regen once).
 ```
 
-There is **no build step, no linter, no pytest**. Each `test_*.py` is a standalone script
-whose `if __name__ == "__main__"` block calls its test functions and prints `OK` on
-success (functions are named `test_*`, so a pytest run would also work if installed).
+There is **no build step, no linter, no pytest**. Each `tests/test_*.py` is a standalone
+script whose `if __name__ == "__main__"` block calls its test functions and prints `OK`
+on success (functions are named `test_*`, so a pytest run would also work if installed).
+Every test imports `tests/_bootstrap.py` first, which puts the repo root on `sys.path`
+and chdirs there (tests import root modules and open shareware data by relative path).
 
 Requires Python 3.13+ and the shareware data at `quake-shareware/id1/pak0.pak` (id
 copyright — gitignored; run `python setup.py` to fetch it and the GPL reference source). Sound has a **macOS** backend (`mac.py`,
@@ -74,7 +76,7 @@ win_gdi.py          gdi32 Windows frontend (default on Windows): PeekMessage loo
 win_ui.py           Windows GDI helpers: GdiBlitter (fast blit + vector/text drawing) plus the
                       raw-input ctypes structs/helpers (RAWINPUT, RAWINPUTDEVICE, raw_mouse_delta,
                       etc.) that win_gdi.py uses for its own WndProc; pure helpers unit-tested in
-                      test_win_ui.py
+                      tests/test_win_ui.py
 mac.py              macOS audio backend (outside pkg): CoreAudio AudioQueue pulling from the mixer
 win.py              Windows audio backend (outside pkg): winmm waveOut buffers, feeder thread pulling from the mixer
 ```

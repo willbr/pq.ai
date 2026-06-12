@@ -12,7 +12,7 @@ raw-input ctypes structs/helpers used by win_gdi.py for its own WndProc.
                decode WM_INPUT packets for acceleration-free mouselook.
 
 The pure, OS-independent helpers (bgr_swap, raw_mouse_delta, apply_left_button,
-the RAWINPUT struct layout) are unit-tested in test_win_ui.py. DLL loading is
+the RAWINPUT struct layout) are unit-tested in tests/test_win_ui.py. DLL loading is
 deferred into GdiBlitter.__init__ so importing this module is side-effect free.
 """
 
@@ -140,7 +140,7 @@ def apply_left_button(held, usbuttonflags):
 
 # ============================================================================
 #  Live ctypes glue below: needs a real window + a hand at the mouse, so it is
-#  verified by running the game (smoke_win_ui.py exercises the signatures), not
+#  verified by running the game (tests/smoke_win_gdi.py exercises the signatures), not
 #  by unit tests. DLLs load in __init__ so importing this module stays cheap.
 # ============================================================================
 

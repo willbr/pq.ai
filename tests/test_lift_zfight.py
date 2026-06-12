@@ -23,6 +23,7 @@ from client import Client, InputState
 def _boot_near_lift():
     c = Client("e1m1")
     c.resize(320, 240)
+    c.set_video_res((240, 160))   # the flip thresholds were calibrated here
     c.pos = [552.0, 2032.0 + 120, -168.0 + 40]      # stand back of/above the lift
     c.yaw = 270.0
     c.pitch = 10.0

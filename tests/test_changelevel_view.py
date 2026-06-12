@@ -21,6 +21,7 @@ def _statusbar(rf):
 def test_view_size_survives_changelevel():
     c = Client("e1m1")
     c.resize(W, H)
+    c.set_video_res((240, 160))   # <320 wide: keep the text status bar overlay
     rf = c.frame(0.05, InputState())
     assert _statusbar(rf)[1] == H - 8
     assert rf.crosshair == (W // 2, H // 2)
@@ -42,6 +43,7 @@ def test_view_size_survives_changelevel():
 def test_console_map_command_keeps_view_size():
     c = Client("e1m1")
     c.resize(W, H)
+    c.set_video_res((240, 160))   # <320 wide: keep the text status bar overlay
     c.frame(0.05, InputState())
     c.con.execute("map e1m2")
     rf = c.frame(0.05, InputState())

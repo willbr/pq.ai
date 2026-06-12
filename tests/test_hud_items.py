@@ -36,6 +36,7 @@ def test_hud_status_reports_keys_and_powerups():
 def test_status_bar_shows_keys():
     c = client.Client("e1m1")
     c.resize(320, 240)
+    c.set_video_res((240, 160))   # <320 wide: text bar, not the sprite sbar
     f, vm, e = c.sv.f, c.sv.vm, c.sv.player
     items = int(vm.fget_f(e, f["items"]))
     vm.fset_f(e, f["items"], float(items | IT_KEY2))

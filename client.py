@@ -21,6 +21,8 @@ from quake.sv import (Server, anglemod, MOVETYPE_WALK, MOVETYPE_FLY,
                       MOVETYPE_NOCLIP)
 from quake.mdl import Mdl, EF_ROTATE
 from quake.spr import Spr
+from quake.wad import Wad
+from quake.sbar import Sbar, SBAR_LINES
 from quake.perf import PROFILER
 from quake import snd
 
@@ -48,9 +50,9 @@ CL_BOBUP = 0.5
 # "Auto" = derive from the window via zbuf_scale (today's behaviour, keeps the
 # zbuf_scale cvar meaningful); the fixed modes set the framebuffer exactly.
 VIDEO_MODES = [("Auto", None), ("80x40", (80, 40)), ("160x80", (160, 80)),
-               ("240x160", (240, 160)), ("320x240", (320, 240)),
-               ("640x480", (640, 480))]
-DEFAULT_VIDEO_RES = (240, 160)
+               ("240x160", (240, 160)), ("320x200", (320, 200)),
+               ("320x240", (320, 240)), ("640x480", (640, 480))]
+DEFAULT_VIDEO_RES = (320, 200)        # classic: the 320-wide sbar fits exactly
 HUD_GREEN = (0, 255, 102)  # the HUD/overlay text colour
 
 
@@ -157,6 +159,14 @@ class Client:
         # 64 light rows x 256 palette indices; the z-buffer renderer lights
         # every texel through it and returns an 8-bit indexed framebuffer.
         self.colormap = self.pak.read("gfx/colormap.lmp")[:64 * 256]
+        # classic sprite status bar (sbar.c), drawn in zbuf mode when the
+        # framebuffer is >=320 wide; plus the two timers cl_parse.c/view.c
+        # keep client-side: per-item pickup times (flash anims) and the
+        # pain-face deadline
+        self.sbar = Sbar(Wad(self.pak.read("gfx.wad")))
+        self.item_gettime = [0.0] * 32
+        self._prev_items = 0
+        self.faceanimtime = 0.0
         # screen colour shifts (view.c): contents/damage/bonus/powerup blend
         # the base palette into view_palette each frame (V_UpdatePalette)
         self.view_palette = self.palette
@@ -397,6 +407,7 @@ class Client:
                 side = (fr[0] * fwd[0] + fr[1] * fwd[1] + fr[2] * fwd[2]) / ln
                 self._v_dmg[2] = count * side * 0.6         # v_kickpitch
                 self._v_dmg[0] = 0.5                        # v_kicktime
+                self.faceanimtime = self.sv.time + 0.2      # V_ParseDamage
         dmg[3] = max(0.0, dmg[3] - 150.0 * dt)
 
         if sv.bonus_flash:                      # stuffcmd "bf" (V_BonusFlash)
@@ -1050,6 +1061,25 @@ class Client:
         # build the view model only now, from the smoothed gun origin
         view_model = self._view_model(gun_org) if gun_org is not None else None
 
+        # sprite status bar (sbar.c): zbuf mode with a >=320-wide screen.
+        # Sync the renderer's reserved rows here so every path that changes
+        # mode/resolution/zbuf_scale self-heals on the next frame.
+        st = self.sv.hud_status()
+        screen_w = (self.video_res[0] if self.video_res
+                    else max(1, self._view_wh[0] // self.rend.zbuf_scale))
+        sbar_lines = SBAR_LINES if (self.mode == "zbuf"
+                                    and screen_w >= 320) else 0
+        if self.rend.sbar_lines != sbar_lines:
+            self.rend.sbar_lines = sbar_lines
+            self.rend.resize(self.rend.width, self.rend.height)
+        if st:
+            items = st["items"]
+            if items != self._prev_items:        # CL_ParseClientdata
+                for j in range(32):
+                    if items & (1 << j) and not self._prev_items & (1 << j):
+                        self.item_gettime[j] = self.sv.time
+                self._prev_items = items
+
         PROFILER.begin("render")
         segs = polys = framebuffer = None
         render_mode = self.mode
@@ -1069,6 +1099,14 @@ class Client:
                                                     particles=self.sv.particles)
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
+            if self.rend.sbar_lines:
+                fb, vw, vh = fbdata
+                fb.extend(bytes(vw * self.rend.sbar_lines))   # the bar rows
+                full_h = vh + self.rend.sbar_lines
+                if st:
+                    self.sbar.draw(fb, vw, full_h, st, self.sv.time,
+                                   self.item_gettime, self.faceanimtime)
+                framebuffer = fbdata = (fb, vw, full_h)
         elif self.mode == "flat" or self.wire_hidden:
             # flat shading, or hidden-line wireframe: both want the back-to-front
             # (painter's) polygon path so near faces occlude far ones. They differ
@@ -1137,8 +1175,7 @@ class Client:
 
         # bottom status bar: health / armor / current-weapon ammo, plus the four
         # ammo pools. Health reddens when low so it reads at a glance.
-        st = self.sv.hud_status()
-        if st:
+        if st and not self.rend.sbar_lines:
             status_rgb = (255, 64, 64) if st["health"] <= 25 else (255, 204, 0)
             carried = "  ".join(s for s in (st["keys"], st["powerups"]) if s)
             status_str = (f"HEALTH {st['health']:3d}    ARMOR {st['armor']:3d}    "

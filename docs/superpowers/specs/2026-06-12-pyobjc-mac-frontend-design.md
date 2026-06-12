@@ -87,17 +87,21 @@ All drawing uses the current CGContext:
 
 - **zbuf**: expand the 8-bit framebuffer to RGBA via `mac_ui`, wrap with
   `CGDataProviderCreateWithCFData` + `CGImageCreate`, draw with
-  `kCGInterpolationNone`, stretched to fill the window exactly (StretchDIBits
-  semantics — no letterboxing; `fb_fit` is a Tk-only workaround and is not used).
+  `kCGInterpolationNone` into the largest aspect-correct rect
+  (`win_ui.letterbox_rect` — a pure, platform-free helper imported directly),
+  with black bars and particle remapping exactly as `win_ui.GdiBlitter.present`
+  does. `fb_fit`'s integer-only scaling is a Tk-only workaround and is not used.
   Palette LUTs cached against `palette_version` as in `main.py`.
 - **wire / wire_hidden**: `CGContextStrokeLineSegments` for segs; filled+stroked
   paths back-to-front for hidden-line.
 - **flat**: filled CGPaths back-to-front.
 - **particles**: filled rects.
 - **text** (HUD, statusbar, center text, crosshair, console, menu, profiler
-  bars): CoreText `CTLineDraw` with Menlo (CLAUDE.md already records that Menlo
-  carries the 1/8-block glyphs the profiler bars need). Console/menu panel layout
-  ported from `win_ui.draw_console`/`draw_menu`.
+  bars): AppKit string drawing (`NSString drawAtPoint:withAttributes:`, the
+  high-level wrapper over CoreText — flipped-view aware) with Menlo (CLAUDE.md
+  already records that Menlo carries the 1/8-block glyphs the profiler bars
+  need). Console/menu panel layout ported from
+  `win_ui.draw_console`/`draw_menu`.
 
 Retina: drawing is in points; the fb image upscale stays chunky because
 interpolation is off.

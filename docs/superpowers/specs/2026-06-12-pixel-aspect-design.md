@@ -27,10 +27,13 @@ default look; per-resolution automatic aspect guessing.
 - `self.pixel_aspect = 1.0` in `__init__` (next to `video_res`/`sbar_lines`).
 - `render_zbuffer` computes `yfocal = focal * self.pixel_aspect` (where
   `focal` is the framebuffer-scaled local) and uses it at every vertical
-  projection site: world edge projection (~line 1230-1232), the vertical
-  cull plane (`tany = hh / yfocal`, ~line 1444), alias/view-model vertex
-  projection, sprites, beams, and particle y-centres (~lines 1857-2630, the
-  `hh - cy * focal * iz` family). Horizontal projection unchanged.
+  projection site: world/brush surfaces, alias/view-model vertices, sprites,
+  beams, and particle y-centres (the `hh - cy * focal * iz` family inside
+  `render_zbuffer`). Horizontal projection unchanged. No cull-plane work:
+  the zbuf path clips at the near plane plus screen space, so the projection
+  change propagates everywhere on its own (`plane_gradients` derives the
+  depth/texture gradients from the projected coords). The `tany` frustum
+  plane at ~line 1444 belongs to the painter (wire/flat) paths — untouched.
 - `render_shaded`/wireframe paths untouched.
 
 ### Client (`client.py`)

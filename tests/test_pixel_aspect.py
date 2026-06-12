@@ -68,7 +68,53 @@ def test_wire_mode_ignores_pixel_aspect():
     assert segs1 == segs2
 
 
+def test_renderframe_reports_pixel_aspect():
+    c = client.Client("e1m1")
+    c.resize(640, 400)
+    c.mode = "zbuf"
+    c.set_video_res((320, 200))
+    rf = c.frame(0.016, client.InputState())
+    assert rf.pixel_aspect == 1.0                  # default: square
+    c.con.execute("pixel_aspect 0.8333333")
+    rf = c.frame(0.016, client.InputState())
+    assert abs(rf.pixel_aspect - CRT) < 1e-3
+    assert abs(c.rend.pixel_aspect - CRT) < 1e-3   # live renderer updated
+    c.mode = "wire"
+    rf = c.frame(0.016, client.InputState())
+    assert rf.pixel_aspect == 1.0                  # wire never stretches
+
+
+def test_pixel_aspect_persists_across_map_change():
+    c = client.Client("e1m1")
+    c.resize(640, 400)
+    c.con.execute("pixel_aspect 0.8333333")
+    c._cmd_map(["e1m1"])                           # rebuilds the Renderer
+    assert abs(c.rend.pixel_aspect - CRT) < 1e-3
+
+
+def test_pixel_aspect_clamped():
+    c = client.Client("e1m1")
+    c.con.execute("pixel_aspect 0.1")
+    assert c.rend.pixel_aspect == 0.5
+    c.con.execute("pixel_aspect 3")
+    assert c.rend.pixel_aspect == 1.0
+
+
+def test_menu_aspect_item_drives_client():
+    c = client.Client("e1m1")
+    # find the Aspect ChoiceItem and drive it to CRT by cycling to the CRT index
+    item = next(i for i in c.menu.items if getattr(i, "title", "") == "Aspect")
+    crt_idx = next(i for i, (_, v) in enumerate(item.options) if abs(v - CRT) < 1e-6)
+    item.index = crt_idx
+    item.on_select(item.options[crt_idx][1])
+    assert abs(c.rend.pixel_aspect - CRT) < 1e-3
+
+
 if __name__ == "__main__":
     test_crt_aspect_widens_vertical_fov()
     test_wire_mode_ignores_pixel_aspect()
+    test_renderframe_reports_pixel_aspect()
+    test_pixel_aspect_persists_across_map_change()
+    test_pixel_aspect_clamped()
+    test_menu_aspect_item_drives_client()
     print("OK")

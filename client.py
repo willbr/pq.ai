@@ -53,6 +53,10 @@ VIDEO_MODES = [("Auto", None), ("80x40", (80, 40)), ("160x80", (160, 80)),
                ("240x160", (240, 160)), ("320x200", (320, 200)),
                ("320x240", (320, 240)), ("640x480", (640, 480))]
 DEFAULT_VIDEO_RES = (320, 200)        # classic: the 320-wide sbar fits exactly
+# Pixel aspect for the textured mode: vertical/horizontal pixel size. CRT is
+# R_ViewChanged's "proper 320*200 pixelAspect = 0.8333333" -- VGA mode 13h
+# pixels were 5/6 as wide as tall on a 4:3 monitor.
+ASPECT_MODES = [("Square", 1.0), ("CRT", 5.0 / 6.0)]
 HUD_GREEN = (0, 255, 102)  # the HUD/overlay text colour
 
 
@@ -147,6 +151,9 @@ class RenderFrame:
     crosshair: tuple = (0, 0)
     console: tuple = None    # (lines, input_line, cursor_col) when open, else None
     menu: tuple = None       # (title, [(label, value, selected), ...]) when open, else None
+    pixel_aspect: float = 1.0  # zbuf: display rows taller by 1/this (CRT look)
+    # pixel_aspect asks the frontend to display the framebuffer stretched to
+    # h/pixel_aspect rows (values <1 make pixels taller, giving the VGA CRT look)
 
 
 class Client:
@@ -229,6 +236,8 @@ class Client:
 
         self.quit_requested = False
         self._zbuf_scale = ZBUF_SCALE     # desired textured divisor, persists across maps
+        self._pixel_aspect = 1.0    # zbuf vertical pixel aspect, persists
+                                    # across maps like _zbuf_scale
         # fixed textured render resolution (video-options menu), persists across
         # maps like _zbuf_scale; applied to each freshly built Renderer.
         self.video_res = DEFAULT_VIDEO_RES
@@ -265,6 +274,7 @@ class Client:
         self.bsp = Bsp(self.pak.read(path))
         self.rend = Renderer(self.bsp, self.palette, self.colormap)
         self.rend.zbuf_scale = self._zbuf_scale   # keep the console's chosen scale
+        self.rend.pixel_aspect = self._pixel_aspect  # keep the chosen aspect
         self.rend.video_res = self.video_res      # keep the menu's chosen resolution
         self.rend.resize(self.rend.width, self.rend.height)  # rebuild buffer at the chosen res
         self.phys = Physics(self.bsp)
@@ -724,18 +734,30 @@ class Client:
         self.rend.video_res = wh
         self.rend.resize(self.rend.width, self.rend.height)
 
+    def set_pixel_aspect(self, v):
+        """Vertical pixel aspect for the zbuf view (1.0 square, 5/6 VGA CRT);
+        clamped to a sane range. Takes effect next frame -- the projection
+        reads it live, no framebuffer rebuild needed."""
+        v = max(0.5, min(1.0, float(v)))
+        self._pixel_aspect = v
+        self.rend.pixel_aspect = v
+
     def _menu_back(self):
         self.menu.active = False
 
     def _build_menu(self):
-        """Build the Escape overlay menu: Resolution (cycles VIDEO_MODES), Back,
-        Quit. Closures bind to this Client's methods, like console commands."""
+        """Build the Escape overlay menu: Resolution (cycles VIDEO_MODES), Aspect
+        (cycles ASPECT_MODES), Back, Quit. Closures bind to this Client's methods,
+        like console commands."""
         idx = next((i for i, (_, v) in enumerate(VIDEO_MODES)
                     if v == self.video_res), 0)
         res = ChoiceItem("Resolution", VIDEO_MODES, idx, self.set_video_res)
+        aidx = next((i for i, (_, v) in enumerate(ASPECT_MODES)
+                     if v == self._pixel_aspect), 0)
+        aspect = ChoiceItem("Aspect", ASPECT_MODES, aidx, self.set_pixel_aspect)
         back = ActionItem("Back", self._menu_back)
         quit_item = ActionItem("Quit", self._cmd_quit_menu)
-        return Menu("VIDEO OPTIONS", [res, back, quit_item])
+        return Menu("VIDEO OPTIONS", [res, aspect, back, quit_item])
 
     def _cmd_quit_menu(self):
         self.quit_requested = True
@@ -782,6 +804,9 @@ class Client:
         con.register_cvar("zbuf_scale", self._zbuf_scale,
                           on_change=self._on_zbuf_scale,
                           help="textured rasteriser resolution divisor (1-16)")
+        con.register_cvar("pixel_aspect", self._pixel_aspect,
+                          on_change=lambda v: self.set_pixel_aspect(v.as_float()),
+                          help="zbuf pixel aspect: 1.0 square, 0.8333 VGA CRT")
         con.register_cvar("wire_hidden", 0, on_change=self._on_wire_hidden,
                           help="wireframe hidden-line removal (occlude walls): 0/1")
 
@@ -1227,7 +1252,9 @@ class Client:
                            overlays=overlays, crosshair=(w // 2, h // 2),
                            console=console, menu=menu,
                            palette=self.view_palette,
-                           palette_version=self.palette_version)
+                           palette_version=self.palette_version,
+                           pixel_aspect=(self._pixel_aspect
+                                         if self.mode == "zbuf" else 1.0))
 
     def _particle_sprites(self, eye):
         """Project the live particles to screen and return a list of (x, y, half,

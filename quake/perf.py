@@ -105,21 +105,26 @@ class Profiler:
         default ~60fps) spans the full `width`. Children are listed indented
         directly under their parent; the top is a header and the last row is the
         frame total. Monospace HUD font keeps the columns aligned."""
-        # depth-first order: each top-level section followed by its children
+        # depth-first order: each section followed by its subtree, any depth
         rows = []
+
+        def add(name, depth):
+            rows.append((name, depth))
+            for child in self.ms:
+                if self._parent.get(child) == name:
+                    add(child, depth + 1)
+
         for name in self.ms:
             if self._parent.get(name) is None:
-                rows.append((name, 0))
-                for child in self.ms:
-                    if self._parent.get(child) == name:
-                        rows.append((child, 1))
+                add(name, 0)
         rows.append(("total", 0))
 
+        lwidth = max(9, max(2 * d + len(n) for n, d in rows) + 1)
         lines = [f"prof (ms, target {target_ms:.1f})"]
         for name, depth in rows:
             ms = self.total_ms if name == "total" else self.ms[name]
             label = "  " * depth + name
-            lines.append(f"{label:<9}{ms:5.1f} {_bar(ms / target_ms, width)}")
+            lines.append(f"{label:<{lwidth}}{ms:5.1f} {_bar(ms / target_ms, width)}")
         return "\n".join(lines)
 
 

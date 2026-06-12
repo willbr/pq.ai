@@ -470,12 +470,20 @@ class Renderer:
 
         # lit-surface cache (Quake's surface cache, r_surf.c): per face, its
         # texture tiled over the face's extent pre-lit through the colormap,
-        # built lazily on first draw and dropped when the lightmap recombines
-        # or a +N animation swaps the texture. Each 16-texel luxel cell builds
-        # in one bytes.translate through its colormap row.
+        # built lazily on first draw. Entries are keyed by (face, lightkey,
+        # texture id) -- lightkey is the face's current style-brightness tuple
+        # -- so a flickering light only builds each brightness variant once and
+        # then flips between cached entries (id rebuilds on every style tick;
+        # in Python that rebuild burst is the frame-time spike that motivated
+        # the variant cache). Dynamic lights are continuous, so dlit faces get
+        # a throwaway per-frame key instead (popped when the face is restored).
+        # Each 16-texel luxel cell builds in one bytes.translate.
         self._surf_cache_map = {}
         self._surf_cache_bytes = 0
         self._dlit_faces = set()    # faces brightened by dlights this frame
+        self._dl_serial = 0         # distinguishes successive dlight frames
+        self.face_lightkey = [None] * nfaces   # per face: current lighting key
+        self.scache_builds = 0      # lifetime cache builds (perf diagnostics)
 
         # per-face lightmaps from the LIGHTING lump (baked static light). Each
         # entry: (lmw, lmh, smin, tmin, luxels, has_real). For surfaces with a
@@ -784,13 +792,18 @@ class Renderer:
 
     def _combine_face(self, fi, styleval):
         """Recombine face fi's lightmap luxels for the current style brightnesses
-        (in place). luxel = clamp(sum(block * styleval[style]) * gain / 256)."""
+        (in place). luxel = clamp(sum(block * styleval[style]) * gain / 256).
+        Sets face_lightkey to the brightness tuple, switching the lit-surface
+        cache onto the variant for these values (built on first draw, reused
+        ever after -- the luxels are a pure function of the key)."""
         rec = self.face_lm[fi]
         lmw, lmh, buf = rec[0], rec[1], rec[4]
         n = lmw * lmh
         acc = [0] * n
+        key = []
         for style, block in self.face_lm_styles[fi]:
             sv = styleval[style] if style < len(styleval) else 256
+            key.append(sv)
             if sv:
                 for i in range(n):
                     acc[i] += block[i] * sv
@@ -802,7 +815,7 @@ class Renderer:
             buf[i] = v
             tot += v
         self.face_light_avg[fi] = tot / n        # flat mode reads this per face
-        self._surf_cache_map.pop(fi, None)       # lit surface is now stale
+        self.face_lightkey[fi] = tuple(key)
 
     def _animate_lightmaps(self, styleval):
         """Rebuild only the faces whose light-style brightness changed this frame
@@ -826,10 +839,14 @@ class Renderer:
         if self._dlit_faces:
             for fi in self._dlit_faces:
                 if self.face_lm_styles[fi] is not None:
+                    # drop the face's throwaway dlit cache entry, then restore
+                    # its style key (the static variant is still cached)
+                    self._surf_cache_map.pop((fi, self.face_lightkey[fi]), None)
                     self._combine_face(fi, styleval)
             self._dlit_faces.clear()
         if not dlights:
             return
+        self._dl_serial += 1
         bsp = self.bsp
         planes, nodes, faces, texinfo = (bsp.planes, bsp.nodes, bsp.faces,
                                          bsp.texinfo)
@@ -884,7 +901,9 @@ class Renderer:
                             buf[base + s] = 255 if v > 255 else v
                             touched = True
                 if touched:
-                    self._surf_cache_map.pop(fi, None)
+                    # unique per-frame key: dlight falloff is continuous, so
+                    # this lighting is never worth keeping as a variant
+                    self.face_lightkey[fi] = ("dl", self._dl_serial)
                     self._dlit_faces.add(fi)
 
     def _surface_cache(self, fi, rec):
@@ -892,18 +911,23 @@ class Renderer:
         texture tiled over the face's full s/t extent, every texel's palette
         index mapped through the colormap row of the luxel covering it. The
         rasteriser then needs one fetch per pixel -- no lightmap sampling,
-        wrap or shade math. Cached until the lightmap recombines
-        (_combine_face drops the entry) or the +N animation swaps the texture
-        (the `is` check below). Returns (cw, ch, index_bytearray, tex); index
-        with (t - tmin, s - smin).
+        wrap or shade math. Entries are keyed by (face, face_lightkey), so a
+        light-style change switches to (or lazily builds) that brightness's
+        variant rather than rebuilding -- a flicker cycles a dozen levels, so
+        steady state is all cache hits. A +N animation swapping the texture
+        overwrites the entry (the `is` check below). Returns
+        (cw, ch, index_bytearray, tex); index with (t - tmin, s - smin).
 
         Rows are built with C-level ops: the texture row is tiled across the
         extent by bytes repeat/slice, then each 16-texel luxel cell is lit in
         one bytes.translate through its colormap row."""
         tw, th, tex = rec[0], rec[1], rec[2]
-        ent = self._surf_cache_map.get(fi)
+        ckey = (fi, self.face_lightkey[fi])
+        ent = self._surf_cache_map.get(ckey)
         if ent is not None and ent[3] is tex:
             return ent
+        PROFILER.begin("scache")
+        self.scache_builds += 1
         lmw, lmh, smin, tmin, lux, _ = self.face_lm[fi]
         cw = lmw << 4
         ch = lmh << 4
@@ -961,7 +985,8 @@ class Renderer:
         if self._surf_cache_bytes > 64 * 1024 * 1024:   # crude bound: flush all
             self._surf_cache_map.clear()
             self._surf_cache_bytes = len(out)
-        self._surf_cache_map[fi] = ent
+        self._surf_cache_map[ckey] = ent
+        PROFILER.end("scache")
         return ent
 
     def light_point(self, p):
@@ -1767,7 +1792,9 @@ class Renderer:
         zb = self._zb_far[:]                          # depth = 1/z, 0 == far away
 
         if lightstyles is not None:                   # animate flickering lights
+            PROFILER.begin("lmanim")
             self._animate_lightmaps(lightstyles)
+            PROFILER.end("lmanim")
         if textured:                                  # cycle +N animated textures
             self._animate_surfaces(time)
 
@@ -2295,6 +2322,7 @@ class Renderer:
         node_parent = self.node_parent
         leaf_parent = self.leaf_parent
         edges.begin_frame()             # reset the span/edge engine for this frame
+        PROFILER.begin("emit")
         for li in visible_leaves:
             _, _, firstmark, nummark = leafs[li]
             for m in range(firstmark, firstmark + nummark):
@@ -2478,15 +2506,19 @@ class Renderer:
                     else:
                         emit_brush_frag(wp, fi, rec, bkey)
             edges.insubmodel = False
+        PROFILER.end("emit")
         # resolve world + brush occlusion in one scanline sweep, then fill each
         # surviving span (write-only -- the stack already ordered them).
+        PROFILER.begin("spanfill")
         for surf in edges.scan():
             fh = surf.fill
             if fh is not None:
                 for (su, sv, scount) in surf.spans:
                     fh(su, sv, scount)
+        PROFILER.end("spanfill")
 
         # alias (.mdl) entities -- monsters, items
+        PROFILER.begin("alias")
         if alias_ents:
             for mdl, verts, org, ang in alias_ents:
                 r = mdl.boundingradius
@@ -2497,6 +2529,7 @@ class Renderer:
                     raster_alias_tex(mdl, verts, org, ang)
                 else:
                     raster_alias(mdl, verts, org, ang)
+        PROFILER.end("alias")
 
         # external .bsp pickups (health/ammo/explosive boxes): convex, backface-
         # cull faces. Texture-mapped (textured=True) like the world, otherwise

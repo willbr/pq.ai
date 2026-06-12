@@ -211,15 +211,23 @@ def test_surface_cache_reuse_and_invalidation():
     rec = r.face_tex[fi]
     c1 = r._surface_cache(fi, rec)
     assert r._surface_cache(fi, rec) is c1, "same inputs must hit the cache"
-    # a lightmap recombine (style animation) must drop the entry
+    # a recombine at unchanged brightnesses keeps the same lit variant (the
+    # luxels are a pure function of the style values, so nothing is stale)
     r._combine_face(fi, [256] * 64)
+    assert r._surface_cache(fi, rec) is c1, "same brightness must reuse"
+    # a brightness change switches to a different variant...
+    r._combine_face(fi, [128] * 64)
     c2 = r._surface_cache(fi, rec)
-    assert c2 is not c1, "lightmap recombine must invalidate"
+    assert c2 is not c1, "changed brightness must use another variant"
+    # ...and flicking back reuses the first variant instead of rebuilding
+    # (this is what kills the per-style-tick rebuild spike on flickering lights)
+    r._combine_face(fi, [256] * 64)
+    assert r._surface_cache(fi, rec) is c1, "old brightness must hit its variant"
     # a texture swap (+N animation) must rebuild too (bytes(bytes) would be
     # the same object in CPython, so go through bytearray to get a new one)
     swapped = (rec[0], rec[1], bytes(bytearray(rec[2])), rec[3], rec[4])
     c3 = r._surface_cache(fi, swapped)
-    assert c3 is not c2, "texture swap must invalidate"
+    assert c3 is not c1, "texture swap must invalidate"
 
 
 # ---- golden-frame characterisation ----

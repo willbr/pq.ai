@@ -233,17 +233,20 @@ def draw_string(ctx, x, y, s, rgb):
 
 
 def draw_texts(ctx, texts):
-    """Draw the HUD/overlay text list: (x, y, string, (r,g,b), anchor) with
+    """Draw the HUD/overlay text list: (x, y, string, color, anchor) with
     anchor 'nw' (top-left), 'sw' (bottom-left) or 'center'. Multi-line via
-    embedded newlines, mirroring win_ui._text_block."""
+    embedded newlines; color is one (r,g,b) or a per-line list (a short list
+    extends with its last entry), mirroring win_ui._text_block."""
     cw, lh = cell_metrics()
     for x, y, s, rgb, anchor in texts:
         lines = s.split("\n")
+        line_rgbs = None if isinstance(rgb[0], int) else rgb
         top = y if anchor == "nw" else (y - lh * len(lines) / 2 if anchor ==
                                         "center" else y - lh * len(lines))
         for i, line in enumerate(lines):
             lx = x - len(line) * cw / 2 if anchor == "center" else x
-            draw_string(ctx, lx, top + i * lh, line, rgb)
+            c = rgb if line_rgbs is None else line_rgbs[min(i, len(line_rgbs) - 1)]
+            draw_string(ctx, lx, top + i * lh, line, c)
 
 
 def draw_console(ctx, lines, input_line, cursor_col, dst_w, dst_h):

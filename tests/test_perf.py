@@ -152,7 +152,7 @@ def test_bars_length_scales_with_time():
 
 def test_bars_nests_child_under_parent_in_order():
     """A nested section is listed (indented) right after its parent, and the
-    total row comes last -- even though it finished before the parent."""
+    total row sits at the top, right under the header."""
     clk = FakeClock()
     p = Profiler(clock=clk, alpha=1.0)
     p.begin("render")
@@ -169,7 +169,17 @@ def test_bars_nests_child_under_parent_in_order():
     idx = lambda sub: next(i for i, l in enumerate(lines) if sub in l)
     assert idx("render") < idx("raster") < idx("present"), lines
     assert lines[idx("raster")].startswith("  "), repr(lines[idx("raster")])
-    assert "total" in lines[-1], lines
+    assert lines[1].startswith("total"), lines    # first row under the header
+
+
+def test_prof_total_color_buckets():
+    """The HUD total-row colour follows the frame-budget buckets: green within
+    60fps, yellow within 30, orange within 20, red beyond."""
+    from client import prof_total_color, HUD_GREEN
+    assert prof_total_color(10.0) == HUD_GREEN          # > 60fps
+    assert prof_total_color(25.0) == (255, 204, 0)      # > 30fps
+    assert prof_total_color(45.0) == (255, 140, 0)      # > 20fps
+    assert prof_total_color(80.0) == (255, 64, 64)
 
 
 def test_bars_sorts_hottest_first_within_level():
@@ -205,4 +215,5 @@ if __name__ == "__main__":
     test_bars_length_scales_with_time()
     test_bars_nests_child_under_parent_in_order()
     test_bars_sorts_hottest_first_within_level()
+    test_prof_total_color_buckets()
     print("OK")

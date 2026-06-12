@@ -45,6 +45,23 @@ def test_frame_returns_zbuf_renderframe_sized_to_viewport():
     assert any("fps" in o[2] for o in rf.overlays) # HUD line present
 
 
+def test_prof_overlay_carries_per_line_colors():
+    """With the profiler HUD up, the nw overlay's colour is a per-line list:
+    one entry per text line, the 'total' row tinted by frame budget and every
+    other line the standard HUD green."""
+    from quake.perf import PROFILER
+    c = client.Client("e1m1")
+    c.resize(320, 240)
+    c.show_prof = True
+    rf = c.frame(0.016, client.InputState())
+    _x, _y, text, rgb, _a = next(o for o in rf.overlays if o[4] == "nw")
+    lines = text.split("\n")
+    assert not isinstance(rgb[0], int) and len(rgb) == len(lines)
+    ti = next(i for i, l in enumerate(lines) if l.startswith("total"))
+    assert rgb[ti] == client.prof_total_color(PROFILER.total_ms)
+    assert all(c2 == client.HUD_GREEN for i, c2 in enumerate(rgb) if i != ti)
+
+
 def test_frame_forward_input_moves_player():
     c = client.Client("e1m1")
     c.resize(320, 240)
@@ -60,5 +77,6 @@ if __name__ == "__main__":
     test_renderframe_holds_mode_and_overlays()
     test_client_boots_e1m1_with_spawn_and_viewport()
     test_frame_returns_zbuf_renderframe_sized_to_viewport()
+    test_prof_overlay_carries_per_line_colors()
     test_frame_forward_input_moves_player()
     print("OK")

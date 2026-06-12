@@ -418,8 +418,12 @@ class GdiBlitter:
             self._text_block(hdc, x, y, s, rgb, anchor)
 
     def _text_block(self, hdc, x, y, s, rgb, anchor):
+        # rgb is one (r,g,b) for the block, or a per-line list (a short list
+        # extends with its last entry) -- the profiler HUD tints its total row
         g = self.gdi32
-        g.SetTextColor(hdc, colorref(rgb))
+        line_rgbs = None if isinstance(rgb[0], int) else rgb
+        if line_rgbs is None:
+            g.SetTextColor(hdc, colorref(rgb))
         lines = s.split("\n")
         sz = SIZE()
         # line height from the first line (stock fixed font is uniform)
@@ -428,6 +432,8 @@ class GdiBlitter:
         top = y if anchor == "nw" else (y - lh * len(lines) // 2 if anchor ==
                                         "center" else y - lh * len(lines))
         for i, line in enumerate(lines):
+            if line_rgbs is not None:
+                g.SetTextColor(hdc, colorref(line_rgbs[min(i, len(line_rgbs) - 1)]))
             g.GetTextExtentPoint32W(hdc, line, len(line), ctypes.byref(sz))
             lx = x - sz.cx // 2 if anchor == "center" else x
             g.TextOutW(hdc, lx, top + i * lh, line, len(line))

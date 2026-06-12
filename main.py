@@ -245,6 +245,9 @@ class App:
         self.part_prev = 0
         self.hud = self.canvas.create_text(
             8, 8, anchor="nw", fill="#00ff66", font=(HUD_FONT, 11), text="")
+        # per-line HUD items for overlays carrying a colour list (a Tk text
+        # item is single-colour); grown on demand, parked with text=""
+        self.hudline_pool = []
         self.crosshair = self.canvas.create_text(
             0, 0, fill="#00ff66", font=(HUD_FONT, 18), text="+")
         self.center_text = self.canvas.create_text(
@@ -516,19 +519,29 @@ class App:
         self._draw_particles(rf.particles)
 
         # route overlays to the three Tk text items by anchor; any item with no
-        # overlay this frame is cleared to "".
+        # overlay this frame is cleared to "". An overlay whose colour is a
+        # per-line list (the profiler HUD) draws through the line pool instead.
         by_anchor = {"nw": self.hud, "sw": self.statusbar, "center": self.center_text}
         seen = set()
+        hud_lines = None
         for x, y, text, rgb, anchor in rf.overlays:
             item = by_anchor.get(anchor)
             if item is None:
                 continue
+            if not isinstance(rgb[0], int):      # per-line colour list
+                if anchor == "nw":
+                    hud_lines = (x, y, text, rgb)
+                    self.canvas.itemconfig(item, text="")
+                    seen.add(anchor)
+                    continue
+                rgb = rgb[0]                     # other anchors: degrade to one
             self.canvas.coords(item, x, y)
             self.canvas.itemconfig(item, text=text, fill="#%02x%02x%02x" % rgb)
             seen.add(anchor)
         for anchor, item in by_anchor.items():
             if anchor not in seen:
                 self.canvas.itemconfig(item, text="")
+        self._draw_hud_lines(hud_lines)
 
         self.canvas.coords(self.crosshair, *rf.crosshair)
         self.canvas.tag_raise(self.hud)
@@ -553,6 +566,26 @@ class App:
         for i in range(n, self.prev_n):      # park last frame's surplus off-screen
             coords(pool[i], -10, -10, -10, -10)
         self.prev_n = n
+
+    def _draw_hud_lines(self, spec):
+        """Draw an nw overlay whose colour is a per-line list (the profiler
+        HUD tinting its total row): one pooled text item per line, stacked at
+        the console font's line height. spec is (x, y, text, [rgb, ...]) or
+        None to park the pool."""
+        lines = spec[2].split("\n") if spec else []
+        while len(self.hudline_pool) < len(lines):
+            self.hudline_pool.append(self.canvas.create_text(
+                0, 0, anchor="nw", font=(HUD_FONT, 11), text=""))
+        for i, item in enumerate(self.hudline_pool):
+            if i < len(lines):
+                x, y, _text, rgbs = spec
+                rgb = rgbs[min(i, len(rgbs) - 1)]
+                self.canvas.coords(item, x, y + i * self.con_lh)
+                self.canvas.itemconfig(item, text=lines[i],
+                                       fill="#%02x%02x%02x" % tuple(rgb))
+                self.canvas.tag_raise(item)
+            else:
+                self.canvas.itemconfig(item, text="")
 
     def _draw_particles(self, particles):
         """Draw the precomputed particle sprites (Client projected/sized/occluded

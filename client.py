@@ -51,6 +51,20 @@ VIDEO_MODES = [("Auto", None), ("80x40", (80, 40)), ("160x80", (160, 80)),
                ("240x160", (240, 160)), ("320x240", (320, 240)),
                ("640x480", (640, 480))]
 DEFAULT_VIDEO_RES = (240, 160)
+HUD_GREEN = (0, 255, 102)  # the HUD/overlay text colour
+
+
+def prof_total_color(total_ms):
+    """Traffic-light colour for the profiler HUD's total row: green while the
+    frame fits a 60fps budget, yellow above 30fps, orange above 20fps, red
+    below that."""
+    if total_ms <= 1000.0 / 60.0:
+        return HUD_GREEN
+    if total_ms <= 1000.0 / 30.0:
+        return (255, 204, 0)
+    if total_ms <= 1000.0 / 20.0:
+        return (255, 140, 0)
+    return (255, 64, 64)
 
 
 def view_origins(pos, view_height, forward, bob):
@@ -115,7 +129,10 @@ class RenderFrame:
     polygons for hidden-line wireframe); framebuffer
     is (index_bytes, w, h) -- 8-bit palette indices the frontend expands via
     Client.palette (tk) or blits as an 8bpp palettised DIB (gdi32). overlays
-    are (x, y, text, (r,g,b), anchor) with anchor in {'nw','center','sw'}.
+    are (x, y, text, color, anchor) with anchor in {'nw','center','sw'};
+    color is one (r,g,b) for the whole block, or a list of per-line (r,g,b)
+    (short lists extend with their last entry) -- the profiler HUD uses a
+    list to tint just its total row by frame budget.
     menu is the overlay menu's view (title, rows) when open, else None."""
     mode: str
     segs: list = None                       # mode 'wire': line segments
@@ -1096,13 +1113,22 @@ class Client:
                    f"spd {spd:.0f}   yaw {self.yaw:.0f} pitch {self.pitch:.0f}   "
                    f"{'MOUSELOOK — mouse/Ctrl fire, 1-8 weapons' if inp.mouselook else 'click to capture mouse'} "
                    f"[N]oclip [F]lat [Z]buffer [T]exture [P]rofile")
+        hud_rgb = HUD_GREEN
         if self.show_prof:
             # previous completed frame's smoothed section ms (server/render/
             # raster/present) as a bar chart. present is timed in the frontend
             # and frame_end() rolls the buckets, so the figures lag one frame
-            # uniformly.
-            hud_str += "\n" + PROFILER.bars()
-        overlays.append((8, 8, hud_str, (0, 255, 102), "nw"))
+            # uniformly. The total row (top of the chart) is tinted by frame
+            # budget via a per-line colour list; every other line stays green.
+            prof = PROFILER.bars()
+            base = hud_str.count("\n") + 1
+            colors = [HUD_GREEN] * (base + prof.count("\n") + 1)
+            for i, ln in enumerate(prof.split("\n")):
+                if ln.startswith("total"):
+                    colors[base + i] = prof_total_color(PROFILER.total_ms)
+            hud_str += "\n" + prof
+            hud_rgb = colors
+        overlays.append((8, 8, hud_str, hud_rgb, "nw"))
 
         # bottom status bar: health / armor / current-weapon ammo, plus the four
         # ammo pools. Health reddens when low so it reads at a glance.

@@ -102,14 +102,14 @@ class Profiler:
     def bars(self, target_ms=16.7, width=12):
         """Multi-line block-character bar chart of the smoothed section times,
         each bar scaled so a section filling the whole frame budget (`target_ms`,
-        default ~60fps) spans the full `width`. Children are listed indented
-        directly under their parent, siblings hottest-first (flame-graph
-        order, so the eye lands on the cost driver at every level); the top
-        is a header and the last row is the frame total. Monospace HUD font
+        default ~60fps) spans the full `width`. The frame total is the first
+        row under the header; below it, children are listed indented directly
+        under their parent, siblings hottest-first (flame-graph order, so the
+        eye lands on the cost driver at every level). Monospace HUD font
         keeps the columns aligned."""
-        # depth-first, siblings by descending time: subtree under each section
+        # total first, then depth-first with siblings by descending time
         msd = self.ms
-        rows = []
+        rows = [("total", 0)]
 
         def add(name, depth):
             rows.append((name, depth))
@@ -120,7 +120,6 @@ class Profiler:
         top = [n for n in msd if self._parent.get(n) is None]
         for name in sorted(top, key=msd.get, reverse=True):
             add(name, 0)
-        rows.append(("total", 0))
 
         lwidth = max(9, max(2 * d + len(n) for n, d in rows) + 1)
         lines = [f"prof (ms, target {target_ms:.1f})"]

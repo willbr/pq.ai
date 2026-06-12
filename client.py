@@ -919,10 +919,15 @@ class Client:
 
         PROFILER.begin("server")     # QuakeC tick + physics for this frame
         dead = False                 # set below once health hits 0 (death cam)
+        # "always pause in single player if in console or menus"
+        # (host.c Host_ServerFrame): skip the QC tick and player movement while
+        # the Escape menu or console is open; the world renders frozen.
+        if self.menu.active or self.con.active:
+            dead = self.sv.player_health() <= 0
         # Intermission: the QC has frozen the player at the end-of-level camera
         # spot. Don't move or camera-drive them -- just advance the QC and let
         # IntermissionThink load the next map on a fire press after the delay.
-        if self.intermission or self.sv.intermission_active():
+        elif self.intermission or self.sv.intermission_active():
             self.intermission = True
             self.sv.run_frame(dt if dt < SV_MAXFRAME else SV_MAXFRAME)
             self.sv.run_intermission(self.attacking)

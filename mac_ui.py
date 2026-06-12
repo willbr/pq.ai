@@ -53,6 +53,19 @@ def expand_fb_rgba(fb, w, h, pal_r, pal_g, pal_b):
     return bytes(buf)
 
 
+def letterbox_rect(src_w, src_h, dst_w, dst_h):
+    """Largest (ox, oy, w, h) rect inside the dst window that preserves the src
+    framebuffer's aspect ratio, centered, with the leftover margin left for
+    black bars. Port of win_ui.letterbox_rect (win_ui itself does not import on
+    macOS: its module-level WNDPROC needs ctypes.WINFUNCTYPE)."""
+    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
+        return (0, 0, max(0, dst_w), max(0, dst_h))
+    scale = min(dst_w / src_w, dst_h / src_h)
+    out_w = max(1, round(src_w * scale))
+    out_h = max(1, round(src_h * scale))
+    return ((dst_w - out_w) // 2, (dst_h - out_h) // 2, out_w, out_h)
+
+
 def fit_particles(particles, ox, oy, ow, oh, dst_w, dst_h):
     """Remap window-space particle sprites into the letterbox image rect so the
     sprites stay aligned with the (smaller) world image. Pure port of

@@ -5,7 +5,8 @@ running the game (the win_ui pattern)."""
 
 import _bootstrap  # noqa: F401  (repo root on sys.path, chdir to root)
 
-from mac_ui import KEYCODE_NAMES, pal_channel_tables, expand_fb_rgba, fit_particles
+from mac_ui import (KEYCODE_NAMES, pal_channel_tables, expand_fb_rgba,
+                    fit_particles, letterbox_rect)
 
 
 def test_keycode_names():
@@ -62,8 +63,17 @@ def test_fit_particles():
     assert fit_particles([], 0, 50, 200, 100, 200, 200) == []
 
 
+def test_letterbox_rect():
+    # port of win_ui.letterbox_rect: same cases as tests/test_win_ui.py's shape
+    assert letterbox_rect(200, 150, 800, 600) == (0, 0, 800, 600)   # matching 4:3
+    assert letterbox_rect(200, 100, 200, 200) == (0, 50, 200, 100)  # letterboxed
+    assert letterbox_rect(100, 200, 200, 200) == (50, 0, 100, 200)  # pillarboxed
+    assert letterbox_rect(0, 0, 800, 600) == (0, 0, 800, 600)       # degenerate
+
+
 if __name__ == "__main__":
     test_keycode_names()
     test_expand_fb_rgba()
     test_fit_particles()
+    test_letterbox_rect()
     print("OK")

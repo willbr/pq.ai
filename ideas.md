@@ -1,3 +1,5 @@
+tidy tests into a tests folder
+
 # Ideas / backlog
 
 Ordered by recommended sequence: chase the wins (profiler's already in place to
@@ -28,4 +30,8 @@ map tools, bsp, light, vis, quaked
 headless mode for testing
 headless server mode
 bots
+
+review using classes, aren't they bloody slow in pytohn?
+
+headless server with bots
 

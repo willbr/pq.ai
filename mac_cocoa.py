@@ -16,6 +16,7 @@ Run: python main.py [map] on macOS (this is the darwin default; --tk forces
 tkinter). Requires PyObjC: pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz
 """
 
+import signal
 import sys
 import time
 
@@ -349,6 +350,12 @@ def build_input(view, prev_keys):
 
 def run(mapname):
     state = {"running": True}
+    # Ctrl-C: a KeyboardInterrupt raised while control is inside the ObjC
+    # bridge (sendEvent_/display) is logged and swallowed by PyObjC, so the
+    # default handler can't stop the loop; flip the flag instead and exit
+    # through the normal shutdown path.
+    signal.signal(signal.SIGINT,
+                  lambda *_: state.__setitem__("running", False))
     app = _make_app()
     window, view, delegate = _make_window(f"pq.ai cocoa — {mapname}",
                                           800, 600, state)

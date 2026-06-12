@@ -96,18 +96,25 @@ def test_pixel_aspect_clamped():
     c = client.Client("e1m1")
     c.con.execute("pixel_aspect 0.1")
     assert c.rend.pixel_aspect == 0.5
+    assert c.con.cvars["pixel_aspect"].value == "0.5"   # cvar reflects the clamp
     c.con.execute("pixel_aspect 3")
     assert c.rend.pixel_aspect == 1.0
+    assert c.con.cvars["pixel_aspect"].value == "1.0"   # cvar reflects the clamp
 
 
 def test_menu_aspect_item_drives_client():
     c = client.Client("e1m1")
-    # find the Aspect ChoiceItem and drive it to CRT by cycling to the CRT index
-    item = next(i for i in c.menu.items if getattr(i, "title", "") == "Aspect")
-    crt_idx = next(i for i, (_, v) in enumerate(item.options) if abs(v - CRT) < 1e-6)
-    item.index = crt_idx
-    item.on_select(item.options[crt_idx][1])
+    # Aspect is the second menu item (index 1 in VIDEO OPTIONS).  Drive it with
+    # the real menu path the frontend uses: select the row, call key_right() to
+    # cycle from "Square" (index 0) to "CRT" (index 1).
+    aspect_row = next(i for i, it in enumerate(c.menu.items)
+                      if getattr(it, "title", "") == "Aspect")
+    c.menu.selected = aspect_row
+    c.menu.key_right()                  # cycle: Square -> CRT
+    item = c.menu.items[aspect_row]
     assert abs(c.rend.pixel_aspect - CRT) < 1e-3
+    assert item.index == 1
+    assert item.value_label == "CRT"
 
 
 if __name__ == "__main__":

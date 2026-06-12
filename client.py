@@ -805,7 +805,7 @@ class Client:
                           on_change=self._on_zbuf_scale,
                           help="textured rasteriser resolution divisor (1-16)")
         con.register_cvar("pixel_aspect", self._pixel_aspect,
-                          on_change=lambda v: self.set_pixel_aspect(v.as_float()),
+                          on_change=self._on_pixel_aspect,
                           help="zbuf pixel aspect: 1.0 square, 0.8333 VGA CRT")
         con.register_cvar("wire_hidden", 0, on_change=self._on_wire_hidden,
                           help="wireframe hidden-line removal (occlude walls): 0/1")
@@ -822,6 +822,10 @@ class Client:
         if self._view_wh != (0, 0):
             self.rend.resize(*self._view_wh)
         self.con.print(f"zbuf_scale {v}")
+
+    def _on_pixel_aspect(self, cv):
+        self.set_pixel_aspect(cv.as_float())
+        cv.value = str(self._pixel_aspect)        # write the clamped value back
 
     def _cmd_notarget(self, args):
         on = self.sv.toggle_notarget()

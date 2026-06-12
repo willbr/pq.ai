@@ -54,8 +54,9 @@ composites into the framebuffer bytearray:
 - **IBAR** (`Sbar_DrawInventory`): ibar background; weapon slots at x=i*24
   (lightning 48 wide) using `INV_` owned / `INV2_` selected / `INVA1-5_`
   flash for 0.7 s after pickup (`flashon = (time - gettime)*10` clamped,
-  exactly the `Sbar_DrawInventory` formula); 8×8 `IN_`-style ammo counts at
-  the top (the four pools, 3 digits each at x=(6*i+1)*8, blank-padded);
+  exactly the `Sbar_DrawInventory` formula); ammo counts at the top in the
+  gold CONCHARS console digits (chars 18+n, as `Sbar_DrawCharacter` does;
+  the four pools, 3 digits each at x=(6*i+1)*8-2, blank-padded);
   items (keys, invis/invuln/suit/quad) at x=192+, flashing via gettime;
   sigils at x=320-32+ from the `sigils` bits.
 - **SBAR** (`Sbar_DrawNormal`): sbar background; armor: `SB_ARMOR1-3` icon by
@@ -71,8 +72,9 @@ composites into the framebuffer bytearray:
 ## Data plumbing
 
 - `sv.hud_status()` stays backward compatible: existing keys unchanged, new
-  keys `items` (raw int bitfield), `weapon_bit` (raw IT_ weapon bit) and
-  `sigils` (the low 4 bits of the `serverflags` global).
+  keys `items` (raw int bitfield, with the low 4 bits of the `serverflags`
+  global folded into bits 28..31 exactly as `SV_WriteClientdataToMessage`
+  does) and `weapon_bit` (raw IT_ weapon bit).
 - `client.py` keeps the two client-side timers `cl_parse.c` kept:
   - `faceanimtime = sv.time + 0.2` stamped from the same damage event the
     view kick already consumes (`_update_view_feel` path).

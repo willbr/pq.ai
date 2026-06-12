@@ -154,6 +154,7 @@ class Client:
         self.view_angles = (0.0, 0.0, 0.0)
         self.eye_z_offset = 0.0
         self._missing_warned = set()   # maps not in the pak we've already flagged
+        self._view_wh = (0, 0)         # window size; (0, 0) until resize()
         self._beam_models = {}         # bolt .mdl cache for lightning beams
         self.dlights = {}              # CL_AllocDlight pool: key -> [x,y,z,
         self._dlight_seq = 0           #   radius, die, decay, minlight]
@@ -317,7 +318,14 @@ class Client:
         self.sv.spawn_player(tuple(self.pos), (self.pitch, self.yaw, 0.0),
                              parms=self.spawn_parms)
 
-        self._view_wh = (0, 0)
+        # keep the window size across map swaps: overlays/crosshair lay out
+        # from _view_wh every frame, and the gdi/cocoa frontends only call
+        # resize() when the WINDOW size changes -- zeroing it here pushed the
+        # status bar to y=-8 and the crosshair to (0,0) after a changelevel
+        # (the tk frontend masked it by resizing every tick). The rebuilt
+        # renderer gets sized from it too, replacing its construction default.
+        if self._view_wh != (0, 0):
+            self.rend.resize(*self._view_wh)
         return True
 
     def resize(self, w, h):

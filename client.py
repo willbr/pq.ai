@@ -160,13 +160,9 @@ class Client:
         # every texel through it and returns an 8-bit indexed framebuffer.
         self.colormap = self.pak.read("gfx/colormap.lmp")[:64 * 256]
         # classic sprite status bar (sbar.c), drawn in zbuf mode when the
-        # framebuffer is >=320 wide; plus the two timers cl_parse.c/view.c
-        # keep client-side: per-item pickup times (flash anims) and the
-        # pain-face deadline
+        # framebuffer is >=320 wide; the per-item/face timers are initialised
+        # by _load_map (CL_ClearState) so they reset correctly on every level.
         self.sbar = Sbar(Wad(self.pak.read("gfx.wad")))
-        self.item_gettime = [0.0] * 32
-        self._prev_items = 0
-        self.faceanimtime = 0.0
         # screen colour shifts (view.c): contents/damage/bonus/powerup blend
         # the base palette into view_palette each frame (V_UpdatePalette)
         self.view_palette = self.palette
@@ -259,6 +255,13 @@ class Client:
             return False
 
         self.mapname = mapname                    # bare name, for the "map" query
+        # CL_ClearState (cl_main.c): cosmetic HUD timers reset on every new
+        # server connection -- sv.time restarts at 0 each level, so stale
+        # values from the old level would leave the pain face stuck and
+        # pickup-flash frames blinking for the difference.
+        self.item_gettime = [0.0] * 32
+        self._prev_items = 0
+        self.faceanimtime = 0.0
         self.bsp = Bsp(self.pak.read(path))
         self.rend = Renderer(self.bsp, self.palette, self.colormap)
         self.rend.zbuf_scale = self._zbuf_scale   # keep the console's chosen scale

@@ -107,6 +107,20 @@ def test_pain_face_timer_set_on_damage():
     assert c.faceanimtime <= c.sv.time + 0.2 + 1e-6
 
 
+def test_hud_timers_reset_on_level_change():
+    # CL_ClearState: the cosmetic HUD timers must not leak the old level's
+    # clock into the new one (sv.time restarts at 0 per level)
+    c = _boot_zbuf((320, 200))
+    c.frame(0.016, client.InputState())
+    c.faceanimtime = 50.0
+    c.item_gettime[3] = 120.0
+    c._cmd_map(["e1m1"])                 # console "map" -> _load_map
+    assert c.faceanimtime == 0.0
+    assert c.item_gettime == [0.0] * 32
+    assert c._prev_items == 0
+    c.frame(0.016, client.InputState())  # and the new level still renders
+
+
 if __name__ == "__main__":
     test_hud_status_raw_fields()
     test_renderer_sbar_lines_shrinks_view()
@@ -115,4 +129,5 @@ if __name__ == "__main__":
     test_narrow_res_falls_back_to_text()
     test_wire_mode_keeps_text_bar()
     test_pain_face_timer_set_on_damage()
+    test_hud_timers_reset_on_level_change()
     print("OK")

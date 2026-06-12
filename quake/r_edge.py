@@ -185,39 +185,49 @@ class EdgeRaster:
                 u = w
             sl = e.surf_lead
             if sl is not None:
-                if self._nearer(sl, top, fu, fv):
-                    self._close_span(top, u, v)     # sl becomes the new top
-                    sl.prev = None
-                    sl.next = top
-                    top.prev = sl
-                    top = sl
-                    sl.last_u = u
-                else:                                # insert sl below the top
-                    cur = top
-                    while cur.next is not None and not self._nearer(sl, cur.next, fu, fv):
-                        cur = cur.next
-                    sl.next = cur.next
-                    sl.prev = cur
-                    if cur.next is not None:
-                        cur.next.prev = sl
-                    cur.next = sl
-                sl.spanstate = 1
+                # id's inverted-span guard (R_LeadingEdge, r_edge.c:475): only
+                # insert on the 0->1 transition. If the trailing edge already
+                # fired this row (degenerate/crossing edges from near-clipped
+                # polys), spanstate went -1->0 here and the pair is a no-op --
+                # otherwise the surface would be inserted but never removed and
+                # would flood the rest of the scanline.
+                sl.spanstate += 1
+                if sl.spanstate == 1:
+                    if self._nearer(sl, top, fu, fv):
+                        self._close_span(top, u, v)     # sl becomes the new top
+                        sl.prev = None
+                        sl.next = top
+                        top.prev = sl
+                        top = sl
+                        sl.last_u = u
+                    else:                                # insert sl below the top
+                        cur = top
+                        while cur.next is not None and not self._nearer(sl, cur.next, fu, fv):
+                            cur = cur.next
+                        sl.next = cur.next
+                        sl.prev = cur
+                        if cur.next is not None:
+                            cur.next.prev = sl
+                        cur.next = sl
             st = e.surf_trail
             if st is not None:
-                if top is st:                        # the visible surface ends
-                    self._close_span(st, u, v)
-                    top = st.next if st.next is not None else bg
-                    top.prev = None
-                    top.last_u = u
-                else:                                # a hidden surface ends
-                    p = st.prev
-                    nx = st.next
-                    if p is not None:
-                        p.next = nx
-                    if nx is not None:
-                        nx.prev = p
-                st.spanstate = 0
-                st.next = st.prev = None
+                # R_TrailingEdge, r_edge.c:424: only remove on the 1->0
+                # transition (skip if the start edge hasn't been seen yet).
+                st.spanstate -= 1
+                if st.spanstate == 0:
+                    if top is st:                        # the visible surface ends
+                        self._close_span(st, u, v)
+                        top = st.next if st.next is not None else bg
+                        top.prev = None
+                        top.last_u = u
+                    else:                                # a hidden surface ends
+                        p = st.prev
+                        nx = st.next
+                        if p is not None:
+                            p.next = nx
+                        if nx is not None:
+                            nx.prev = p
+                    st.next = st.prev = None
         self._close_span(top, w, v)
 
     def _nearer(self, surf, other, fu, fv):
@@ -247,7 +257,10 @@ class EdgeRaster:
         return False
 
     def _close_span(self, surf, u, v):
-        if surf.spanstate and surf is not self.bg and u > surf.last_u:
+        # callers only close surfaces that are on the stack (or bg, excluded);
+        # the trailing-edge caller has already decremented spanstate to 0, so
+        # don't gate on it (id emits the span inside the --spanstate==0 block).
+        if surf is not self.bg and u > surf.last_u:
             surf.spans.append((surf.last_u, v, u - surf.last_u))
         surf.last_u = u
 

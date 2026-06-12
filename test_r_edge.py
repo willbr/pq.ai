@@ -155,6 +155,46 @@ def test_coplanar_bmodel_overlap_new_surface_wins():
         assert a_by_row.get(v) == (0, 20), (v, a_by_row.get(v))
 
 
+def test_inverted_span_does_not_stick():
+    # A near-clipped brush face can project to a huge, badly-warped screen
+    # polygon (vertices at x ~ -30000 after a vertex lands close to the near
+    # plane). Its leading and trailing edges then cross, so on some scanlines
+    # the trailing edge precedes the leading edge in u order -- id's "inverted
+    # span". WinQuake guards both handlers (`if (++surf->spanstate == 1)` /
+    # `if (--surf->spanstate == 0)`, r_edge.c:348/424) so the pair is a no-op;
+    # without the guard the surface is inserted but never removed and floods
+    # the rest of every such scanline (the e1m1 black-band flicker at the
+    # extended bridge, faults.md #4). The polygon below is the real offender
+    # captured from that scene; it is entirely left of the screen, so it must
+    # emit nothing at all.
+    # Both polygons captured verbatim from the failing frame. The bmodel one is
+    # a zero-area sliver with duplicated vertices (near-clip artifact): its
+    # leading and trailing edges share identical u on every row, so the sort's
+    # tie order -- perturbed by the other surface's edges -- decides which
+    # fires first. It lies entirely left of the screen and must emit nothing.
+    er = EdgeRaster(240, 160)
+    er.begin_frame()
+    er.add_surface(0, NORMAL,
+                   (-0.0017112112259404233, 3.191942337183981e-06,
+                    -4.7608032225730936e-05),
+                   [(9183.188732653827, -20425.10385031782),
+                    (5870.307086453869, -12972.707322050277),
+                    (9138.231312318423, -20428.118078939133)])
+    er.insubmodel = True
+    er.add_surface(0, NORMAL,
+                   (0.006303843117536179, -5.436509020650132e-05, 0.0),
+                   [(-18278.203036323324, 6171.058931986609),
+                    (-89.21352554152105, 40.97637748362866),
+                    (-89.21352554152105, 40.97637748362866),
+                    (-18278.203036323324, 6171.058931986611)])
+    bad = er.surfaces[-1]
+    er.insubmodel = False
+    er.scan()
+    bad_px = sum(n for (_u, _v, n) in bad.spans)
+    assert bad_px == 0, ("fully off-screen sliver drew pixels", bad_px,
+                         bad.spans[:4])
+
+
 def test_offscreen_clamped():
     er = EdgeRaster(32, 32)
     er.begin_frame()
@@ -174,5 +214,6 @@ if __name__ == "__main__":
     test_near_but_distinct_brush_orders_exactly()
     test_coplanar_is_stable_and_deterministic()
     test_coplanar_bmodel_overlap_new_surface_wins()
+    test_inverted_span_does_not_stick()
     test_offscreen_clamped()
     print("OK")

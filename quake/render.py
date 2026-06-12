@@ -345,6 +345,10 @@ class Renderer:
         self.sbar_lines = 0   # framebuffer rows reserved below the 3D view
                               # for the status bar (screen.c sb_lines); the
                               # client composites the bar into them
+        self.pixel_aspect = 1.0   # vertical/horizontal pixel size ratio for
+                                  # the zbuf view (R_ViewChanged: yscale =
+                                  # xscale * pixelAspect; 5/6 is the "proper
+                                  # 320*200" VGA value). 1.0 = square pixels.
         self.fov = 90.0
         self.backface = True
         self.brushmodels = True     # draw doors/lifts/buttons (submodels 1..N)
@@ -1793,6 +1797,7 @@ class Renderer:
         from .r_edge import NORMAL, SKY, TURB
         iw, ih = self.zw, self.zh
         focal = self.focal * iw / self.width          # focal scaled to the small fb
+        yfocal = focal * self.pixel_aspect            # R_ViewChanged yscale
         hw = iw * 0.5
         hh = ih * 0.5
         fb = bytearray(self._bg_frame)                # fresh background to draw over
@@ -1854,7 +1859,7 @@ class Renderer:
             for vx, vy, vz in out:
                 iz = 1.0 / vz
                 sx.append(hw + vx * focal * iz)
-                sy.append(hh - vy * focal * iz)
+                sy.append(hh - vy * yfocal * iz)
                 siz.append(iz * zscale)
             grads = plane_gradients(sx, sy, (siz,))
             if grads is None:
@@ -1906,7 +1911,7 @@ class Renderer:
             for cx, cy, cz, u, v in out:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)    # project on the true 1/z
-                sy.append(hh - cy * focal * iz)
+                sy.append(hh - cy * yfocal * iz)
                 ziz = iz * zscale                  # depth biased; cancels in u,v
                 siz.append(ziz)
                 suz.append(u * ziz)            # u/z, linear in screen space
@@ -1991,7 +1996,7 @@ class Renderer:
             for cx, cy, cz, u, v in out:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)
-                sy.append(hh - cy * focal * iz)
+                sy.append(hh - cy * yfocal * iz)
                 siz.append(iz)
                 suz.append((u - csmin) * iz)   # cache-space u/z, v/z
                 svz.append((v - ctmin) * iz)
@@ -2047,7 +2052,7 @@ class Renderer:
             for cx, cy, cz, u, v in out:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)
-                sy.append(hh - cy * focal * iz)
+                sy.append(hh - cy * yfocal * iz)
                 siz.append(iz)
                 suz.append(u * iz)
                 svz.append(v * iz)
@@ -2134,7 +2139,7 @@ class Renderer:
             for cx, cy, cz, u, v in out:
                 iz = 1.0 / cz
                 sx.append(hw + cx * focal * iz)
-                sy.append(hh - cy * focal * iz)
+                sy.append(hh - cy * yfocal * iz)
                 siz.append(iz)
                 suz.append(u * iz)
                 svz.append(v * iz)
@@ -2179,7 +2184,7 @@ class Renderer:
             for vx, vy, vz in out:
                 iz = 1.0 / vz
                 sx.append(hw + vx * focal * iz)
-                sy.append(hh - vy * focal * iz)
+                sy.append(hh - vy * yfocal * iz)
                 siz.append(iz)
             grads = plane_gradients(sx, sy, (siz,))
             if grads is None:
@@ -2592,7 +2597,7 @@ class Renderer:
                     continue
                 iz = 1.0 / cz
                 scx = hw + (dx * rx + dy * ry + dz * rz) * focal * iz
-                scy = hh - (dx * ux + dy * uy + dz * uz) * focal * iz
+                scy = hh - (dx * ux + dy * uy + dz * uz) * yfocal * iz
                 scale = focal * iz
                 x0 = int(scx + sofx * scale)
                 y0 = int(scy - sofy * scale)
@@ -2627,7 +2632,7 @@ class Renderer:
                     continue
                 iz = 1.0 / cz
                 sx = int(hw + (dx * rx + dy * ry + dz * rz) * focal * iz)
-                sy = int(hh - (dx * ux + dy * uy + dz * uz) * focal * iz)
+                sy = int(hh - (dx * ux + dy * uy + dz * uz) * yfocal * iz)
                 half = int(pscale * iz)
                 if half > PARTICLE_ZBUF_MAX:
                     half = PARTICLE_ZBUF_MAX

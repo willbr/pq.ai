@@ -342,6 +342,9 @@ class Renderer:
         # overriding the zbuf_scale-derived size. None = derive from the window
         # (today's behaviour); the video-options menu sets a fixed mode.
         self.video_res = None
+        self.sbar_lines = 0   # framebuffer rows reserved below the 3D view
+                              # for the status bar (screen.c sb_lines); the
+                              # client composites the bar into them
         self.fov = 90.0
         self.backface = True
         self.brushmodels = True     # draw doors/lifts/buttons (submodels 1..N)
@@ -1048,6 +1051,10 @@ class Renderer:
         else:
             self.zw = max(1, self.width // self.zbuf_scale)
             self.zh = max(1, self.height // self.zbuf_scale)
+        if self.sbar_lines and self.zh > self.sbar_lines:
+            # R_SetVrect: the 3D view renders above the status bar rows; the
+            # buffers below are sized to the view, the client appends the bar
+            self.zh -= self.sbar_lines
         self._bg_frame = bytes((self._bg_idx,)) * (self.zw * self.zh)
         # a plain list, not array('f'): list reads hand back the stored float
         # object, while array('f') boxes a fresh float on every read -- one

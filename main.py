@@ -18,13 +18,21 @@ Controls:
 This is a THIN tkinter frontend: it owns the window, the Tk canvas item pools and
 the WARP-based mouselook; all game logic lives in client.Client, which returns a
 RenderFrame each tick that this draws. The Client is UI-agnostic (no tkinter).
+
+tkinter is the FALLBACK frontend (`--tk` anywhere, default on Linux): Windows
+defaults to the gdi32 frontend (win_gdi.py) and macOS to the Cocoa frontend
+(mac_cocoa.py); select_frontend at the bottom dispatches. The tkinter import is
+guarded so `python main.py` still dispatches on a Python without python-tk.
 """
 
 import ctypes
 import sys
 import time
-import tkinter as tk
-import tkinter.font as tkfont
+try:
+    import tkinter as tk
+    import tkinter.font as tkfont
+except ImportError:                  # Homebrew python without python-tk: the
+    tk = tkfont = None               # cocoa frontend runs without tkinter
 
 from quake.perf import PROFILER
 
@@ -190,6 +198,9 @@ _reassociate_cursor = _make_cursor_reassociator()
 
 class App:
     def __init__(self, mapname):
+        if tk is None:
+            sys.exit("tkinter is not available; install python-tk, or run "
+                     "the default Cocoa frontend (drop --tk)")
         # all game logic + the engine stack lives in the UI-agnostic Client
         self.client = Client(mapname)
 
@@ -733,12 +744,18 @@ class App:
 
 def select_frontend(argv, platform):
     """Pick the frontend and map from CLI args. Windows defaults to the gdi32
-    frontend (win_gdi) for its own message loop + raw mouselook; `--tk` forces the
-    tkinter frontend, which is also the default everywhere else."""
+    frontend (win_gdi), macOS to the Cocoa frontend (mac_cocoa) -- each owns
+    its message loop and grabs the mouse natively; `--tk` forces the tkinter
+    frontend, which is also the default everywhere else."""
     args = [a for a in argv if a != "--tk"]
     mapname = args[0] if args else "e1m1"
-    use_tk = "--tk" in argv or platform != "win32"
-    return ("tk" if use_tk else "gdi", mapname)
+    if "--tk" in argv:
+        return "tk", mapname
+    if platform == "win32":
+        return "gdi", mapname
+    if platform == "darwin":
+        return "cocoa", mapname
+    return "tk", mapname
 
 
 if __name__ == "__main__":
@@ -746,5 +763,13 @@ if __name__ == "__main__":
     if frontend == "gdi":
         import win_gdi
         win_gdi.run(mapname)
+    elif frontend == "cocoa":
+        try:
+            import mac_cocoa
+        except ImportError:
+            sys.exit("the macOS frontend needs PyObjC:\n"
+                     "    pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz\n"
+                     "(or run the tkinter fallback: python main.py --tk)")
+        mac_cocoa.run(mapname)
     else:
         App(mapname).run()

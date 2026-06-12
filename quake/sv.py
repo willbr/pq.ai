@@ -2259,8 +2259,11 @@ class Server:
 
     def hud_status(self):
         """Player status-bar values, or None if there's no player. Returns a dict
-        with health, armor, the current weapon + its ammo, and all four ammo
-        counts -- everything the QC keeps on the client edict."""
+        with health, armor, the current weapon + its ammo, all four ammo counts,
+        keys, powerups -- everything the QC keeps on the client edict -- plus the
+        raw ``items`` int (with episode sigils folded into bits 28-31 as
+        SV_WriteClientdataToMessage does) and ``weapon_bit`` (the raw IT_ flag for
+        the active weapon, as QC stores in .weapon)."""
         if not self.player:
             return None
         vm, f, e = self.vm, self.f, self.player
@@ -2284,6 +2287,9 @@ class Server:
             "cells": g("ammo_cells"),
             "keys": keys,
             "powerups": powerups,
+            # SV_WriteClientdataToMessage: bits |= (int)pr_global_struct->serverflags << 28
+            "items": items | ((int(self.gget_f("serverflags")) & 15) << 28),
+            "weapon_bit": g("weapon"),       # QC .weapon is the raw IT_ bit
         }
 
     def view_weapon(self):

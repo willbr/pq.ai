@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A working slice of Quake in **pure Python standard library** — `tkinter` is the only
-non-stdlib dependency. No numpy, pygame, OpenGL, or C extensions. It loads genuine Quake
+A working slice of Quake in **pure Python standard library** — the only non-stdlib
+dependencies are UI frontends: PyObjC (native macOS frontend) and `tkinter`
+(fallback/Linux frontend). No numpy, pygame, OpenGL, or C extensions. It loads genuine Quake
 shareware data, parses a real BSP, runs id's **actual compiled `progs.dat`** in a QuakeC
 VM, and renders three ways (wireframe / flat-shaded / textured software rasteriser).
 
@@ -19,8 +20,9 @@ thinks (monster AI, etc.) fire at their own ~10 Hz cadence.
 
 ```bash
 python setup.py                 # fetch shareware data + GPL reference source (one-shot, idempotent)
-python main.py e1m1             # run the game (gdi32 on Windows, tkinter elsewhere)
-python main.py --tk e1m1        # force tkinter on Windows  (e1m1..e1m8, or "start")
+python main.py e1m1             # run the game (gdi32 on Windows, Cocoa on macOS, tkinter elsewhere)
+python main.py --tk e1m1        # force the tkinter fallback on Windows/macOS  (e1m1..e1m8, or "start")
+# macOS frontend needs PyObjC: pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz
 python tests/test_pushmove.py   # run one test (prints "OK", or asserts)
 export PQ_AUDIO=0; for t in tests/test_*.py; do python "$t"; done   # run all tests
 # PQ_AUDIO=0 skips the OS audio backend: headless/sandboxed runs otherwise
@@ -68,9 +70,18 @@ quake/console.py    Quake-style console: command/cvar/alias registry, line edito
                       built-ins (render toggles, map, zbuf_scale cvar, god/give, set/echo/clear/
                       alias/exec/help/quit). gdi32 frontend (F1) routes keys + draws the panel.
 client.py           UI-agnostic Client: engine stack + camera/player/game state; frame(dt, input)→RenderFrame
-main.py             tkinter frontend (all platforms; default off-Windows, or --tk on Windows):
+main.py             tkinter frontend (the fallback: --tk anywhere, default on Linux):
                       after() loop, Canvas/PhotoImage drawing, warp-based mouselook;
-                      select_frontend(argv, platform) dispatches to gdi or tk at startup
+                      select_frontend(argv, platform) dispatches to gdi/cocoa/tk at startup
+                      (the tkinter import is guarded so dispatch works without python-tk)
+mac_cocoa.py        Cocoa macOS frontend (default on macOS; PyObjC): NSEvent pump loop with the
+                      same drain-then-step structure as win_gdi, relative-delta mouselook
+                      (CGAssociateMouseAndMouseCursorPosition -- no warp hack), CoreGraphics
+                      drawing in NSView.drawRect (fb CGImage blit, batched segs/paths, AppKit text)
+mac_ui.py           macOS UI helpers: pure half (KEYCODE_NAMES, expand_fb_rgba, letterbox_rect,
+                      fit_particles; unit-tested in tests/test_mac_ui.py) + CG drawing half
+                      (fb_cgimage/draw_fb, draw_segs/draw_polys/draw_wire_hidden, draw_texts,
+                      draw_console/draw_menu) used by mac_cocoa.py
 win_gdi.py          gdi32 Windows frontend (default on Windows): PeekMessage loop, Win32 raw-input
                       mouselook + cursor grab, GdiBlitter (StretchDIBits/Polyline/Polygon/TextOut)
 win_ui.py           Windows GDI helpers: GdiBlitter (fast blit + vector/text drawing) plus the

@@ -1,7 +1,9 @@
 # pq.ai — Quake in pure Python
 
-A working slice of Quake written in **pure Python standard library**, with
-**tkinter as the only UI dependency**. No numpy, no pygame, no OpenGL, no C extensions.
+A working slice of Quake written in **pure Python standard library** — the only
+non-stdlib dependencies are UI frontends: **PyObjC** for the native macOS frontend
+and **tkinter** for the fallback/Linux frontend. No numpy, no pygame, no OpenGL,
+no C extensions.
 
 It loads the genuine Quake shareware data, parses a real BSP level, runs id's
 **actual compiled game code** (`progs.dat`) in a QuakeC virtual machine, and renders
@@ -33,9 +35,12 @@ The shareware download defaults to a public archive.org mirror; override it with
 `--shareware-url URL` or `$QUAKE_SHAREWARE_URL` if the mirror moves. Then:
 
 ```bash
-python main.py e1m1           # gdi32 on Windows, tkinter elsewhere; also e1m2…e1m8, start
-python main.py --tk e1m1      # force tkinter on Windows
+python main.py e1m1           # gdi32 on Windows, Cocoa on macOS, tkinter elsewhere; also e1m2…e1m8, start
+python main.py --tk e1m1      # force the tkinter fallback (Windows and macOS)
 ```
+
+The macOS frontend needs PyObjC (`pip install pyobjc-framework-Cocoa
+pyobjc-framework-Quartz`); without it, `--tk` runs on any Python with tkinter.
 
 **Controls**
 
@@ -73,8 +78,10 @@ portable; only the output stream is platform code.
 | `quake/snd.py` | Platform-agnostic software sound mixer — a port of `S_PaintChannels` / `SND_Spatialize`. Decodes/resamples once at precache; `mix(nframes)` sums active voices to 16-bit stereo with distance attenuation + stereo pan re-panned every frame. Touches no OS — a backend pulls from it |
 | `quake/console.py` | Quake-style console: command/cvar/alias registry, line editor, history, tab-completion, scrollback; pure (no OS/UI). Both frontends open it with F1 / `` ` `` |
 | `client.py` | UI-agnostic game client: the `Client` core holds the engine stack + all camera/player/game state and exposes `frame(dt, input) -> RenderFrame`; the `InputState` / `RenderFrame` dataclasses are the only contracts shared by the two frontends |
-| `main.py` | tkinter frontend (all platforms; default off-Windows and via `--tk` on Windows): `after()` game loop, Canvas/`PhotoImage` drawing, warp-based mouselook. `select_frontend(argv, platform)` decides which frontend to launch |
+| `main.py` | tkinter frontend (the fallback: `--tk` anywhere, default on Linux): `after()` game loop, Canvas/`PhotoImage` drawing, warp-based mouselook. `select_frontend(argv, platform)` decides which frontend to launch |
 | `win_gdi.py` | gdi32 Windows frontend (the default on Windows): owns a `PeekMessage` game loop and Win32 raw-input mouselook + cursor grab, draws via `win_ui.GdiBlitter` (StretchDIBits / Polyline / Polygon / FillRect / TextOut). Exists because tkinter owns the message pump and the software render blocks it, so raw mouse input backlogs — a dedicated loop that drains all input each frame fixes that |
+| `mac_cocoa.py` | Cocoa macOS frontend (the default on macOS, via PyObjC): owns an `NSEvent` pump loop (the same drain-then-step structure as win_gdi), relative-delta mouselook (`CGAssociateMouseAndMouseCursorPosition` — no warp hack), and draws with CoreGraphics in an `NSView.drawRect:` (framebuffer `CGImage` blit, batched segments/paths, AppKit text) |
+| `mac_ui.py` | macOS UI helpers: pure half (keycode map, fb→RGBA expansion, letterbox/particle fit; unit-tested in `tests/test_mac_ui.py`) + CG drawing half (fb CGImage, vectors, text, console/menu panels) used by `mac_cocoa.py` |
 | `win_ui.py` | Windows GDI helpers: `GdiBlitter` (StretchDIBits / vector / text presenter) plus the raw-input ctypes structs and helpers (`RAWINPUT`, `RAWINPUTDEVICE`, `raw_mouse_delta`, etc.) that `win_gdi.py` uses for its own WndProc; pure helpers unit-tested in `tests/test_win_ui.py` |
 | `mac.py` | macOS audio backend (outside the package): one 16-bit stereo CoreAudio `AudioQueue` stream via ctypes, whose realtime callback pulls samples from the mixer |
 | `win.py` | Windows audio backend (outside the package): a pool of `winmm` `waveOut` buffers via ctypes; a feeder thread waits on the device's completion event and refills each finished buffer from the mixer |

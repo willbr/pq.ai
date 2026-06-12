@@ -1065,6 +1065,8 @@ class Client:
         # Sync the renderer's reserved rows here so every path that changes
         # mode/resolution/zbuf_scale self-heals on the next frame.
         st = self.sv.hud_status()
+        # mirrors _setup_zbuf's zw formula rather than reading rend.zw, which
+        # is stale until the resize this very block may trigger
         screen_w = (self.video_res[0] if self.video_res
                     else max(1, self._view_wh[0] // self.rend.zbuf_scale))
         sbar_lines = SBAR_LINES if (self.mode == "zbuf"

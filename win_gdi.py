@@ -129,6 +129,7 @@ class GameWindow:
             ("GetWindowRect", wintypes.BOOL, [wintypes.HWND,
                                               ctypes.POINTER(wintypes.RECT)]),
             ("ShowCursor", ctypes.c_int, [wintypes.BOOL]),
+            ("SetWindowTextW", wintypes.BOOL, [wintypes.HWND, wintypes.LPCWSTR]),
         ):
             fn = getattr(u, name)
             fn.restype = restype
@@ -426,6 +427,9 @@ def run(mapname):
             rf = client.frame(dt, inp)
             if client.quit_requested:
                 win.running = False
+            if client.mapname != mapname:        # changelevel / `map` cmd: retitle
+                mapname = client.mapname
+                win.user32.SetWindowTextW(win.hwnd, f"pq.ai gdi — {mapname}")
 
             cw, ch = win.client_size()
             if (cw, ch) != last_wh:

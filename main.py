@@ -195,6 +195,7 @@ class App:
 
         # window
         self.root = tk.Tk()
+        self._titled_map = mapname           # retitle when changelevel/map swaps it
         self.root.title(f"pq.ai — {mapname}")
         self.root.geometry("800x600")
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
@@ -463,6 +464,9 @@ class App:
         self.last_t = now
         self.client.resize(self.canvas.winfo_width(), self.canvas.winfo_height())
         rf = self.client.frame(dt, self._input())
+        if self.client.mapname != self._titled_map:   # changelevel / `map` cmd
+            self._titled_map = self.client.mapname
+            self.root.title(f"pq.ai — {self._titled_map}")
         if self.client.quit_requested:        # console `quit`/`exit` or menu Quit
             self.client.shutdown()            # stop+dispose audio while healthy
             self.root.destroy()

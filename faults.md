@@ -18,17 +18,14 @@
   pre-span renderer had the same bug, so this was never caught by the oracle.
   Fixed (raw-texel sky fill) — commit 4504f33, test_sky_brightness.py.
 
-## Not reproduced
-
-- **e1m1 400,2751,-56 — flicker from new renderer**: could not reproduce a
-  renderer-specific flicker headlessly. Probed at that spot across 8 yaws ×
-  3 pitches: fixed-camera time advance (only monster animation changes
-  pixels), sub-pixel translation, 0.25-degree rotation steps, the trap-floor
-  door (*8) filmed while moving, and a check for unfilled span gaps (zero
-  background pixels leak through). In every probe the span renderer's
-  frame-to-frame flip counts match the pre-span per-pixel oracle (440aa3b)
-  within noise. If the flicker involved a nearby coplanar bmodel overlap it
-  is fixed by d203bd9; otherwise it may be ordinary quarter-res point-sample
-  texture shimmer under motion (identical in the old renderer). Needs a
-  re-check in play — if it persists, note the view direction and what
-  flickers (which surface, moving or still).
+- **e1m1 400,2751,-56 — flicker from new renderer**: reproduced from the
+  user's screenshot (pos 472,2766,-56, yaw -274, pitch ~41, after pressing
+  the bridge button) as a dark band / black floor flooding scanlines. Root
+  cause: the extended bridge (*8) puts a face fragment near the view plane
+  that projects to a degenerate screen sliver; its leading/trailing edges
+  carry identical u, the sort's tie order can fire the trailing edge first,
+  and the port inserted/removed surfaces unconditionally — the surface stuck
+  on the stack and flooded the rest of the row. Fixed by porting id's
+  inverted-span spanstate guards (R_LeadingEdge/R_TrailingEdge) — commit
+  c718f38, regression test (the two offending surfaces replayed verbatim)
+  in test_r_edge.py.

@@ -255,8 +255,9 @@ class Client:
 
         self.quit_requested = False
         self._zbuf_scale = ZBUF_SCALE     # desired textured divisor, persists across maps
-        self._pixel_aspect = 1.0    # zbuf vertical pixel aspect, persists
-                                    # across maps like _zbuf_scale
+        self._pixel_aspect = dict(ASPECT_MODES)["CRT"]   # default to the VGA
+                                    # CRT 4:3 look; zbuf vertical pixel aspect,
+                                    # persists across maps like _zbuf_scale
         # fixed textured render resolution (video-options menu), persists across
         # maps like _zbuf_scale; applied to each freshly built Renderer.
         self.video_res = DEFAULT_VIDEO_RES

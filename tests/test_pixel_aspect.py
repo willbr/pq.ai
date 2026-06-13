@@ -44,6 +44,7 @@ def test_crt_aspect_widens_vertical_fov():
     c.mode = "zbuf"
     c.set_video_res((320, 200))
     a, kw = _capture_zbuf_args(c)
+    c.rend.pixel_aspect = 1.0           # explicit square baseline (default is CRT)
     rows_square = _gun_rows(c.rend, a, kw)
     c.rend.pixel_aspect = CRT
     rows_crt = _gun_rows(c.rend, a, kw)
@@ -74,14 +75,15 @@ def test_renderframe_reports_pixel_aspect():
     c.mode = "zbuf"
     c.set_video_res((320, 200))
     rf = c.frame(0.016, client.InputState())
-    assert rf.pixel_aspect == 1.0                  # default: square
-    c.con.execute("pixel_aspect 0.8333333")
+    assert abs(rf.pixel_aspect - CRT) < 1e-3       # default: CRT (4:3)
+    c.con.execute("pixel_aspect 1.0")              # switch to square
     rf = c.frame(0.016, client.InputState())
-    assert abs(rf.pixel_aspect - CRT) < 1e-3
-    assert abs(c.rend.pixel_aspect - CRT) < 1e-3   # live renderer updated
+    assert rf.pixel_aspect == 1.0
+    assert c.rend.pixel_aspect == 1.0              # live renderer updated
+    c.con.execute("pixel_aspect 0.8333333")        # back to CRT...
     c.mode = "wire"
     rf = c.frame(0.016, client.InputState())
-    assert rf.pixel_aspect == 1.0                  # wire never stretches
+    assert rf.pixel_aspect == 1.0                  # ...but wire never stretches
 
 
 def test_pixel_aspect_persists_across_map_change():
@@ -104,17 +106,18 @@ def test_pixel_aspect_clamped():
 
 def test_menu_aspect_item_drives_client():
     c = client.Client("e1m1")
-    # Aspect is the second menu item (index 1 in VIDEO OPTIONS).  Drive it with
-    # the real menu path the frontend uses: select the row, call key_right() to
-    # cycle from "Square" (index 0) to "CRT" (index 1).
+    # Drive the Aspect row with the real menu path the frontend uses: the row
+    # starts at the client default (now CRT); select it and key_right() to cycle
+    # CRT -> Square, confirming the menu drives the live renderer.
     aspect_row = next(i for i, it in enumerate(c.menu.items)
                       if getattr(it, "title", "") == "Aspect")
-    c.menu.selected = aspect_row
-    c.menu.key_right()                  # cycle: Square -> CRT
     item = c.menu.items[aspect_row]
-    assert abs(c.rend.pixel_aspect - CRT) < 1e-3
-    assert item.index == 1
-    assert item.value_label == "CRT"
+    assert item.value_label == "CRT"    # default
+    c.menu.selected = aspect_row
+    c.menu.key_right()                  # cycle: CRT -> Square
+    assert c.rend.pixel_aspect == 1.0
+    assert item.index == 0
+    assert item.value_label == "Square"
 
 
 def test_letterbox_stretched_height_fills_4_3():
@@ -143,11 +146,11 @@ def test_console_set_syncs_menu_aspect_row():
     # reopening the menu shows the live value (and tolerates 0.8333333 vs 5/6)
     c = client.Client("e1m1")
     item = next(i for i in c.menu.items if getattr(i, "title", "") == "Aspect")
+    assert item.value_label == "CRT"            # default
+    c.con.execute("pixel_aspect 1.0")
     assert item.value_label == "Square"
     c.con.execute("pixel_aspect 0.8333333")
     assert item.value_label == "CRT"
-    c.con.execute("pixel_aspect 1.0")
-    assert item.value_label == "Square"
 
 
 if __name__ == "__main__":

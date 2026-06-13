@@ -23,6 +23,7 @@ from quake.mdl import Mdl, EF_ROTATE
 from quake.spr import Spr
 from quake.wad import Wad
 from quake.sbar import Sbar, SBAR_LINES
+from quake.conchars import ConFont, load_qpic, blit_conback, fade_region
 from quake.perf import PROFILER
 from quake import snd
 
@@ -170,6 +171,11 @@ class Client:
         # framebuffer is >=320 wide; the per-item/face timers are initialised
         # by _load_map (CL_ClearState) so they reset correctly on every level.
         self.sbar = Sbar(Wad(self.pak.read("gfx.wad")))
+        # conchars UI text composited into the zbuf framebuffer (centerprint,
+        # console, menu) -- the real Quake bitmap font, like the sbar. Reuses
+        # the lump the Sbar already loaded; conback is the console backdrop.
+        self.confont = ConFont(self.sbar.conchars)
+        self.conback = load_qpic(self.pak.read("gfx/conback.lmp"))
         # screen colour shifts (view.c): contents/damage/bonus/powerup blend
         # the base palette into view_palette each frame (V_UpdatePalette)
         self.view_palette = self.palette

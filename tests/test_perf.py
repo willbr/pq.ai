@@ -203,6 +203,25 @@ def test_bars_sorts_hottest_first_within_level():
     assert idx("hot") < idx("cool"), lines        # 5ms child before 1ms child
 
 
+def test_history_records_raw_total_and_bounds():
+    """frame_end() appends each frame's raw total-ms to history, bounded at
+    HISTORY_LEN; the raw value is the latest frame (not the EMA)."""
+    from quake.perf import HISTORY_LEN
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=0.1)   # heavy smoothing: EMA != raw
+    with p.section("a"):
+        clk.advance(10.0)
+    p.frame_end()
+    assert abs(p.history[-1] - 10.0) < 1e-6, p.history   # raw, not EMA
+    assert p._last_raw["total"] == p.history[-1]
+    assert abs(p._last_raw["a"] - 10.0) < 1e-6, p._last_raw
+    for _ in range(HISTORY_LEN + 50):    # overfill
+        with p.section("a"):
+            clk.advance(1.0)
+        p.frame_end()
+    assert len(p.history) == HISTORY_LEN, len(p.history)
+
+
 if __name__ == "__main__":
     test_section_accumulates_elapsed()
     test_same_name_sums_within_frame()
@@ -216,4 +235,5 @@ if __name__ == "__main__":
     test_bars_nests_child_under_parent_in_order()
     test_bars_sorts_hottest_first_within_level()
     test_prof_total_color_buckets()
+    test_history_records_raw_total_and_bounds()
     print("OK")

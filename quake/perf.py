@@ -19,12 +19,16 @@ never does), so no locking. Sections nest; `total_ms` sums only the outermost
 sections, so nested time is never double-counted. A section absent for a frame
 decays toward 0."""
 
+import collections
 import time
 from contextlib import contextmanager
 
 # Unicode block fractions for 1/8..7/8 of a cell; "█" is a full cell. Lets a bar
 # end on an eighth-of-a-character boundary so short times still read smoothly.
 _EIGHTHS = "▏▎▍▌▋▊▉"
+
+HISTORY_LEN = 120                  # frames of total-ms kept for the sparkline
+_SPARK = " ▁▂▃▄▅▆▇█"              # index 0 = blank (~0ms); 8 = full / over-budget
 
 
 def _bar(frac, width):
@@ -53,6 +57,12 @@ class Profiler:
         self._frame_total = 0.0     # wall time under top-level sections this frame
         self.ms = {}                # name -> EMA-smoothed milliseconds
         self.total_ms = 0.0         # EMA-smoothed top-level total, milliseconds
+        self.history = collections.deque(maxlen=HISTORY_LEN)  # raw total-ms per frame
+        self._last_raw = {}         # this frame's raw section ms + "total"
+        self._log = None            # csv.writer while logging, else None
+        self._log_file = None       # open file handle while logging
+        self._log_cols = []         # CSV column order (excludes the frame index)
+        self._log_frame = 0         # rows written so far
 
     def begin(self, name):
         """Open a section; pair with end(name). Use this to bracket an inline
@@ -90,6 +100,12 @@ class Profiler:
             cur_ms = self._accum.get(name, 0.0) * 1000.0
             self.ms[name] = (1.0 - a) * self.ms[name] + a * cur_ms
         self.total_ms = (1.0 - a) * self.total_ms + a * (self._frame_total * 1000.0)
+        raw = {n: self._accum.get(n, 0.0) * 1000.0 for n in self.ms}
+        raw["total"] = self._frame_total * 1000.0
+        self._last_raw = raw
+        self.history.append(raw["total"])
+        if self._log is not None:
+            self._write_log_row(raw)
         self._accum.clear()
         self._frame_total = 0.0
 

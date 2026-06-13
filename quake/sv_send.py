@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 
 from . import protocol as P
+from .msg import MsgWriter
 
 
 @dataclass
@@ -217,36 +218,84 @@ def write_clientdata_to_message(sv, w):
     w.byte(weapon)                            # STAT_ACTIVEWEAPON (IT_ bit)
 
 
-def write_serverinfo(sv, w):
-    """The signon (SV_SendClientMessages signon phase): svc_serverinfo with the
-    precache lists, then a svc_spawnbaseline per entity, then svc_signonnum.
-    Sent once at connect / after a changelevel so the client builds its model
-    and sound indices before any entity update arrives."""
-    w.byte(P.svc_serverinfo)
-    w.long(P.PROTOCOL_VERSION)
-    w.byte(1)                                  # maxclients (single-player)
-    w.byte(0)                                  # gametype: GAME_COOP/standard
-    w.string(sv.level_name())                  # printable level title
-    for name in sv.model_precache[1:]:         # index 0 is "" (skip)
-        w.string(name)
-    w.string("")                               # precache list terminator
+def build_signon(sv):
+    """The three connect-handshake message blocks a real Quake server sends,
+    mirroring SV_SendServerinfo / the prespawn sv.signon flush / Host_Spawn_f
+    (sv_main.c:189, host_cmd.c:1254, host_cmd.c:1279). Returned as three byte
+    blocks; the recorder writes them as the demo's first three frames and the
+    live loopback concatenates+parses them. Ends each phase with svc_signonnum
+    1/2/3 -- the sequence a WinQuake client needs to reach SIGNONS and render."""
+    # --- phase 0: serverinfo ---
+    w0 = MsgWriter()
+    w0.byte(P.svc_print)
+    w0.string(f"\x02\nPQ.AI demo, protocol {P.PROTOCOL_VERSION}\n")
+    w0.byte(P.svc_serverinfo)
+    w0.long(P.PROTOCOL_VERSION)
+    w0.byte(1)                                   # maxclients
+    w0.byte(0)                                   # gametype: GAME_COOP
+    w0.string(sv.level_name())
+    for name in sv.model_precache[1:]:
+        w0.string(name)
+    w0.string("")
     for name in sv.sound_precache[1:]:
-        w.string(name)
-    w.string("")
+        w0.string(name)
+    w0.string("")
+    w0.byte(P.svc_cdtrack)
+    cd = sv.cdtrack()                            # worldspawn .sounds (Task 3 adds it; 0 ok)
+    w0.byte(cd); w0.byte(cd)
+    w0.byte(P.svc_setview)
+    w0.short(sv.player)
+    w0.byte(P.svc_signonnum); w0.byte(1)
+
+    # --- phase 1: prespawn buffer (statics, baselines, static sounds) ---
+    w1 = MsgWriter()
+    write_static_entities(sv, w1)                # Task 4 (no-op until then)
     for e, base in sv.baselines.items():
-        w.byte(P.svc_spawnbaseline)
-        w.short(e)
-        w.byte(base.modelindex)
-        w.byte(base.frame)
-        w.byte(base.colormap)
-        w.byte(base.skin)
+        w1.byte(P.svc_spawnbaseline)
+        w1.short(e)
+        w1.byte(base.modelindex); w1.byte(base.frame)
+        w1.byte(base.colormap); w1.byte(base.skin)
         for i in range(3):
-            w.coord(base.origin[i])
-            w.angle(base.angles[i])
-    w.byte(P.svc_setview)
-    w.short(sv.player)                          # the view entity = player edict
-    w.byte(P.svc_signonnum)
-    w.byte(1)
+            w1.coord(base.origin[i]); w1.angle(base.angles[i])
+    write_static_sounds(sv, w1)                  # Task 3 (no-op until then)
+    w1.byte(P.svc_signonnum); w1.byte(2)
+
+    # --- phase 2: spawn block ---
+    w2 = MsgWriter()
+    w2.byte(P.svc_time); w2.float(sv.time)
+    write_all_lightstyles(sv, w2)                # Task 2 (minimal until then)
+    write_total_stats(sv, w2)                    # Task 2 (no-op until then)
+    ang = sv.player_angles() or (0.0, 0.0, 0.0)
+    w2.byte(P.svc_setangle)
+    w2.angle(ang[0]); w2.angle(ang[1]); w2.angle(0.0)
+    write_clientdata_to_message(sv, w2)
+    w2.byte(P.svc_signonnum); w2.byte(3)
+    return [bytes(w0.data), bytes(w1.data), bytes(w2.data)]
+
+
+def write_static_entities(sv, w):    # Task 4
+    return
+
+
+def write_static_sounds(sv, w):      # Task 3
+    return
+
+
+def write_all_lightstyles(sv, w):    # Task 2 -- minimal stub: emit changed styles
+    for idx, patt in sv.lightstyles.items():
+        w.byte(P.svc_lightstyle); w.byte(idx); w.string(patt)
+
+
+def write_total_stats(sv, w):        # Task 2
+    return
+
+
+def write_serverinfo(sv, w):
+    """Thin back-compat wrapper: concatenate the three build_signon phases into
+    one buffer (the old single-block signon behaviour). The live loopback and
+    existing tests parse this all at once."""
+    for block in build_signon(sv):
+        w.data += block
 
 
 def write_reliable(sv, w):

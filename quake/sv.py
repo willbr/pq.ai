@@ -2163,6 +2163,11 @@ class Server:
         from .sv_send import create_baseline
         create_baseline(self)
 
+    def cdtrack(self):
+        """CD music track for svc_cdtrack: the worldspawn "sounds" field, or 0.
+        Task 3 wires the real value; 0 is valid (no music)."""
+        return int(getattr(self, "_cdtrack", 0))
+
     def model_index(self, name):
         """modelindex for a precached model name, or 0 (SV_ModelIndex,
         sv_main.c). The client resolves it back via cl.model_precache."""

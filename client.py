@@ -28,7 +28,7 @@ from quake.conchars import ConFont, load_qpic, blit_conback, fade_region
 from quake.perf import PROFILER
 from quake import snd
 from quake.cl_parse import ClientState, SceneFromClient
-from quake.sv_send import write_serverinfo, build_datagram
+from quake.sv_send import build_signon, build_datagram
 from quake.msg import MsgWriter, MsgReader
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
@@ -427,7 +427,8 @@ class Client:
         self.cl = ClientState()
         self.sv.create_baseline()
         sw = MsgWriter()
-        write_serverinfo(self.sv, sw)
+        for block in build_signon(self.sv):
+            sw.data += block
         self.cl.parse_message(MsgReader(sw.data))
         self.scene = SceneFromClient(self.cl)
         return True
@@ -477,13 +478,25 @@ class Client:
         from quake.demo import DemoReader
         reader = DemoReader(blob)
         self.cl = ClientState()
-        # the first frame is the signon; parse it so cl.model_precache is filled
-        first = reader.next_frame()
-        if first is None:
-            self.con.print("demo: empty file")
-            return False
-        self.cl.viewangles = list(first[0])
-        self.cl.parse_message(MsgReader(first[1]))
+        # the signon now spans multiple demo frames (the WinQuake 3-phase
+        # handshake; the genuine shareware demos also use 3). Parse frames until
+        # the signon is complete: serverinfo (model_precache filled) AND the
+        # spawn-block svc_time seen (cl.mtime[0] set).
+        first_angles = None
+        while True:
+            fr = reader.next_frame()
+            if fr is None:
+                self.con.print("demo: no playable frames")
+                return False
+            if first_angles is None:
+                first_angles = fr[0]
+            self.cl.parse_message(MsgReader(fr[1]))
+            if (self.cl.model_precache and len(self.cl.model_precache) > 1
+                    and self.cl.mtime[0] > 0.0):
+                break        # serverinfo (precache) + spawn svc_time seen -> ready
+        self.cl.viewangles = list(first_angles)
+        self.cl.mviewangles[0] = list(first_angles)
+        self.cl.mviewangles[1] = list(first_angles)
         mappath = self.cl.model_precache[1]            # "maps/xxx.bsp"
         self.mapname = mappath[len("maps/"):-len(".bsp")]
         self.bsp = Bsp(self.pak.read(mappath))
@@ -1199,11 +1212,11 @@ class Client:
             return
         from quake.demo import DemoWriter
         self.recording = DemoWriter(fp, cdtrack="0")
-        # write the signon as the demo's first frame -- rebuild the bytes
-        # _load_map already parsed into cl (create_baseline ran in _load_map).
-        sw = MsgWriter()
-        write_serverinfo(self.sv, sw)
-        self.recording.write_frame((self.pitch, self.yaw, 0.0), bytes(sw.data))
+        # write the signon as the demo's first three frames -- the 3-phase
+        # WinQuake handshake (svc_signonnum 1/2/3). create_baseline ran in
+        # _load_map.
+        for block in build_signon(self.sv):
+            self.recording.write_frame((self.pitch, self.yaw, 0.0), block)
         self.con.print(f"recording to {path}")
 
     def _cmd_playdemo(self, args):

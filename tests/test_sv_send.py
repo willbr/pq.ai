@@ -68,7 +68,9 @@ def test_serverinfo_writes_svc_id():
     w = MsgWriter()
     write_serverinfo(sv, w)
     assert w.data, "no serverinfo bytes written"
-    assert w.data[0] == P.svc_serverinfo, "serverinfo must start with svc_serverinfo (11)"
+    # write_serverinfo now concatenates the 3-phase signon (it opens with an
+    # svc_print version banner); the serverinfo svc_id must still be present.
+    assert P.svc_serverinfo in w.data, "serverinfo must contain svc_serverinfo (11)"
 
 
 def test_build_datagram_writes_svc_time():

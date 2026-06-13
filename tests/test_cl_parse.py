@@ -181,6 +181,35 @@ def test_temp_entity_explosion_pushes_dlight():
     assert radius == 350.0 and abs(die - 5.5) < 1e-6
 
 
+def test_svc_particle_dir_scaled_by_16():
+    """R_ParseParticleEffect reads the wire direction as char*(1/16); then
+    R_RunParticleEffect sets velocity = dir*15. A wire char of 16 means dir 1.0
+    -> velocity 15, NOT 16*15=240 (the missing /16 made demo bursts fly off)."""
+    cl = ClientState()
+    w = MsgWriter()
+    w.byte(P.svc_particle)
+    w.coord(0.0); w.coord(0.0); w.coord(0.0)   # origin
+    w.char(16); w.char(0); w.char(0)           # dir char 16 -> dir 1.0
+    w.byte(1)                                   # count
+    w.byte(0)                                   # color
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert len(cl.particles) == 1
+    vx = cl.particles[0][3]                     # velocity x (deterministic)
+    assert abs(vx - 15.0) < 1e-6, vx           # 1.0*15, not 16*15
+
+
+def test_tarexplosion_has_no_dlight():
+    """CL_ParseTEnt: TE_EXPLOSION flashes a dlight, TE_TAREXPLOSION (tarbaby)
+    does not -- it is a pure particle blast."""
+    cl = ClientState(); cl.mtime[0] = 2.0
+    w = MsgWriter()
+    w.byte(P.svc_temp_entity); w.byte(P.TE_TAREXPLOSION)
+    w.coord(0.0); w.coord(0.0); w.coord(0.0)
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert len(cl.dlight_events) == 0          # no flash for the tar blast
+    assert len(cl.particles) > 0               # but it does spawn the blob burst
+
+
 def test_svc_sound_records_event_for_mixer():
     """In demo playback there is no server to call the mixer, so svc_sound must
     be recorded as a client sound event (ent, chan, name, vol, atten, origin)
@@ -283,6 +312,8 @@ def test_demo_explosion_spawns_moving_burst():
 if __name__ == "__main__":
     test_demo_particles_move()
     test_demo_explosion_spawns_moving_burst()
+    test_svc_particle_dir_scaled_by_16()
+    test_tarexplosion_has_no_dlight()
     test_svc_sound_records_event_for_mixer()
     test_demo_view_angles_interpolate()
     test_parse_time_and_lightstyle()

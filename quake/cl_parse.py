@@ -308,7 +308,9 @@ class ClientState:
 
     def parse_particle(self, r):                   # cl_parse.c (svc_particle)
         org = (r.coord(), r.coord(), r.coord())
-        dirv = (r.char(), r.char(), r.char())
+        # R_ParseParticleEffect: the wire direction is char * (1/16); without
+        # the /16 the burst velocity is 16x too high and particles fly off
+        dirv = (r.char() / 16.0, r.char() / 16.0, r.char() / 16.0)
         count = r.byte()
         color = r.byte()
         particles.run_particle_effect(self.particles, org, dirv, color, count,
@@ -345,8 +347,8 @@ class ClientState:
                 particles.particle_explosion(self.particles, org, self.time)
                 self.dlight_events.append((org, 350.0, self.mtime[0] + 0.5, 300.0))
             elif kind == P.TE_TAREXPLOSION:
+                # tarbaby blast is a pure particle effect -- no dlight flash
                 particles.blob_explosion(self.particles, org, self.time)
-                self.dlight_events.append((org, 350.0, self.mtime[0] + 0.5, 300.0))
             elif kind == P.TE_LAVASPLASH:
                 particles.lava_splash(self.particles, org, self.time)
             elif kind == P.TE_TELEPORT:

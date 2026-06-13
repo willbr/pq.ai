@@ -43,6 +43,11 @@ PARTICLE_RADIUS = 2.0      # world half-extent of a particle puff
 PARTICLE_MIN_HALF = 2.0    # never smaller than a 4px square
 PARTICLE_MAX_HALF = 14.0   # cap so a point-blank puff doesn't fill the screen
 CENTER_MSG_TIME = 4.0      # seconds a centerprint message stays on screen
+# V_AddIdle: the gentle view sway Quake forces on during intermission
+# (v_idlescale=1). (cycle, level) per axis -- view.c defaults, degrees.
+V_IYAW_CYCLE, V_IYAW_LEVEL = 2.0, 0.3
+V_IPITCH_CYCLE, V_IPITCH_LEVEL = 1.0, 0.3
+V_IROLL_CYCLE, V_IROLL_LEVEL = 0.5, 0.1
 # weapon view-model bob (Quake's V_CalcBob: cl_bob / cl_bobcycle / cl_bobup)
 CL_BOB = 0.02
 CL_BOBCYCLE = 0.6
@@ -528,7 +533,15 @@ class Client:
         sv, f, vm = self.sv, self.sv.f, self.sv.vm
         pitch, yaw = self.pitch, self.yaw
         if self.intermission:
-            self.view_angles = (pitch, yaw, 0.0)
+            # V_CalcIntermissionRefdef forces v_idlescale=1, so V_AddIdle drifts
+            # the view angles gently while the camera origin stays put -- the one
+            # place Quake's idle sway is always on. Off the wall clock so it
+            # animates even though the game is frozen at the spot.
+            t = self._uptime
+            self.view_angles = (
+                pitch + math.sin(t * V_IPITCH_CYCLE) * V_IPITCH_LEVEL,
+                yaw + math.sin(t * V_IYAW_CYCLE) * V_IYAW_LEVEL,
+                math.sin(t * V_IROLL_CYCLE) * V_IROLL_LEVEL)
             return
         _fwd, right, _up = angle_vectors(yaw, pitch)
         side = (self.vel[0] * right[0] + self.vel[1] * right[1]

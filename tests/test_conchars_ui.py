@@ -9,7 +9,7 @@ element was composited -- while the RenderFrame carries no OS overlay for it."""
 
 import _bootstrap  # noqa: F401  (repo-root sys.path + cwd)
 
-from client import Client, InputState
+from client import Client, InputState, V_IROLL_LEVEL
 from quake.sbar import SBAR_LINES
 
 
@@ -155,6 +155,27 @@ def test_menu_cursor_flashes_while_paused():
     blank = fb_at(0.0)      # int(0.0*4)&1 = 0 -> blank cursor glyph 12
     shown = fb_at(0.30)     # int(1.2)  &1 = 1 -> cursor glyph 13
     assert blank != shown, "menu cursor does not animate while paused"
+
+
+def test_intermission_view_idle_sway():
+    # V_AddIdle: intermission forces v_idlescale=1, swaying the view angles
+    # gently off the wall clock while the camera origin stays put. sin(0)=0, so
+    # at uptime 0 there's no offset; later the angles drift, roll stays within
+    # its small idle level.
+    c = _client()
+    c.sv.gset_f("intermission_running", 1.0)
+    c.intermission = True
+
+    def angles_at(up):
+        c._uptime = up
+        c.frame(0.0, InputState())
+        return c.view_angles
+
+    a = angles_at(0.0)
+    b = angles_at(0.5)
+    assert a != b, "intermission view does not sway over time"
+    assert abs(a[2]) < 1e-9, "roll should be zero at uptime 0 (sin(0))"
+    assert 0.0 < abs(b[2]) <= V_IROLL_LEVEL + 1e-6, "roll sway out of idle range"
 
 
 if __name__ == "__main__":

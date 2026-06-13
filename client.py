@@ -1207,8 +1207,12 @@ class Client:
         # is stale until the resize this very block may trigger
         screen_w = (self.video_res[0] if self.video_res
                     else max(1, self._view_wh[0] // self.rend.zbuf_scale))
+        # the intermission overlay covers the screen and hides the status bar
+        # (id draws one or the other), so render the 3D view full-height then --
+        # no shrunk band -- like Quake zeroes sb_lines at intermission
         sbar_lines = SBAR_LINES if (self.mode == "zbuf"
-                                    and screen_w >= 320) else 0
+                                    and screen_w >= 320
+                                    and not self.intermission) else 0
         if self.rend.sbar_lines != sbar_lines:
             self.rend.sbar_lines = sbar_lines
             self.rend.resize(self.rend.width, self.rend.height)
@@ -1318,8 +1322,10 @@ class Client:
         overlays.append((8, 8, hud_str, hud_rgb, "nw"))
 
         # bottom status bar: health / armor / current-weapon ammo, plus the four
-        # ammo pools. Health reddens when low so it reads at a glance.
-        if st and not self.rend.sbar_lines:
+        # ammo pools. Health reddens when low so it reads at a glance. Hidden at
+        # intermission (sbar_lines is 0 there, but the screen belongs to the
+        # level-complete overlay, not the HUD).
+        if st and not self.rend.sbar_lines and not self.intermission:
             status_rgb = (255, 64, 64) if st["health"] <= 25 else (255, 204, 0)
             carried = "  ".join(s for s in (st["keys"], st["powerups"]) if s)
             status_str = (f"HEALTH {st['health']:3d}    ARMOR {st['armor']:3d}    "

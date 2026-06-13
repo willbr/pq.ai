@@ -10,6 +10,7 @@ element was composited -- while the RenderFrame carries no OS overlay for it."""
 import _bootstrap  # noqa: F401  (repo-root sys.path + cwd)
 
 from client import Client, InputState
+from quake.sbar import SBAR_LINES
 
 
 def _client():
@@ -110,6 +111,22 @@ def test_intermission_pics_in_zbuf():
                 if fb[(24 + r) * fw + sx + 64 + cc] == s:
                     hits += 1
     assert total and hits > total * 0.5, f"complete title pic not drawn ({hits}/{total})"
+
+
+def test_intermission_hides_status_bar_and_fills_3d():
+    # the level-complete overlay owns the whole screen: the sprite status bar is
+    # hidden (sbar_lines 0, so the 3D view renders full height with no shrunk
+    # band) and the text status string isn't emitted either.
+    c = _client()
+    assert c.rend.sbar_lines == SBAR_LINES      # normal play: bar shrinks the view
+    c.sv.gset_f("intermission_running", 1.0)
+    c.sv.intermission_time = 83.0
+    c.sv.gset_f("found_secrets", 2.0); c.sv.gset_f("total_secrets", 4.0)
+    c.sv.gset_f("killed_monsters", 15.0); c.sv.gset_f("total_monsters", 30.0)
+    c.intermission = True
+    rf = c.frame(0.0, InputState())
+    assert c.rend.sbar_lines == 0               # bar hidden -> full-height 3D
+    assert all(o[4] != "sw" for o in rf.overlays)   # no bottom status string
 
 
 if __name__ == "__main__":

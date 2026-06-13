@@ -33,7 +33,7 @@ def test_baselines_snapshot_spawned_entities():
     sv = _boot()
     sv.create_baseline()
     assert sv.baselines, "no baselines created"
-    # world is edict 0; the first real entity has a modelindex baseline
+    # the first baseline is the world (edict 0, modelindex 1 = the .bsp)
     some = next(b for b in sv.baselines.values())
     assert hasattr(some, "modelindex") and hasattr(some, "origin")
 

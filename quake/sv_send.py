@@ -62,6 +62,7 @@ def write_entities_to_client(sv, w, view_origin):
     carries U_SIGNAL) then only the changed fields. Phase 1 sends every entity
     (no PVS cull -- # TODO(perf): cull like sv_main.c:451)."""
     vm, f = sv.vm, sv.f
+    player = sv.player
     for e in range(1, vm.num_edicts):
         if vm.free[e]:
             continue
@@ -69,7 +70,14 @@ def write_entities_to_client(sv, w, view_origin):
         if base is None:                     # spawned after baseline: full send
             base = Baseline()
         mi = int(vm.fget_i(e, f["modelindex"]))   # modelindex is an int field
-        if mi == 0 or vm.fget_i(e, f["model"]) == 0:   # no model index, or
+        if e == player:
+            # WinQuake always sends the client its own entity (the viewentity)
+            # so the client can position the view -- even though this port's
+            # hand-built player edict has an empty model string. Its baseline
+            # forces progs/player.mdl (SV_CreateBaseline), so delta against that.
+            # SceneFromClient skips the viewentity, so the own body is not drawn.
+            mi = base.modelindex
+        elif mi == 0 or vm.fget_i(e, f["model"]) == 0:  # no model index, or
             continue                                    # model string cleared
             # (item picked up) -- mirror sv_main.c:451 !modelindex || !model
         frame = int(vm.fget_f(e, f["frame"]))

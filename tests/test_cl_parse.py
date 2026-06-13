@@ -181,6 +181,28 @@ def test_temp_entity_explosion_pushes_dlight():
     assert radius == 350.0 and abs(die - 5.5) < 1e-6
 
 
+def test_svc_sound_records_event_for_mixer():
+    """In demo playback there is no server to call the mixer, so svc_sound must
+    be recorded as a client sound event (ent, chan, name, vol, atten, origin)
+    that the demo frame loop drains to the mixer -- otherwise demos are silent."""
+    cl = ClientState()
+    cl.sound_precache = ["", "a.wav", "b.wav", "c.wav"]
+    w = MsgWriter()
+    w.byte(P.svc_sound)
+    w.byte(P.SND_VOLUME)                       # field mask: explicit volume
+    w.byte(128)                                # volume byte (128/255)
+    chan = (5 << 3) | 2                        # ent 5, channel 2
+    w.short(chan)
+    w.byte(3)                                  # sound_num -> "c.wav"
+    w.coord(10.0); w.coord(20.0); w.coord(30.0)
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert len(cl.sound_events) == 1
+    ent, ch, name, vol, atten, org = cl.sound_events[0]
+    assert ent == 5 and ch == 2 and name == "c.wav"
+    assert abs(vol - 128 / 255) < 1e-3 and abs(atten - 1.0) < 1e-6
+    assert abs(org[0] - 10.0) < 1e-6 and abs(org[2] - 30.0) < 1e-6
+
+
 def test_demo_view_angles_interpolate():
     """Demo playback must lerp the view angles between the last two demo-frame
     headers (cl.mviewangles), not snap to the latest -- otherwise the camera
@@ -201,6 +223,7 @@ def test_demo_view_angles_interpolate():
 
 
 if __name__ == "__main__":
+    test_svc_sound_records_event_for_mixer()
     test_demo_view_angles_interpolate()
     test_parse_time_and_lightstyle()
     test_baseline_then_update_delta()

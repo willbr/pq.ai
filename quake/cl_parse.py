@@ -72,6 +72,10 @@ class ClientState:
         self.last_stuff = None       # svc_stufftext text (demos; engine Cbuf)
         self.particles = []          # client-side particle system (relink)
         self.dlight_events = []      # (origin, radius, die_time, decay) -- demo dlights
+        self.sound_events = []       # (ent, chan, name, vol, atten, origin) for the
+                                     # mixer -- drained each demo frame (no server)
+        self.static_sounds = []      # (name, vol, atten, origin) looping ambients
+                                     # from svc_spawnstaticsound -- started once
         self.completed_time = 0.0    # level time frozen at intermission (cl.completed_time)
         self.maxclients = 0
         self.gametype = 0
@@ -153,12 +157,15 @@ class ClientState:
             self.stats[P.STAT_SECRETS] += 1
         elif cmd in (P.svc_sellscreen, P.svc_disconnect):
             return
-        elif cmd == P.svc_spawnstaticsound:
-            for _ in range(3):
-                r.coord()                          # origin
-            r.byte()                               # sound number
-            r.byte()                               # volume
-            r.byte()                               # attenuation
+        elif cmd == P.svc_spawnstaticsound:        # CL_ParseStaticSound
+            org = (r.coord(), r.coord(), r.coord())
+            sound_num = r.byte()
+            vol = r.byte() / 255.0
+            atten = r.byte() / 64.0
+            name = (self.sound_precache[sound_num]
+                    if 0 < sound_num < len(self.sound_precache) else "")
+            if name:                               # looping ambient (fans, water)
+                self.static_sounds.append((name, vol, atten, org))
         # --- svc types the live loopback never sends but real demos do
         # (cl_parse.c). Parse their payload so the stream stays in sync; the
         # render surface doesn't consume them in Phase 2, so they drop.
@@ -301,18 +308,21 @@ class ClientState:
         color = r.byte()
         self.particles.append((org, dirv, count, color))
 
-    def parse_sound(self, r):                      # cl_parse.c:101 (minimal)
+    def parse_sound(self, r):                      # CL_ParseStartSoundPacket
         field_mask = r.byte()
-        if field_mask & P.SND_VOLUME:
-            r.byte()
-        if field_mask & P.SND_ATTENUATION:
-            r.byte()
+        vol = (r.byte() / 255.0) if (field_mask & P.SND_VOLUME) else 1.0
+        atten = (r.byte() / 64.0) if (field_mask & P.SND_ATTENUATION) else 1.0
         channel = r.short()
         sound_num = r.byte()
         org = (r.coord(), r.coord(), r.coord())
-        # Phase 1: parsed and dropped (audio still driven server-side); recorded
-        # for the renderer in a later phase. Touch vars so the bytes are consumed.
-        _ = (channel, sound_num, org)
+        ent = channel >> 3                         # cl_parse.c: ent/chan packed
+        chan = channel & 7
+        name = (self.sound_precache[sound_num]
+                if 0 < sound_num < len(self.sound_precache) else "")
+        if name:
+            # record for the demo frame loop to play (no server to call the
+            # mixer); live play still drives sound server-side and ignores this
+            self.sound_events.append((ent, chan, name, vol, atten, org))
 
     def parse_temp_entity(self, r):                # cl_parse.c (svc_temp_entity)
         kind = r.byte()

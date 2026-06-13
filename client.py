@@ -500,6 +500,16 @@ class Client:
             snd_path = "sound/" + name
             if name and snd_path in self.pak.files:
                 self.mixer.precache(name, self.pak.read(snd_path))
+        # the engine's own ambient loops (water/sky), keyed off the listener leaf
+        # each frame by update_ambients -- same as _load_map
+        for name in snd.AMBIENT_SOUNDS:
+            snd_path = "sound/" + name
+            if snd_path in self.pak.files:
+                self.mixer.precache(name, self.pak.read(snd_path))
+        # start the looping static ambients the signon spawned (fans, drips):
+        # svc_spawnstaticsound was parsed into cl.static_sounds above
+        for sname, svol, satten, sorg in self.cl.static_sounds:
+            self.mixer.start_sound(0, 0, sname, svol, satten, sorg, loop=True)
         self.scene = SceneFromClient(self.cl)
         self.sv = None                                  # no server in demo mode
         # CL_ClearState cosmetic HUD timers (mirror _load_map)
@@ -1490,6 +1500,14 @@ class Client:
             bob = self._calc_bob()
             fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
             eye, gun_org = view_origins(self.pos, self.cl.view_height, fwd, bob)
+        # 3D sound: ear at the eye (right vector for the stereo pan), then play
+        # the demo's queued svc_sound events -- there is no server to call the
+        # mixer in demo mode, so we drain cl.sound_events here.
+        _f, right, _u = angle_vectors(self.yaw, self.pitch)
+        self.mixer.set_listener((eye[0], eye[1], eye[2]), right)
+        for ent, chan, sname, svol, satten, sorg in self.cl.sound_events:
+            self.mixer.start_sound(ent, chan, sname, svol, satten, sorg)
+        self.cl.sound_events.clear()
         return self._render_scene(dt, eye, gun_org, dead=False, inp=inp)
 
     def frame(self, dt, inp):

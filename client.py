@@ -188,9 +188,11 @@ class Client:
         # level. Live construction (Client("e1m1")) takes the else branch and is
         # left byte-identical.
         if mapname in (None, "start"):
-            # the render stack is built by _next_demo -> _load_demo; register the
-            # console + menu first so demo-mode commands exist (they bind to
-            # self.rend, which _load_demo builds before it returns).
+            # _next_demo -> _load_demo builds the render stack (self.rend) first;
+            # _finish_construction registers the console + menu afterwards.
+            # The closures registered there access self.rend lazily at invocation,
+            # so the only ordering constraint is that self.rend exists when a
+            # command actually runs -- not at registration time.
             self._next_demo()
             self._finish_construction()
         else:
@@ -1059,8 +1061,10 @@ class Client:
 
     # ---- console registration / commands ----
     def _register_console(self):
-        """Register the built-in commands and cvars that bind to this Client's
-        state. Called after the first _load_map so self.rend exists."""
+        """Register the built-in commands and cvars for this Client. Called by
+        _finish_construction after a map or demo has built self.rend. The
+        closures capture `self` and access self.rend lazily at invocation, so
+        registration just needs to happen before any command is actually run."""
         con = self.con
 
         def mode_cmd(toggle):

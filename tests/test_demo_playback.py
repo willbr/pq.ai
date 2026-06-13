@@ -55,13 +55,26 @@ def test_timedemo_reports_fps():
 
 def test_demo_loop_advances_on_finish():
     from client import Client, InputState
-    c = Client("start")                        # title demo loop
-    assert c.demo is not None                  # playing demo1 immediately
-    first_map = c.mapname
-    # force the current demo to finish; next frame should start the next demo
-    c.demo.finished = True
+    c = Client("start")                        # title demo loop: playing demo1
+    assert c.demo is not None and c.in_demo_loop
+    before_index = c.demo_index               # captured after _next_demo incremented it
+    before_id = id(c.demo)
+
+    # Drive the current demo to EOF via the real _demo_frame read-gate path:
+    # exhaust the reader so next_frame() returns None on the first read attempt,
+    # and push cl.time past mtime[0] so the gate condition is satisfied.
+    c.demo.reader.pos = len(c.demo.reader.data)
+    c.cl.time = c.cl.mtime[0] + 1.0           # guarantee the read-gate fires
+
+    # One frame: the while-loop calls next_frame() -> None -> d.finished = True,
+    # then the elif branch calls _next_demo() and loads the next demo.
     c.frame(0.05, InputState())
-    # either a new demo loaded (mapname may differ) or loop wrapped -- demo active
+
+    assert c.demo_index > before_index, (
+        f"demo_index did not advance (was {before_index}, still {c.demo_index})"
+    )
+    assert id(c.demo) != before_id, "demo object unchanged -- _next_demo was not called"
+    assert c.in_demo_loop is True, "in_demo_loop cleared unexpectedly"
     assert c.demo is not None
 
 

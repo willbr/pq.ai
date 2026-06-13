@@ -87,6 +87,64 @@ def test_lift_carries_a_rider_standing_on_top():
     assert abs(sv.player_carry[2] - 10.0) < 0.5, "carry not reported to the camera"
 
 
+def test_rising_lift_carries_a_walking_monster():
+    """A monster standing on a rising lift must ride it up even while its own AI
+    runs a movestep that same frame. WinQuake relinks the pusher (SV_LinkEdict)
+    the instant it moves inside SV_PushMove, so a monster re-grounding afterwards
+    (SV_movestep's drop-to-floor SV_Move) lands on the lift's NEW top. The port
+    caches brush-mover positions per host frame; without refreshing the moved
+    mover's cache entry, the monster's movestep traced against the lift's STALE
+    (lower) position and re-grounded there, dropping off the rising lift -- the
+    e1m4 "ogre stuck underneath the lift" bug, nondeterministic because it only
+    bit when the ogre's random-walk AI happened to step that frame.
+
+    Driven on e1m4, where ogre 90 spawns standing on func_door lift 89."""
+    pak = Pak(PAK)
+    b = Bsp(pak.read("maps/e1m4.bsp"))
+    sv = Server(Progs(pak.read("progs.dat")), bsp=b,
+                mapname="maps/e1m4.bsp", skill=1, pak=pak)
+    sv.phys = Physics(b)
+    sv.load_level()
+    vm = sv.vm
+    o = lambda n: _off(sv, n)
+
+    def snapshot():
+        # what the host (client.py) does before each server frame
+        sv.phys.set_brush_entities(sv.solid_brush_models())
+        sv.phys.set_box_entities(sv.solid_box_entities())
+
+    for _ in range(3):                      # let the ogre droptofloor onto the lift
+        snapshot()
+        sv.run_frame(0.1)
+
+    lift, ogre = 89, 90
+    assert sv.pr.string(vm.fget_i(ogre, o("classname"))) == "monster_ogre", \
+        "test fixture moved: e1m4 edict 90 is no longer the ogre on the lift"
+    assert vm.fget_i(ogre, o("groundentity")) == lift, \
+        "test setup: the ogre should settle standing on the lift"
+
+    # raise the lift and, every frame, drive a movestep the way the awake ogre's
+    # AI would -- the exact interleave (mover moves, then monster re-grounds) that
+    # exposed the stale cache.
+    vm.fset_v(lift, o("velocity"), (0.0, 0.0, 100.0))
+    for _ in range(7):
+        snapshot()
+        sv.time += 0.1
+        sv.gset_f("time", sv.time)
+        vm.time = sv.time
+        sv._push_move(lift, 0.1)            # lift rises, carrying the ogre
+        sv.gset_i("self", ogre)
+        sv._sv_movestep(ogre, (8.0, 0.0, 0.0), relink=True)   # AI step + re-ground
+        sv._sv_movestep(ogre, (-8.0, 0.0, 0.0), relink=True)  # step back: stay put
+
+    top = vm.fget_v(lift, o("absmax"))[2]
+    feet = vm.fget_v(ogre, o("absmin"))[2]
+    assert abs(feet - top) < 4.0, \
+        f"the rising lift left the walking monster behind (feet {feet} vs top {top})"
+    assert vm.fget_i(ogre, o("groundentity")) == lift, \
+        "the monster lost its footing on the lift"
+
+
 def test_mover_does_not_drag_a_clear_bystander():
     """A player standing well clear of a mover (not on it, not penetrated by it)
     must not be dragged when it moves -- that was the door-drag bug."""
@@ -164,6 +222,7 @@ def test_descending_pusher_does_not_shove_player_down_through_gaps():
 if __name__ == "__main__":
     test_door_push_never_leaves_player_out_of_bounds()
     test_lift_carries_a_rider_standing_on_top()
+    test_rising_lift_carries_a_walking_monster()
     test_mover_does_not_drag_a_clear_bystander()
     test_descending_pusher_crushes_a_pinned_player()
     test_descending_pusher_does_not_shove_player_down_through_gaps()

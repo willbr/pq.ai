@@ -763,6 +763,12 @@ class Server:
         vm.fset_v(num, forg, (pushorg[0] + move[0], pushorg[1] + move[1],
                               pushorg[2] + move[2]))
         self._link_abs(num)                   # bounds must track the moved origin
+        # Mirror SV_LinkEdict inside SV_PushMove: the mover's cached collision
+        # position must update the instant it moves, so a monster re-grounding
+        # later this frame (SV_movestep) lands on its NEW top instead of the stale
+        # one and rides the lift up rather than being left "stuck underneath".
+        if self.phys is not None:
+            self.phys.relink_brush(num, vm.fget_v(num, forg))
         pmn = vm.fget_v(num, f["absmin"]); pmx = vm.fget_v(num, f["absmax"])
 
         fmt, fsol = f["movetype"], f["solid"]

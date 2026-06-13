@@ -218,6 +218,20 @@ class Physics:
         """ents: list of (hull-1 headnode, origin) for solid brush models."""
         self.brush_entities = ents
 
+    def relink_brush(self, ent, origin):
+        """Refresh a moved brush mover's cached position so traces *later in the
+        same frame* see it live. brush_entities is a per-frame snapshot; WinQuake
+        instead relinks the pusher (SV_LinkEdict) the instant it moves inside
+        SV_PushMove, so a monster re-grounding afterwards (SV_movestep's drop SV_Move)
+        lands on the mover's NEW top. Without this a monster on a rising lift
+        re-grounds against the lift's stale, lower position and is left behind."""
+        be = self.brush_entities
+        org = tuple(origin)
+        for i, (headnode, _org, e) in enumerate(be):
+            if e == ent:
+                be[i] = (headnode, org, ent)
+                return
+
     def set_box_entities(self, ents):
         """ents: list of (absmin, absmax, edict, owner) for solid box entities
         (barrels, monsters, the player). Stored raw; move() applies the Minkowski

@@ -59,10 +59,13 @@ def test_sprite_entities_reach_the_client():
 
     ents = sv.sprite_entities()
     assert (mi, (c.pos[0], c.pos[1], c.pos[2] + 40.0), 2) in ents
-    resolved = c._sprite_ents()
-    assert resolved and resolved[0][0][2] > 0   # (frame tuple w, ...) present
+    # The renderer now reads the client-side entity list (cl), fed by the
+    # server's per-frame datagram, so the hand-alloc'd edict reaches _sprite_ents
+    # only after a frame propagates it through the loopback.
     c.mode = "zbuf"
     c.frame(0.05, client.InputState())          # renders without error
+    resolved = c._sprite_ents()
+    assert resolved and resolved[0][0][2] > 0   # (frame tuple w, ...) present
 
 
 if __name__ == "__main__":

@@ -358,6 +358,78 @@ class ClientState:
             del self.particles[:-2048]
 
 
+class SceneFromClient:
+    """Adapter exposing a ClientState through the subset of the Server query
+    interface the renderer consumes (client.py's render block). Lets the
+    existing _alias_ents/_sprite_ents/_bsp_ents/brush paths read loopback state
+    with no change to their call sites.
+
+    The world entity set this presents must match what the old direct-from-sv
+    path produced: every live entity with a model, MINUS the player's own body
+    (R_DrawEntitiesOnList skips cl.viewentity in first person -- WinQuake
+    gl_rmain.c:312) and MINUS the world (modelindex 1, the maps/*.bsp), which is
+    drawn by the BSP walker, not as an entity. Entities with no model
+    (modelindex 0) never carry a precache name and so are skipped naturally."""
+
+    def __init__(self, cl):
+        self.cl = cl
+
+    def _world_alias_sprite(self, ext):
+        """Live entities whose model has the given extension, excluding the
+        player's own body (viewentity). Yields (num, ClEntity)."""
+        cl = self.cl
+        ve = cl.viewentity
+        for num, e in enumerate(cl.entities):
+            if e is None or not e.model:
+                continue
+            if num == ve:                      # don't draw our own body (1st person)
+                continue
+            if e.model.endswith(ext):
+                yield e
+
+    def alias_entities(self):                  # .mdl
+        return [(e.modelindex, e.origin, e.angles, e.frame)
+                for e in self._world_alias_sprite(".mdl")]
+
+    def sprite_entities(self):                 # .spr
+        return [(e.modelindex, e.origin, e.frame)
+                for e in self._world_alias_sprite(".spr")]
+
+    def bsp_model_entities(self):              # external b_*.bsp pickups
+        # modelindex 1 is the world map (maps/*.bsp); external pickup .bsps live
+        # above it. The inline submodels are "*N" strings, handled separately by
+        # brush_models, so an extension check + index>1 isolates the b_*.bsp set.
+        out = []
+        for e in self._world_alias_sprite(".bsp"):
+            if e.modelindex > 1:
+                out.append((e.modelindex, e.origin, e.angles))
+        return out
+
+    def brush_models(self):                    # inline submodels "*N"
+        # Doors/plats/buttons/triggers. Only inline "*N" models; the world
+        # ("*0" is the world map, but it is sent as modelindex 1 = maps/*.bsp,
+        # not "*0") is excluded. Matches Server.brush_models' tuple shape
+        # (submodel_index, origin, angles, frame). The player can't be a brush.
+        out = []
+        for e in self.cl.entities:
+            if e is None or not e.model or not e.model.startswith("*"):
+                continue
+            out.append((int(e.model[1:]), e.origin, e.angles, e.frame))
+        return out
+
+    @property
+    def particles(self):
+        return self.cl.particles
+
+    @property
+    def lightstyles(self):
+        return self.cl.lightstyles
+
+    @property
+    def time(self):
+        return self.cl.time
+
+
 if __name__ == "__main__":                       # python -m quake.cl_parse
     from .msg import MsgWriter
     cl = ClientState()

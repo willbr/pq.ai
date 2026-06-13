@@ -964,11 +964,13 @@ class Client:
                 f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
                 f"Kills     {ist['monsters']} / {ist['total_monsters']}")
 
-    def _composite_zbuf_ui(self, fb, vw, vh):
+    def _composite_zbuf_ui(self, fb, vw, vh, fh):
         """zbuf mode: draw centerprint/intermission, console, and menu into the
         framebuffer with the conchars font -- the real Quake bitmap UI, drawn
         like the sbar -- instead of handing them to the frontend as OS-native
-        overlays. vw/vh are the view region (vh excludes the appended sbar rows).
+        overlays. vw/vh are the 3D view region (vh excludes the appended sbar
+        rows); fh is the full framebuffer height including them -- the
+        intermission overlay uses fh because it replaces the whole bar.
         Ports SCR_DrawCenterString, Con_DrawConsole/Con_DrawInput, and the
         menu's M_Print/cursor spinner."""
         cf = self.confont
@@ -977,8 +979,8 @@ class Client:
         # centerprint: the conchars centered text. The big-digit layout needs the
         # 320x200 design space, so tiny framebuffers fall back to the text panel.
         ist = self.sv.intermission_stats() if self.intermission else None
-        if ist and vw >= 320 and vh >= 200:
-            self.sbar.intermission_overlay(fb, vw, vh, ist,
+        if ist and vw >= 320 and fh >= 200:
+            self.sbar.intermission_overlay(fb, vw, fh, ist,
                                            self.sb_complete, self.sb_inter)
         else:
             if ist:
@@ -1238,14 +1240,17 @@ class Client:
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
             fb, vw, vh = fbdata                            # view region (pre-sbar)
+            full_h = vh
             if self.rend.sbar_lines:
                 fb.extend(bytes(vw * self.rend.sbar_lines))   # the bar rows
                 full_h = vh + self.rend.sbar_lines
-                if st:
+                # the intermission overlay replaces the status bar (id draws one
+                # or the other), so skip the sbar while intermission is up
+                if st and not self.intermission:
                     self.sbar.draw(fb, vw, full_h, st, self.sv.time,
                                    self.item_gettime, self.faceanimtime)
                 framebuffer = fbdata = (fb, vw, full_h)
-            self._composite_zbuf_ui(fb, vw, vh)           # conchars UI composite
+            self._composite_zbuf_ui(fb, vw, vh, full_h)   # conchars UI + intermission
         elif self.mode == "flat" or self.wire_hidden:
             # flat shading, or hidden-line wireframe: both want the back-to-front
             # (painter's) polygon path so near faces occlude far ones. They differ

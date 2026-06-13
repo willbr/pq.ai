@@ -75,11 +75,41 @@ def test_intermission_block_shared_between_paths():
     assert "Secrets   2 / 4" in block and "Kills     15 / 30" in block
     # the wire/flat overlay path emits this text block; zbuf now draws the
     # authentic Sbar_IntermissionOverlay pics instead (see test_sbar.py).
-    base = bytes(c.frame(0.0, InputState()).framebuffer[0])  # mode is zbuf
+    # exercise the zbuf path once (it now draws the Sbar intermission pics; see
+    # test_sbar.py and test_intermission_pics_in_zbuf for the pixel assertions)
+    c.frame(0.0, InputState())
     # the flat path emits the identical string as an overlay.
     rf = c.frame(0.05, InputState(commands=frozenset({"zbuf"})))
     panel = [o for o in rf.overlays if o[4] == "center"]
     assert panel and panel[0][2] == block
+
+
+def test_intermission_pics_in_zbuf():
+    c = _client()                                   # 320x200 framebuffer, fh=200
+    base = bytes(c.frame(0.0, InputState()).framebuffer[0])
+    c.sv.gset_f("intermission_running", 1.0)
+    c.sv.intermission_time = 83.0
+    c.sv.gset_f("found_secrets", 2.0); c.sv.gset_f("total_secrets", 4.0)
+    c.sv.gset_f("killed_monsters", 15.0); c.sv.gset_f("total_monsters", 30.0)
+    c.intermission = True
+    rf = c.frame(0.0, InputState())
+    assert bytes(rf.framebuffer[0]) != base             # something was drawn
+    assert all(o[4] != "center" for o in rf.overlays)   # no OS overlay in zbuf
+    # the pic path (not the conchars text fallback) ran: the 'complete' title
+    # pic landed at id's (64,24), centred by (fbw-320)//2.
+    fb, fw, fh = rf.framebuffer
+    assert fh >= 200, f"expected full-height fb, got {fh}"
+    sx = (fw - 320) // 2
+    pw, ph, px = c.sb_complete
+    hits = total = 0
+    for r in range(ph):
+        for cc in range(pw):
+            s = px[r * pw + cc]
+            if s != 255:
+                total += 1
+                if fb[(24 + r) * fw + sx + 64 + cc] == s:
+                    hits += 1
+    assert total and hits > total * 0.5, f"complete title pic not drawn ({hits}/{total})"
 
 
 if __name__ == "__main__":

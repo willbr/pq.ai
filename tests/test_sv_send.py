@@ -169,7 +169,32 @@ def test_picked_up_item_drops_from_loopback():
     assert after_loop == before_loop - 1, (after_loop, before_loop)
 
 
+def test_baseline_includes_worldspawn_and_player():
+    sv = _boot()
+    sv.create_baseline()
+    assert 0 in sv.baselines, "worldspawn (edict 0) must have a baseline"
+    assert sv.baselines[0].modelindex == 1, "world modelindex is 1 (the .bsp)"
+    # the player edict baseline forces the player model + colormap=entnum
+    p = sv.player
+    assert sv.baselines[p].colormap == p
+    assert sv.baselines[p].modelindex == sv.model_index("progs/player.mdl")
+
+
+def test_clientdata_folds_serverflags_into_items():
+    from quake.msg import MsgWriter, MsgReader
+    from quake.sv_send import write_clientdata_to_message
+    from quake.cl_parse import ClientState
+    sv = _boot()
+    sv.serverflags = 3                     # two sigils
+    w = MsgWriter(); write_clientdata_to_message(sv, w)
+    r = MsgReader(bytes(w.data)); assert r.byte() == 15   # svc_clientdata
+    cl = ClientState(); cl.parse_clientdata(r)
+    assert (cl.items >> 28) & 0x0f == 3, "serverflags must ride in items high bits"
+
+
 if __name__ == "__main__":
+    test_baseline_includes_worldspawn_and_player()
+    test_clientdata_folds_serverflags_into_items()
     test_baselines_snapshot_spawned_entities()
     test_write_entities_emits_parseable_updates()
     test_clientdata_writes_svc_id()

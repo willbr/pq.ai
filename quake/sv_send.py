@@ -29,14 +29,26 @@ def create_baseline(sv):
     later updates against it. SV_CreateBaseline, sv_main.c:925-975."""
     vm, f = sv.vm, sv.f
     sv.baselines = {}
-    for e in range(1, vm.num_edicts):
+    # SV_CreateBaseline loops every edict from 0. The world (edict 0) and the
+    # client edict(s) always get a baseline; any other edict with no modelindex
+    # is skipped (sv_main.c:937 `entnum > maxclients && !modelindex`). This port
+    # allocates the single player edict dynamically (sv.player), not at index 1,
+    # so the C `0 < entnum <= maxclients` player test maps to `e == sv.player`.
+    player = getattr(sv, "player", 0)
+    for e in range(0, vm.num_edicts):
         if vm.free[e]:
             continue
         mi = int(vm.fget_i(e, f["modelindex"]))   # modelindex is an int field
+        if e != 0 and e != player and mi == 0:
+            continue
+        colormap = int(vm.fget_f(e, f["colormap"]))
+        if e != 0 and e == player:                # SV_CreateBaseline: player
+            colormap = e
+            mi = sv.model_index("progs/player.mdl")
         sv.baselines[e] = Baseline(
             modelindex=mi,
             frame=int(vm.fget_f(e, f["frame"])),
-            colormap=int(vm.fget_f(e, f["colormap"])),
+            colormap=colormap,
             skin=int(vm.fget_f(e, f["skin"])),
             effects=int(vm.fget_f(e, f["effects"])),
             origin=tuple(vm.fget_v(e, f["origin"])),
@@ -137,6 +149,7 @@ def write_clientdata_to_message(sv, w):
     vm, f = sv.vm, sv.f
     e = sv.player
     items = int(vm.fget_f(e, f["items"]))
+    items |= (int(getattr(sv, "serverflags", 0)) & 0x0f) << 28   # episode sigils, sv_main.c
     view_ofs = vm.fget_v(e, f["view_ofs"])
     punch = vm.fget_v(e, f["punchangle"])
     vel = vm.fget_v(e, f["velocity"])

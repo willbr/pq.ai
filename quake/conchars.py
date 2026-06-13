@@ -23,16 +23,25 @@ class ConFont:
         self.src = conchars                  # 128*128 bytes
 
     def char(self, fb, fbw, x, y, num):
-        """Draw_Character: 8x8 glyph from the 16x16 grid; index 0 transparent."""
+        """Draw_Character: 8x8 glyph from the 16x16 grid; index 0 transparent.
+        Clipped to the framebuffer so off-screen text (a long console line, an
+        over-wide centred line with negative x) is dropped, not wrapped/crashed."""
         src = self.src
         sy, sx = (num >> 4) * 8, (num & 15) * 8
+        fbh = len(fb) // fbw
         for r in range(8):
+            dy = y + r
+            if dy < 0 or dy >= fbh:
+                continue
             s = (sy + r) * 128 + sx
-            d = (y + r) * fbw + x
+            base = dy * fbw
             for i in range(8):
+                dx = x + i
+                if dx < 0 or dx >= fbw:
+                    continue
                 b = src[s + i]
                 if b:
-                    fb[d + i] = b
+                    fb[base + dx] = b
 
     def text(self, fb, fbw, x, y, s):
         """Draw_String: left-aligned, 8px advance. High bytes wrap into the

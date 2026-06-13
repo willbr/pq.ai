@@ -52,6 +52,39 @@ def test_text_centered_offsets_by_half_width():
     assert fb[31] == 0
 
 
+def test_char_clips_past_right_edge_no_crash():
+    cf = ConFont(_conchars_with({ord('X'): 9}))
+    fb = bytearray(16 * 8)                    # 16 wide, 8 tall
+    cf.char(fb, 16, 12, 0, ord('X'))          # x=12: cols 12..19, 16..19 off-edge
+    # in-bounds columns drawn, no IndexError, no wrap into the next row
+    assert fb[12] == 9 and fb[15] == 9
+    # off-edge cols 16..19 dropped, not wrapped to the start of row 1
+    assert all(fb[16 + c] == 0 for c in range(12))   # row 1 cols 0..11 untouched
+
+
+def test_char_clips_negative_x_no_corruption():
+    cf = ConFont(_conchars_with({ord('X'): 9}))
+    fb = bytearray(16 * 8)
+    cf.char(fb, 16, -4, 1, ord('X'))          # x=-4: cols -4..3, only 0..3 visible
+    assert fb[16 + 0] == 9 and fb[16 + 3] == 9   # row 1, cols 0..3 drawn
+    assert all(fb[c] == 0 for c in range(16))    # row 0 untouched (no negative wrap)
+
+
+def test_char_clips_past_bottom_edge_no_crash():
+    cf = ConFont(_conchars_with({ord('X'): 9}))
+    fb = bytearray(16 * 8)
+    cf.char(fb, 16, 0, 5, ord('X'))           # y=5: rows 5..12, 8..12 off-bottom
+    assert fb[5 * 16] == 9 and fb[7 * 16] == 9   # rows 5..7 drawn, no IndexError
+
+
+def test_text_centered_overwide_line_does_not_crash():
+    cf = ConFont(_conchars_with({ord('X'): 9}))
+    fb = bytearray(40 * 8)                    # 40 wide
+    cf.text_centered(fb, 40, 20, 0, "X" * 20) # 160px line centred on 20 -> x=-60
+    # no crash; some in-bounds pixels of the middle glyphs are drawn
+    assert any(fb[c] == 9 for c in range(40))
+
+
 def test_load_qpic_parses_header():
     lump = bytes([3, 0, 0, 0, 2, 0, 0, 0]) + bytes(range(6))  # 3x2
     w, h, px = load_qpic(lump)

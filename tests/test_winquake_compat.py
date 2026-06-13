@@ -46,6 +46,12 @@ def _svc_sequence(msg):
     return out
 
 
+def _ends_with_signonnum(block, value):
+    """The block must end with svc_signonnum followed by the given phase byte --
+    WinQuake's connect state machine requires exactly 1, 2, 3 in order."""
+    return bytes(block[-2:]) == bytes([P.svc_signonnum, value])
+
+
 def test_signon_has_three_phases_ending_signonnum_123():
     sv = _boot("e1m1")
     phases = build_signon(sv)
@@ -53,10 +59,13 @@ def test_signon_has_three_phases_ending_signonnum_123():
     p0, p1, p2 = (_svc_sequence(b) for b in phases)
     # phase 0: serverinfo ... signonnum 1
     assert P.svc_serverinfo in p0 and p0[-1] == P.svc_signonnum
+    assert _ends_with_signonnum(phases[0], 1)
     # phase 1: baselines ... signonnum 2
     assert P.svc_spawnbaseline in p1 and p1[-1] == P.svc_signonnum
+    assert _ends_with_signonnum(phases[1], 2)
     # phase 2: a svc_time then clientdata, ending signonnum 3
     assert P.svc_time in p2 and P.svc_clientdata in p2 and p2[-1] == P.svc_signonnum
+    assert _ends_with_signonnum(phases[2], 3)
 
 
 if __name__ == "__main__":

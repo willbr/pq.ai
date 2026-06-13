@@ -483,7 +483,9 @@ class Client:
         # the signon is complete: serverinfo (model_precache filled) AND the
         # spawn-block svc_time seen (cl.mtime[0] set).
         first_angles = None
-        while True:
+        # the signon is at most a handful of frames; cap the scan so a malformed
+        # demo (precache but never a spawn svc_time) can't spin to end-of-file
+        for _ in range(64):
             fr = reader.next_frame()
             if fr is None:
                 self.con.print("demo: no playable frames")
@@ -494,6 +496,9 @@ class Client:
             if (self.cl.model_precache and len(self.cl.model_precache) > 1
                     and self.cl.mtime[0] > 0.0):
                 break        # serverinfo (precache) + spawn svc_time seen -> ready
+        else:
+            self.con.print("demo: signon never completed")
+            return False
         self.cl.viewangles = list(first_angles)
         self.cl.mviewangles[0] = list(first_angles)
         self.cl.mviewangles[1] = list(first_angles)

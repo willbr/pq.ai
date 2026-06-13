@@ -75,6 +75,11 @@ SU_WEAPONFRAME = 1 << 12
 SU_ARMOR = 1 << 13
 SU_WEAPON = 1 << 14
 
+# svc_sound field-mask bits (protocol.h)
+SND_VOLUME = 1 << 0
+SND_ATTENUATION = 1 << 1
+SND_LOOPING = 1 << 2
+
 # stat indices (protocol.h): svc_updatestat / cl.stats
 STAT_HEALTH = 0
 STAT_FRAGS = 1

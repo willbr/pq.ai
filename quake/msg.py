@@ -36,7 +36,9 @@ class MsgWriter:
         self.short(int(f * 8))
 
     def angle(self, f):                      # MSG_WriteAngle, common.c:589
-        self.byte((int(f) * 256 // 360) & 255)
+        # C truncates toward zero (not floor), which matters for negative
+        # angles -- int(x/y) matches C integer division, // does not.
+        self.byte(int(int(f) * 256 / 360) & 255)
 
 
 class MsgReader:
@@ -94,5 +96,5 @@ if __name__ == "__main__":                   # python -m quake.msg
     w = MsgWriter(); w.coord(8.0); w.angle(180.0)
     r = MsgReader(bytes(w.data))
     c = r.coord(); ang = r.angle()   # 180 -> byte 128 -> char -128 -> -180.0
-    assert abs(c - 8.0) < 1e-6 and (abs(ang - 180.0) < 1.5 or abs(ang + 180.0) < 1.5)
+    assert abs(c - 8.0) < 1e-6 and abs(ang + 180.0) < 1.5   # 180 -> byte 128 -> char -128 -> -180.0
     print("quake.msg OK")

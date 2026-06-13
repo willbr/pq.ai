@@ -38,8 +38,16 @@ def test_reader_roundtrips_writer():
     assert r.string() == "quake"
     assert abs(r.coord() - 73.25) < 1e-6          # 73.25*8 = 586 exact
     ang = r.angle()
-    assert abs(ang - 270.0) < 1.5 or abs(ang + 90.0) < 1.5  # 270 -> 192 -> -90 (sign-extend)
+    assert abs(ang + 90.0) < 1.5             # 270 -> byte 192 -> char -64 -> -90.0
     assert r.at_end
+
+
+def test_writer_angle_negative_truncates_toward_zero():
+    # MSG_WriteAngle: C truncates toward zero. angle(-89) -> int(-89*256/360)
+    # = int(-63.28) = -63 -> -63 & 255 = 193 (NOT 192, which floor div gives).
+    w = MsgWriter()
+    w.angle(-89.0)
+    assert w.data[0] == 193, f"expected 193, got {w.data[0]}"
 
 
 def test_reader_past_end_raises():
@@ -56,5 +64,6 @@ if __name__ == "__main__":
     test_writer_coord_and_angle()
     test_writer_string_nul_terminated()
     test_reader_roundtrips_writer()
+    test_writer_angle_negative_truncates_toward_zero()
     test_reader_past_end_raises()
     print("OK")

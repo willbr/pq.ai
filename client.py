@@ -231,6 +231,10 @@ class Client:
         self.wire_hidden = False
 
         self.fps = 0.0
+        # wall-clock uptime: advances every rendered frame even when the server
+        # is paused (console/menu open), so blinking UI cursors keep flashing --
+        # Quake's `realtime`, distinct from the frozen sv.time
+        self._uptime = 0.0
         # fire (button0) comes from two inputs -- the mouse and the Ctrl key --
         # OR'd together so releasing one doesn't cancel the other. attacking is
         # the combined state the QC weapon frame reads (it handles cadence).
@@ -1007,7 +1011,7 @@ class Client:
                 cf.text(fb, vw, 0, y, ln)
                 y += 8
             cf.text(fb, vw, 0, y, "]" + con.input)
-            if int(self.sv.time * 4) & 1:               # Con_DrawInput cursor
+            if int(self._uptime * 4) & 1:               # Con_DrawInput cursor
                 cf.char(fb, vw, (con.cursor + 1) * 8, y, 11)
 
         # menu: dim the view (Draw_FadeScreen), then title + rows; the selected
@@ -1022,7 +1026,7 @@ class Client:
             col = cx - 80
             for label, value, sel in rows:
                 if sel:
-                    cf.char(fb, vw, col - 16, y, 12 + (int(self.sv.time * 4) & 1))
+                    cf.char(fb, vw, col - 16, y, 12 + (int(self._uptime * 4) & 1))
                 cf.text(fb, vw, col, y, label)
                 if value:
                     cf.text(fb, vw, cx + 16, y, value)
@@ -1035,6 +1039,7 @@ class Client:
         timing/after scheduling and diagnostics."""
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+        self._uptime += dt          # real time, ticks even while paused
 
         # apply input -> view angles
         self.yaw -= inp.look_dx * LOOK_SENS

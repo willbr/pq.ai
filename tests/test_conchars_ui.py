@@ -129,6 +129,34 @@ def test_intermission_hides_status_bar_and_fills_3d():
     assert all(o[4] != "sw" for o in rf.overlays)   # no bottom status string
 
 
+def test_uptime_advances_while_paused():
+    # the menu/console pause the server (sv.time frozen); the wall-clock _uptime
+    # must keep ticking so blinking cursors animate.
+    c = _client()
+    c.menu.active = True
+    sv0, up0 = c.sv.time, c._uptime
+    for _ in range(3):
+        c.frame(0.1, InputState())
+    assert c.sv.time == sv0                 # server stayed paused
+    assert c._uptime > up0 + 0.25           # but wall-clock advanced
+
+
+def test_menu_cursor_flashes_while_paused():
+    # glyph 12 is blank and 13 is the cursor; id flashes 12<->13 off realtime.
+    # Driven off the frozen sv.time the cursor stuck on one frame and vanished
+    # every other open -- it must flash off _uptime instead.
+    c = _client()
+    c.menu.active = True
+
+    def fb_at(uptime):
+        c._uptime = uptime
+        return bytes(c.frame(0.0, InputState()).framebuffer[0])
+
+    blank = fb_at(0.0)      # int(0.0*4)&1 = 0 -> blank cursor glyph 12
+    shown = fb_at(0.30)     # int(1.2)  &1 = 1 -> cursor glyph 13
+    assert blank != shown, "menu cursor does not animate while paused"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -223,6 +223,35 @@ def test_history_records_raw_total_and_bounds():
     assert len(p.history) == HISTORY_LEN, len(p.history)
 
 
+def test_graph_maps_totals_to_glyph_heights():
+    """graph() renders one block glyph per frame: ~0ms blank, target ~mid,
+    2x target full, over-budget capped at full. Empty history -> ''."""
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=1.0)
+    assert p.graph() == ""                       # nothing logged yet
+    # push known totals by spending that long in a section each frame
+    for ms in (0.0, 16.7, 33.4, 100.0):
+        with p.section("a"):
+            clk.advance(ms)
+        p.frame_end()
+    g = p.graph(target_ms=16.7, width=120)
+    assert len(g) == 4, repr(g)
+    assert g[0] == " "                           # ~0ms -> blank
+    assert g[1] == "▄"                           # target -> level 4
+    assert g[2] == "█"                           # 2x target -> full
+    assert g[3] == "█"                           # over-budget -> capped full
+
+def test_graph_shows_only_last_width_frames():
+    """graph(width=N) shows the most recent N frames."""
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=1.0)
+    for _ in range(10):
+        with p.section("a"):
+            clk.advance(33.4)
+        p.frame_end()
+    assert len(p.graph(width=3)) == 3
+
+
 if __name__ == "__main__":
     test_section_accumulates_elapsed()
     test_same_name_sums_within_frame()
@@ -237,4 +266,6 @@ if __name__ == "__main__":
     test_bars_sorts_hottest_first_within_level()
     test_prof_total_color_buckets()
     test_history_records_raw_total_and_bounds()
+    test_graph_maps_totals_to_glyph_heights()
+    test_graph_shows_only_last_width_frames()
     print("OK")

@@ -145,6 +145,22 @@ class Profiler:
             lines.append(f"{label:<{lwidth}}{ms:5.1f} {_bar(ms / target_ms, width)}")
         return "\n".join(lines)
 
+    def graph(self, target_ms=16.7, width=120):
+        """One-line sparkline of recent raw frame totals from history (up to
+        `width` columns, newest last). Height is scaled so a frame at
+        2*target_ms fills the cell -- a frame at budget sits mid-height and
+        hitches spike visibly; an over-budget frame caps at the full block.
+        Empty history returns ''."""
+        if not self.history:
+            return ""
+        recent = list(self.history)[-width:]
+        full = 2.0 * target_ms
+        out = []
+        for t in recent:
+            level = int(round(t / full * 8)) if full > 0 else 0
+            out.append(_SPARK[min(8, max(0, level))])
+        return "".join(out)
+
 
 # Module-level singleton the engine and frontends share.
 PROFILER = Profiler()

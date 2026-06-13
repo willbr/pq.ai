@@ -314,6 +314,7 @@ class Client:
             return False
 
         self.mapname = mapname                    # bare name, for the "map" query
+        self.demo = None                          # leave any demo: live server now
         # CL_ClearState (cl_main.c): cosmetic HUD timers reset on every new
         # server connection -- sv.time restarts at 0 each level, so stale
         # values from the old level would leave the pain face stuck and
@@ -480,8 +481,72 @@ class Client:
         self.intermission = False
         if self._view_wh != (0, 0):
             self.rend.resize(*self._view_wh)
+        # camera/player state the live path sets in _load_map (find_spawn); the
+        # demo drives pos/yaw/pitch from cl every frame, but these must exist so
+        # the shared render/view code never reads an unset attribute on frame 1.
+        self.pos = [0.0, 0.0, 0.0]
+        self.vel = [0.0, 0.0, 0.0]    # view-bob / HUD speed read this
+        self.yaw = 0.0
+        self.pitch = 0.0
+        self.bobtime = 0.0
+        self.onground = False
+        self.waterlevel = 0
+        self.watertype = CONTENTS_EMPTY
+        self.noclip = False
+        self.flymode = False
         self.demo = Demo(reader)                         # controller (Task 4)
+        # the console binds to self.rend (built above); register it and build the
+        # menu if the caller booted straight into a demo (Client.__new__ +
+        # _init_assets_only + _load_demo) rather than through live __init__.
+        if not getattr(self, "menu", None):
+            self._register_console()
+            self.menu = self._build_menu()
         return True
+
+    # ---- demo vs live render source (Task 4) ----
+    # Each returns the cl/scene value in demo mode and EXACTLY the prior
+    # self.sv.X value live, so factoring the render block through these leaves
+    # live output byte-identical.
+    def _cur_time(self):
+        return self.cl.time if self.demo is not None else self.sv.time
+
+    def _cur_hud(self):
+        return self.scene.hud_status() if self.demo is not None else self.sv.hud_status()
+
+    def _cur_lightstyles(self):
+        return self.cl.lightstyles if self.demo is not None else self.sv.lightstyles
+
+    def _cur_particles(self):
+        if self.demo is None:
+            return self.sv.particles
+        # cl's Phase-1 particle stub holds (origin, dir, count, color) tuples;
+        # the renderer (and _particle_sprites) want the flat sv shape
+        # [x, y, z, vx, vy, vz, color, ...]. Adapt at this boundary.
+        return [(org[0], org[1], org[2], 0.0, 0.0, 0.0, color)
+                for (org, _dir, _count, color) in self.cl.particles]
+
+    def _cur_health(self):
+        return (self.scene.player_health() if self.demo is not None
+                else self.sv.player_health())
+
+    def _cur_intermission(self):
+        return (self.scene.intermission_active() if self.demo is not None
+                else self.sv.intermission_active())
+
+    def _cur_intermission_stats(self):
+        return (self.scene.intermission_stats() if self.demo is not None
+                else self.sv.intermission_stats())
+
+    def _cur_view_weapon(self):
+        return self.scene.view_weapon() if self.demo is not None else self.sv.view_weapon()
+
+    def _cur_center_msg(self):
+        return self.scene.center_msg if self.demo is not None else self.sv.center_msg
+
+    def _light_source(self):
+        """The source of light_entities()/dlight_events for _update_dlights:
+        the SceneFromClient adapter in demo mode, the live server otherwise."""
+        return self.scene if self.demo is not None else self.sv
 
     def resize(self, w, h):
         self._view_wh = (w, h)
@@ -503,6 +568,8 @@ class Client:
         and decaying 150/s), bonus (gold pickup flash, 100/s) and powerup
         (quad/suit/ring/pent from .items). Rebuilds view_palette and bumps
         palette_version only when the blend actually changes."""
+        if self.demo is not None:
+            return self._update_palette_demo(dt)
         sv, f, vm = self.sv, self.sv.f, self.sv.vm
         e = sv.player
 
@@ -589,14 +656,59 @@ class Client:
             pal.append((r, g, b))
         self.view_palette = pal
 
+    def _update_palette_demo(self, dt):
+        """Demo-mode V_UpdatePalette: there is no server edict to read dmg_take /
+        dmg_inflictor / bonus_flash from, so blend only the two shifts that are
+        recoverable from cl -- the contents tint (eye leaf via the BSP) and the
+        powerup tint (cl.items). Same view_palette/palette_version contract as
+        the live path so the renderer sees an identical interface."""
+        shifts = []
+        wt = CONTENTS_EMPTY
+        if self.phys is not None:
+            eye_z = self.pos[2] + self.cl.view_height
+            wt = self.phys.point_contents_0((self.pos[0], self.pos[1], eye_z))
+        if wt == -3:
+            shifts.append((130, 80, 50, 128))   # water
+        elif wt == -4:
+            shifts.append((0, 25, 5, 150))      # slime
+        elif wt <= -5:
+            shifts.append((255, 80, 0, 150))    # lava (and sky, like the C)
+        items = self.cl.items
+        if items & 4194304:                     # IT_QUAD
+            shifts.append((0, 0, 255, 30))
+        elif items & 2097152:                   # IT_SUIT
+            shifts.append((0, 255, 0, 20))
+        elif items & 524288:                    # IT_INVISIBILITY
+            shifts.append((100, 100, 100, 100))
+        elif items & 1048576:                   # IT_INVULNERABILITY
+            shifts.append((255, 255, 0, 30))
+
+        key = tuple(s for s in shifts if s[3] > 0)
+        if key == self._tint_key:
+            return
+        self._tint_key = key
+        self.palette_version += 1
+        if not key:
+            self.view_palette = self.palette
+            return
+        pal = []
+        for r, g, b in self.palette:
+            for sr, sg, sb, pct in key:
+                r += (pct * (sr - r)) >> 8
+                g += (pct * (sg - g)) >> 8
+                b += (pct * (sb - b)) >> 8
+            pal.append((r, g, b))
+        self.view_palette = pal
+
     def _update_dlights(self, dt):
         """CL_AllocDlight / CL_DecayLights: refresh the dynamic-light pool
         from entity effects (muzzle flash one-shot, bright/dim light, rocket
         glow via the model flag) and the server's one-shot explosion events;
         decay radii and expire dead lights."""
-        now = self.sv.time
+        src = self._light_source()
+        now = self._cur_time()
         dl = self.dlights
-        for e, org, eff, rocket in self.sv.light_entities():
+        for e, org, eff, rocket in src.light_entities():
             x, y, z = org
             if eff & 2:                          # EF_MUZZLEFLASH
                 dl[e] = [x, y, z + 16.0, 200.0 + random.random() * 32.0,
@@ -609,11 +721,11 @@ class Client:
                          now + 0.001, 0.0, 0.0]
             elif rocket:
                 dl[e] = [x, y, z, 200.0, now + 0.01, 0.0, 0.0]
-        for org, radius, die, decay in self.sv.dlight_events:
+        for org, radius, die, decay in src.dlight_events:
             self._dlight_seq += 1
             dl[("ev", self._dlight_seq)] = [org[0], org[1], org[2], radius,
                                             die, decay, 0.0]
-        self.sv.dlight_events.clear()
+        src.dlight_events.clear()
         for k in list(dl):                       # CL_DecayLights
             L = dl[k]
             L[3] -= L[5] * dt
@@ -626,7 +738,6 @@ class Client:
         200), the QC's .punchangle weapon kick, and the decaying damage kick
         into view_angles = (pitch, yaw, roll); lag the eye 80 u/s behind
         stair-step pops (oldz smoothing, max 12 units)."""
-        sv, f, vm = self.sv, self.sv.f, self.sv.vm
         pitch, yaw = self.pitch, self.yaw
         if self.intermission:
             # V_CalcIntermissionRefdef forces v_idlescale=1, so V_AddIdle drifts
@@ -652,12 +763,17 @@ class Client:
             vd[0] -= dt
         if dead:
             roll = 80.0          # V_CalcViewRoll: dead men see the floor sideways
-        e = sv.player
-        if e and not vm.free[e]:
-            px, py, pz = vm.fget_v(e, f["punchangle"])
-            pitch += px
-            yaw += py
-            roll += pz
+        if self.demo is not None:
+            px, py, pz = self.cl.punchangle    # parsed from clientdata, no edict
+        else:
+            sv, f, vm = self.sv, self.sv.f, self.sv.vm
+            e = sv.player
+            px = py = pz = 0.0
+            if e and not vm.free[e]:
+                px, py, pz = vm.fget_v(e, f["punchangle"])
+        pitch += px
+        yaw += py
+        roll += pz
         self.view_angles = (pitch, yaw, roll)
 
         z = self.pos[2]          # smooth out stair step ups (V_CalcRefdef oldz)
@@ -935,6 +1051,10 @@ class Client:
                              "logperf [file]: start/stop per-frame CSV perf logging "
                              "(file defaults to a timestamped perf-<ISO>.csv)")
         con.register_command("map", self._cmd_map, "map <name>: load a level")
+        con.register_command("playdemo", self._cmd_playdemo,
+                             "playdemo <name>: play a .dem file")
+        con.register_command("stop", self._cmd_stopdemo,
+                             "stop: end demo playback, return to a live map")
         con.register_command("save", self._cmd_save, "save <name>: save the game")
         con.register_command("load", self._cmd_load, "load <name>: load a save")
         con.register_command("god", self._cmd_god, "toggle god mode")
@@ -1007,6 +1127,41 @@ class Client:
         self.serverflags = 0.0
         if self._load_map(args[0]):               # rebuilds rend/sv; prints its own miss
             self.con.print(f"loading {args[0]}")
+
+    def _cmd_playdemo(self, args):
+        """playdemo <name>: play a .dem file (CL_PlayDemo_f). Looks in the pak
+        first (the shareware demos live there), then the filesystem."""
+        if not args:
+            self.con.print("usage: playdemo <name>")
+            return
+        self._play_named_demo(args[0])
+
+    def _play_named_demo(self, name):
+        """Load and start a named demo, pak-first then filesystem (.dem suffix
+        optional). Returns False if not found / invalid."""
+        fn = name if name.endswith(".dem") else name + ".dem"
+        blob = None
+        if fn in self.pak.files:
+            blob = self.pak.read(fn)
+        elif os.path.exists(fn):
+            with open(fn, "rb") as fh:
+                blob = fh.read()
+        if blob is None:
+            self.con.print(f"playdemo: not found: {fn}")
+            return False
+        self.con.active = False
+        if not self._load_demo(blob):
+            self.con.print(f"playdemo: failed: {fn}")
+            return False
+        return True
+
+    def _cmd_stopdemo(self, args):
+        """stop: end demo playback and return to a live map (Host_Stopdemo_f),
+        so the renderer has a server again."""
+        if self.demo is not None:
+            self.demo = None
+            self.con.print("demo stopped")
+        self._cmd_map(["e1m1"])
 
     def _cmd_god(self, args):
         self.con.print("godmode " + ("ON" if self.sv.toggle_god() else "OFF"))
@@ -1108,7 +1263,7 @@ class Client:
         # intermission: the authentic Sbar_IntermissionOverlay pics (not text);
         # centerprint: the conchars centered text. The big-digit layout needs the
         # 320x200 design space, so tiny framebuffers fall back to the text panel.
-        ist = self.sv.intermission_stats() if self.intermission else None
+        ist = self._cur_intermission_stats() if self.intermission else None
         if ist and vw >= 320 and fh >= 200:
             self.sbar.intermission_overlay(fb, vw, fh, ist,
                                            self.sb_complete, self.sb_inter)
@@ -1116,8 +1271,8 @@ class Client:
             if ist:
                 block = self._intermission_block(ist)          # tiny-fb fallback
             else:
-                cm = self.sv.center_msg
-                block = (cm[0] if cm and self.sv.time - cm[1] < CENTER_MSG_TIME
+                cm = self._cur_center_msg()
+                block = (cm[0] if cm and self._cur_time() - cm[1] < CENTER_MSG_TIME
                          else None)
             if block:
                 lines = block.split("\n")
@@ -1159,10 +1314,78 @@ class Client:
                 y += 8
 
     # ---- main loop ----
+    def _finish_timedemo(self):
+        """CL_FinishTimeDemo: report average fps over the run and drop to the
+        console with the result. Called from _demo_frame when a timedemo ends."""
+        import time as _time
+        d = self.demo
+        if d.start_time and d.frames > 1:
+            elapsed = _time.monotonic() - d.start_time
+            fps = (d.frames - 1) / elapsed if elapsed > 0 else 0.0
+            self.con.print(f"{d.frames - 1} frames {elapsed:.1f} seconds "
+                           f"{fps:.1f} fps")
+        self.con.active = True
+
+    def _demo_frame(self, dt, inp):
+        """One frame of .dem playback (cl_demo.c CL_ReadDemoMessage path): advance
+        cl.time, read+parse demo messages on the timing gate (cl.time >= mtime[0];
+        timedemo reads exactly one per frame), relink, drive the camera/HUD/view
+        from cl, and render through the shared _render_scene. No server, no input,
+        no physics. The Escape menu / console pause the demo clock (host.c)."""
+        import time as _time
+        from quake.msg import MsgReader
+        if dt > 0:
+            self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+        self._uptime += dt
+        PROFILER.begin("server")
+        d = self.demo
+        paused = self.menu.active or self.con.active
+        if not paused and not d.finished:
+            self.cl.time += dt
+            while True:
+                if not d.timedemo and self.cl.time < self.cl.mtime[0]:
+                    break
+                fr = d.reader.next_frame()
+                if fr is None:
+                    d.finished = True
+                    break
+                self.cl.viewangles = list(fr[0])
+                self.cl.parse_message(MsgReader(fr[1]))
+                if d.timedemo:
+                    if d.start_time is None:
+                        d.start_time = _time.monotonic()   # clock starts at frame 1
+                    d.frames += 1
+                    break
+            self.cl.relink(dt)
+            if d.timedemo and d.finished:
+                self._finish_timedemo()
+        PROFILER.end("server")
+
+        # drive the camera from cl (CL_RelinkEntities: view entity origin + the
+        # demo frame's recorded viewangles; the eye sits view_height above)
+        ve = self.cl.entities[self.cl.viewentity]
+        org = ve.origin if ve is not None else (0.0, 0.0, 0.0)
+        self.pos = [org[0], org[1], org[2]]
+        self.vel = list(self.cl.velocity)
+        self.pitch = self.cl.viewangles[0]
+        self.yaw = self.cl.viewangles[1]
+        self.intermission = self.cl.intermission
+        if self.intermission:
+            eye = (self.pos[0], self.pos[1], self.pos[2])
+            gun_org = None
+        else:
+            self.bobtime += dt
+            bob = self._calc_bob()
+            fwd, _r, _u = angle_vectors(self.yaw, self.pitch)
+            eye, gun_org = view_origins(self.pos, self.cl.view_height, fwd, bob)
+        return self._render_scene(dt, eye, gun_org, dead=False, inp=inp)
+
     def frame(self, dt, inp):
         """Advance one frame from `dt` seconds and `inp` intent, returning a
         RenderFrame the frontend draws. Ports main.py's App.tick minus drawing,
         timing/after scheduling and diagnostics."""
+        if self.demo is not None:           # .dem playback: no server, no input
+            return self._demo_frame(dt, inp)
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
         self._uptime += dt          # real time, ticks even while paused
@@ -1291,11 +1514,6 @@ class Client:
         self.cl.parse_message(MsgReader(dg.data))
         self.cl.relink(dt)
 
-        brush_ents = self.scene.brush_models()
-        alias_ents = self._alias_ents()
-        alias_ents.extend(self._beam_ents())   # lightning bolts (CL_UpdateTEnts)
-        bsp_ents = self._bsp_ents()
-
         if self.intermission:
             # V_CalcIntermissionRefdef: camera sits at the spot origin (no view
             # height, no bob) looking along its mangle, and the gun is hidden.
@@ -1331,6 +1549,22 @@ class Client:
                 # frame after a mode switch; self-heals with the render sync.)
                 gun_org = (gun_org[0], gun_org[1], gun_org[2] + 2.0)
 
+        return self._render_scene(dt, eye, gun_org, dead, inp)
+
+    def _render_scene(self, dt, eye, gun_org, dead, inp):
+        """The render half of a frame, shared by live play and demo playback.
+        Given the computed eye/gun origins (each caller derives these from its
+        own source -- the live server, or the demo's cl), it runs the per-frame
+        view feel, dynamic lights and palette, builds the world entity lists
+        from self.scene, rasterises, and assembles the RenderFrame. Every render
+        read of game state goes through the _cur_* accessors, which return the
+        live self.sv.X values when self.demo is None (so live output is
+        byte-identical) and the cl/scene equivalents during demo playback."""
+        brush_ents = self.scene.brush_models()
+        alias_ents = self._alias_ents()
+        alias_ents.extend(self._beam_ents())   # lightning bolts (CL_UpdateTEnts)
+        bsp_ents = self._bsp_ents()
+
         self._update_palette(dt)     # V_UpdatePalette: tint shifts for this frame
         self._update_view_feel(dt, dead)   # strafe lean / punch / damage kick
         self._update_dlights(dt)     # muzzle flashes / explosions / glows
@@ -1346,7 +1580,7 @@ class Client:
         # sprite status bar (sbar.c): zbuf mode with a >=320-wide screen.
         # Sync the renderer's reserved rows here so every path that changes
         # mode/resolution/zbuf_scale self-heals on the next frame.
-        st = self.sv.hud_status()
+        st = self._cur_hud()
         # mirrors _setup_zbuf's zw formula rather than reading rend.zw, which
         # is stale until the resize this very block may trigger
         screen_w = (self.video_res[0] if self.video_res
@@ -1365,14 +1599,14 @@ class Client:
             if items != self._prev_items:        # CL_ParseClientdata
                 for j in range(32):
                     if items & (1 << j) and not self._prev_items & (1 << j):
-                        self.item_gettime[j] = self.sv.time
+                        self.item_gettime[j] = self._cur_time()
                 self._prev_items = items
 
         PROFILER.begin("render")
         segs = polys = framebuffer = None
         render_mode = self.mode
         if self.mode == "zbuf":
-            styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
+            styles = lightstyle_values(self._cur_lightstyles(), self._cur_time())
             self.rend.apply_dlights(
                 [(L[0], L[1], L[2], L[3], L[6]) for L in self.dlights.values()],
                 styles)
@@ -1381,10 +1615,10 @@ class Client:
                                                     view_model, bsp_ents,
                                                     textured=self.textured,
                                                     lightstyles=styles,
-                                                    time=self.sv.time,
+                                                    time=self._cur_time(),
                                                     roll=vroll,
                                                     sprites=self._sprite_ents(),
-                                                    particles=self.sv.particles)
+                                                    particles=self._cur_particles())
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
             fb, vw, vh = fbdata                            # view region (pre-sbar)
@@ -1395,7 +1629,7 @@ class Client:
                 # the intermission overlay replaces the status bar (id draws one
                 # or the other), so skip the sbar while intermission is up
                 if st and not self.intermission:
-                    self.sbar.draw(fb, vw, full_h, st, self.sv.time,
+                    self.sbar.draw(fb, vw, full_h, st, self._cur_time(),
                                    self.item_gettime, self.faceanimtime)
                 framebuffer = fbdata = (fb, vw, full_h)
             self._composite_zbuf_ui(fb, vw, vh, full_h)   # conchars UI + intermission
@@ -1404,7 +1638,7 @@ class Client:
             # (painter's) polygon path so near faces occlude far ones. They differ
             # only in how the frontend paints the polys (filled vs outlined), so
             # tag the frame "wire_hidden" when it's the wireframe variant.
-            styles = lightstyle_values(self.sv.lightstyles, self.sv.time)
+            styles = lightstyle_values(self._cur_lightstyles(), self._cur_time())
             self.rend.apply_dlights(
                 [(L[0], L[1], L[2], L[3], L[6]) for L in self.dlights.values()],
                 styles)
@@ -1429,7 +1663,7 @@ class Client:
         PROFILER.gauge("y", self.pos[1])
         PROFILER.gauge("z", self.pos[2])
         PROFILER.gauge("dlights", len(self.dlights))
-        PROFILER.gauge("particles", len(self.sv.particles))
+        PROFILER.gauge("particles", len(self._cur_particles()))
         PROFILER.gauge("ents", len(alias_ents) + len(brush_ents) + len(bsp_ents))
         PROFILER.gauge("map", self.mapname)
 
@@ -1446,7 +1680,7 @@ class Client:
         movemode = ("NOCLIP" if self.noclip else
                     "water" if self.waterlevel >= 2 else
                     "ground" if self.onground else "air")
-        hp = self.sv.player_health()
+        hp = self._cur_health()
         w, h = self._view_wh
 
         overlays = []
@@ -1502,13 +1736,13 @@ class Client:
         console = None
         menu = None
         if self.mode != "zbuf":
-            ist = self.sv.intermission_stats() if self.intermission else None
+            ist = self._cur_intermission_stats() if self.intermission else None
             if ist:
                 overlays.append((w // 2, h // 3, self._intermission_block(ist),
                                  (255, 255, 0), "center"))
 
-            cm = self.sv.center_msg
-            if not ist and cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
+            cm = self._cur_center_msg()
+            if not ist and cm and self._cur_time() - cm[1] < CENTER_MSG_TIME:
                 overlays.append((w // 2, h // 3, cm[0], (255, 255, 0), "center"))
 
             con = self.con
@@ -1540,7 +1774,7 @@ class Client:
         focal_r = self.rend.focal * PARTICLE_RADIUS
         pal = self.palette
         W, H = self._view_wh
-        for p in self.sv.particles:
+        for p in self._cur_particles():
             sp = project(eye, self.yaw, self.pitch, (p[0], p[1], p[2]))
             if sp is None:
                 continue
@@ -1585,7 +1819,7 @@ class Client:
         out = []
         models = self.models
         nmodels = len(models)
-        now = self.sv.time
+        now = self._cur_time()
         for mi, org, ang, frame in self.scene.alias_entities():
             m = models[mi] if mi < nmodels else None
             if m is None:
@@ -1623,6 +1857,8 @@ class Client:
         """CL_UpdateTEnts: chop each live beam into 30-unit bolt-model
         segments aimed along it with a random roll, riding the normal
         alias-model render path."""
+        if self.demo is not None:
+            return []                # beams come off the server; demos have none
         beams = self.sv.live_beams()
         if not beams:
             return []
@@ -1688,7 +1924,7 @@ class Client:
         """The first-person weapon as (mdl, verts, origin, angles), or None.
         Reads the QC's .weaponmodel/.weaponframe and fixes it to the (already
         bob-shifted) gun origin. Negating pitch aligns model_axes with the view."""
-        vw = self.sv.view_weapon()
+        vw = self._cur_view_weapon()
         if not vw:
             return None
         path, frame = vw
@@ -1703,4 +1939,4 @@ class Client:
         if mdl is None:
             return None
         ang = (-self.pitch, self.yaw, 0.0)
-        return (mdl, mdl.frame_verts(frame, self.sv.time), org, ang)
+        return (mdl, mdl.frame_verts(frame, self._cur_time()), org, ang)

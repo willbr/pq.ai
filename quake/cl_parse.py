@@ -62,6 +62,9 @@ class ClientState:
         self.intermission = False
         self.levelname = ""
         self.center_msg = None
+        self.center_time = 0.0       # cl.time when the last centerprint arrived
+        self.last_print = None       # svc_print text (demos; engine Con_Printf)
+        self.last_stuff = None       # svc_stufftext text (demos; engine Cbuf)
         self.particles = []          # client-side particle system (relink)
         self.dlight_events = []      # (origin, radius, die_time, decay) -- demo dlights
         self.completed_time = 0.0    # level time frozen at intermission (cl.completed_time)
@@ -114,6 +117,7 @@ class ClientState:
             r.byte()                               # phase number -- noted, no-op
         elif cmd == P.svc_centerprint:
             self.center_msg = r.string()
+            self.center_time = self.mtime[0]
         elif cmd == P.svc_intermission:
             # NQ protocol-15: svc_intermission carries NO payload. (Reading a
             # string here would consume the next message's bytes and desync.)
@@ -122,6 +126,7 @@ class ClientState:
             # svc_finale DOES carry the finale text string.
             self.intermission = True
             self.center_msg = r.string()
+            self.center_time = self.mtime[0]
         elif cmd == P.svc_setpause:
             r.byte()
         elif cmd == P.svc_updatestat:
@@ -147,6 +152,30 @@ class ClientState:
             r.byte()                               # sound number
             r.byte()                               # volume
             r.byte()                               # attenuation
+        # --- svc types the live loopback never sends but real demos do
+        # (cl_parse.c). Parse their payload so the stream stays in sync; the
+        # render surface doesn't consume them in Phase 2, so they drop.
+        elif cmd == P.svc_version:
+            r.long()                               # protocol version (checked in C)
+        elif cmd == P.svc_print:
+            self.last_print = r.string()           # Con_Printf in the engine
+        elif cmd == P.svc_stufftext:
+            self.last_stuff = r.string()           # Cbuf_AddText in the engine
+        elif cmd == P.svc_updatename:
+            r.byte(); r.string()                   # scoreboard slot + name
+        elif cmd == P.svc_updatefrags:
+            r.byte(); r.short()                    # scoreboard slot + frags
+        elif cmd == P.svc_updatecolors:
+            r.byte(); r.byte()                     # scoreboard slot + colors
+        elif cmd == P.svc_stopsound:
+            r.short()                              # (channel<<3)|entity
+        elif cmd == P.svc_damage:
+            r.byte(); r.byte()                     # armor + blood
+            for _ in range(3):
+                r.coord()                          # inflictor origin (V_ParseDamage)
+        elif cmd == P.svc_cutscene:
+            self.center_msg = r.string()           # finale text
+            self.center_time = self.mtime[0]
         else:
             raise ValueError(f"unknown svc {cmd} at byte {r.pos}")
 
@@ -382,13 +411,19 @@ class SceneFromClient:
 
     def _world_alias_sprite(self, ext):
         """Live entities whose model has the given extension, excluding the
-        player's own body (viewentity). Yields ClEntity."""
+        player's own body (viewentity). Yields ClEntity. Gated on the entity
+        being present in the latest packet (msgtime == mtime[0]) so PVS culling
+        in demos is honoured -- entities that leave the view stop rendering and
+        reappear when seen again. A no-op for the live loopback (the server
+        sends every entity each frame, so msgtime always equals mtime[0])."""
         cl = self.cl
         ve = cl.viewentity
         for num, e in enumerate(cl.entities):
             if e is None or not e.model:
                 continue
             if num == ve:                      # don't draw our own body (1st person)
+                continue
+            if e.msgtime != cl.mtime[0]:       # not in the last packet (PVS)
                 continue
             if e.model.endswith(ext):
                 yield e
@@ -417,8 +452,11 @@ class SceneFromClient:
         # not "*0") is excluded. Matches Server.brush_models' tuple shape
         # (submodel_index, origin, angles, frame). The player can't be a brush.
         out = []
-        for e in self.cl.entities:
+        cl = self.cl
+        for e in cl.entities:
             if e is None or not e.model or not e.model.startswith("*"):
+                continue
+            if e.msgtime != cl.mtime[0]:       # not in the last packet (PVS)
                 continue
             out.append((int(e.model[1:]), e.origin, e.angles, e.frame))
         return out
@@ -501,6 +539,15 @@ class SceneFromClient:
         if mi <= 0 or mi >= len(self.cl.model_precache):
             return None
         return (self.cl.model_precache[mi], self.cl.stats[P.STAT_WEAPONFRAME])
+
+    @property
+    def center_msg(self):
+        """The latest centerprint as (text, time), matching Server.center_msg's
+        tuple shape (the render block tests sv.time - cm[1] < CENTER_MSG_TIME).
+        None when no message has arrived."""
+        if not self.cl.center_msg:
+            return None
+        return (self.cl.center_msg, self.cl.center_time)
 
     def intermission_active(self):
         return self.cl.intermission

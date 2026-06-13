@@ -1449,6 +1449,10 @@ class Client:
                 if fr is None:
                     d.finished = True
                     break
+                # shift the demo-header viewangles into the two-snapshot buffer
+                # (paired with mtime) so the camera lerps between them, not snaps
+                self.cl.mviewangles[1] = self.cl.mviewangles[0]
+                self.cl.mviewangles[0] = list(fr[0])
                 self.cl.viewangles = list(fr[0])
                 self.cl.parse_message(MsgReader(fr[1]))
                 if d.timedemo:
@@ -1472,8 +1476,11 @@ class Client:
         org = ve.origin if ve is not None else (0.0, 0.0, 0.0)
         self.pos = [org[0], org[1], org[2]]
         self.vel = list(self.cl.velocity)
-        self.pitch = self.cl.viewangles[0]
-        self.yaw = self.cl.viewangles[1]
+        # interpolate the camera angles between the last two demo headers by the
+        # same fraction relink used for positions -- smooth, not stepped per msg
+        va = self.cl.lerp_viewangles(self.cl.lerp_frac)
+        self.pitch = va[0]
+        self.yaw = va[1]
         self.intermission = self.cl.intermission
         if self.intermission:
             eye = (self.pos[0], self.pos[1], self.pos[2])

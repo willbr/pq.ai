@@ -181,7 +181,27 @@ def test_temp_entity_explosion_pushes_dlight():
     assert radius == 350.0 and abs(die - 5.5) < 1e-6
 
 
+def test_demo_view_angles_interpolate():
+    """Demo playback must lerp the view angles between the last two demo-frame
+    headers (cl.mviewangles), not snap to the latest -- otherwise the camera
+    jitters at the demo's message cadence. With 180-degree wrap like the entity
+    angle lerp."""
+    cl = ClientState()
+    cl.mviewangles[1] = [0.0, 10.0, 0.0]       # previous header
+    cl.mviewangles[0] = [0.0, 50.0, 0.0]       # latest header
+    va = cl.lerp_viewangles(0.5)
+    assert abs(va[1] - 30.0) < 1e-6            # halfway between 10 and 50
+    va0 = cl.lerp_viewangles(0.0)
+    assert abs(va0[1] - 10.0) < 1e-6          # frac 0 -> previous
+    # wrap the short way: 350 -> 10 goes forward through 0, not backward 340 deg
+    cl.mviewangles[1] = [0.0, 350.0, 0.0]
+    cl.mviewangles[0] = [0.0, 10.0, 0.0]
+    vw = cl.lerp_viewangles(0.5)
+    assert abs((vw[1] % 360.0) - 0.0) < 1e-6   # halfway = 360 == 0, not 180
+
+
 if __name__ == "__main__":
+    test_demo_view_angles_interpolate()
     test_parse_time_and_lightstyle()
     test_baseline_then_update_delta()
     test_intermission_no_payload()

@@ -50,6 +50,11 @@ class ClientState:
         self.model_precache = [""]
         self.sound_precache = [""]
         self.viewangles = [0.0, 0.0, 0.0]
+        # the last two demo-frame header viewangles, lerped each render frame so
+        # the demo camera doesn't snap at the message cadence (cl.mviewangles in
+        # WinQuake; V_CalcRefdef interpolates them like entity origins)
+        self.mviewangles = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        self.lerp_frac = 0.0         # fraction relink used this frame (for views)
         self.viewentity = 0
         self.view_height = P.DEFAULT_VIEWHEIGHT
         self.punchangle = [0.0, 0.0, 0.0]
@@ -344,11 +349,28 @@ class ClientState:
             return 1.0
         return frac
 
+    def lerp_viewangles(self, frac):
+        """Interpolate the demo camera angles between the last two demo-frame
+        headers (mviewangles[1] -> [0]) by `frac`, taking the short way around
+        each axis (180-degree wrap), like the entity angle lerp in relink. This
+        is what keeps demo playback smooth instead of snapping per message."""
+        new, old = self.mviewangles[0], self.mviewangles[1]
+        out = []
+        for j in range(3):
+            d = new[j] - old[j]
+            if d > 180:
+                d -= 360
+            elif d < -180:
+                d += 360
+            out.append(old[j] + frac * d)
+        return out
+
     def relink(self, dt=0.0):
         """CL_RelinkEntities (cl_parse.c:442): interpolate every updated entity
         between its last two messages (snap on teleport / forcelink), lerp the
         player velocity, then advance the client particle system."""
         frac = self.lerp_point()
+        self.lerp_frac = frac        # reused by lerp_viewangles for the demo camera
         for i in range(3):
             self.velocity[i] = (self.mvelocity[1][i]
                                 + frac * (self.mvelocity[0][i]

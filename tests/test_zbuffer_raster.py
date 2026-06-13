@@ -21,7 +21,9 @@ import sys
 
 from quake.pak import Pak
 from quake.bsp import Bsp
-from quake.render import Renderer, poly_spans, plane_gradients
+from quake.mdl import Mdl
+import quake.render as render_mod
+from quake.render import Renderer, poly_spans, plane_gradients, screen_backface
 
 PAK = "quake-shareware/id1/pak0.pak"
 GOLDEN_DIR = "quake-shareware/goldens"
@@ -232,6 +234,92 @@ def test_surface_cache_reuse_and_invalidation():
 
 # ---- golden-frame characterisation ----
 
+# ---- alias-model backface culling (the v_nail.mdl z-fight) ----
+
+def test_screen_backface_winding():
+    # Screen coords are y-down. WinQuake (d_polyse.c) culls a triangle when the
+    # signed area is >= 0 (clockwise). A CCW-in-y-down triangle is kept.
+    front = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))   # cross = -1 -> drawn
+    back = ((0.0, 0.0), (0.0, 1.0), (1.0, 0.0))    # reversed -> culled
+    assert screen_backface(*front) is False
+    assert screen_backface(*back) is True
+    # a degenerate (collinear) triangle has zero area -> treated as back-facing
+    assert screen_backface((0.0, 0.0), (1.0, 1.0), (2.0, 2.0)) is True
+
+
+def test_v_nail_has_two_sided_coincident_faces():
+    """v_nail.mdl (unlike every other view model) is built with two-sided flat
+    faces: pairs of triangles on the SAME three vertices, opposite winding, each
+    mapping a different skin half. They are why it needs backface culling -- drawn
+    together they z-fight (the shimmering grey). Guards that data assumption."""
+    pak = Pak(PAK)
+    pal = pak.read("gfx/palette.lmp")
+    palette = [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]) for i in range(256)]
+
+    def coincident_pairs(name):
+        m = Mdl(pak.read(name), palette)
+        seen = {}
+        for t in m.tris:
+            k = tuple(sorted(t))
+            seen[k] = seen.get(k, 0) + 1
+        return sum(v - 1 for v in seen.values() if v > 1)
+
+    assert coincident_pairs("progs/v_nail.mdl") == 6, "v_nail fixture changed"
+    # the others have none -- which is why only the nailgun showed the bug
+    for other in ("progs/v_shot.mdl", "progs/v_nail2.mdl", "progs/v_rock2.mdl"):
+        assert coincident_pairs(other) == 0, other
+
+
+def test_viewmodel_backface_cull_kills_zfight_shimmer():
+    """The nailgun's two-sided faces z-fought: as the view shifts sub-pixel, the
+    front/back skin halves swap per pixel and shimmer grey. With WinQuake's
+    per-triangle backface cull only one of each pair draws, so the model is
+    stable. Measure model-region pixel flicker across a small yaw sweep with the
+    cull on vs forcibly off and require the cull to cut it by a wide margin."""
+    pak = Pak(PAK)
+    pb = pak.read("gfx/palette.lmp")
+    palette = [(pb[i * 3], pb[i * 3 + 1], pb[i * 3 + 2]) for i in range(256)]
+    colormap = pak.read("gfx/colormap.lmp")[:64 * 256]
+    b = Bsp(pak.read("maps/e1m1.bsp"))
+    r = Renderer(b, palette, colormap)
+    r.resize(800, 600)
+    nail = Mdl(pak.read("progs/v_nail.mdl"), palette)
+    verts = nail.frame_verts(0, 0.0)
+    origin, yaw = b.find_spawn()
+    eye = (origin[0], origin[1], origin[2] + 22.0)
+    styles = [256] * 64
+
+    def model_flicker(cull):
+        # disabling the cull reproduces the pre-fix renderer
+        if not cull:
+            saved = render_mod.screen_backface
+            render_mod.screen_backface = lambda a, b_, c: False
+        try:
+            flips = 0
+            prev_fb = prev_mask = None
+            for k in range(6):
+                dy = k * 0.05
+                (fb, w, h), _ = r.render_zbuffer(
+                    eye, yaw + dy, 0.0, textured=True, lightstyles=styles,
+                    time=0.5, view_model=(nail, verts, eye, (0.0, yaw + dy, 0.0)))
+                (bg, _, _), _ = r.render_zbuffer(
+                    eye, yaw + dy, 0.0, textured=True, lightstyles=styles, time=0.5)
+                fb = bytes(fb); bg = bytes(bg)
+                mask = {i for i in range(w * h) if fb[i] != bg[i]}   # model pixels
+                if prev_fb is not None:
+                    flips += sum(1 for i in (mask & prev_mask) if fb[i] != prev_fb[i])
+                prev_fb, prev_mask = fb, mask
+            return flips
+        finally:
+            if not cull:
+                render_mod.screen_backface = saved
+
+    off = model_flicker(False)
+    on = model_flicker(True)
+    assert on * 5 < off, \
+        f"backface cull did not quell the nailgun z-fight (flips on={on} off={off})"
+
+
 def _renderer():
     pak = Pak(PAK)
     pb = pak.read("gfx/palette.lmp")
@@ -324,5 +412,8 @@ if __name__ == "__main__":
     test_plane_gradients_degenerate_returns_none()
     test_surface_cache_matches_direct_math()
     test_surface_cache_reuse_and_invalidation()
+    test_screen_backface_winding()
+    test_v_nail_has_two_sided_coincident_faces()
+    test_viewmodel_backface_cull_kills_zfight_shimmer()
     test_golden_frames()
     print("OK")

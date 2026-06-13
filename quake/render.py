@@ -157,6 +157,20 @@ def plane_gradients(sx, sy, attrs):
     return out
 
 
+def screen_backface(p0, p1, p2):
+    """True if the projected triangle p0,p1,p2 (screen (x, y) tuples, y down) is
+    back-facing and should be culled. This is WinQuake's alias-model cull
+    (d_polyse.c D_PolysetDraw / D_DrawNonSubdiv): the signed area of the screen
+    triangle, culled when >= 0 (clockwise winding). Quake culls *every* alias
+    triangle this way -- the per-triangle facesfront flag only picks the skin
+    seam half, it does not gate drawing. Without this, a model's two-sided
+    coincident faces (a front triangle + a back triangle on the same 3 verts,
+    each mapping a different skin half -- e.g. v_nail.mdl's barrels) both draw,
+    z-fight, and shimmer grey as the view shifts sub-pixel."""
+    (x0, y0), (x1, y1), (x2, y2) = p0, p1, p2
+    return (y0 - y1) * (x0 - x2) - (x0 - x1) * (y0 - y2) >= 0.0
+
+
 def lightstyle_values(styles, t):
     """Current brightness (0..550, 256 = normal) for light styles 0..63 from
     {index: animation_string} at time t. Quake cycles the string at 10 Hz and
@@ -2244,6 +2258,13 @@ class Renderer:
             br, bg, bb = base
             lx, ly, lz = ALIAS_LIGHT
             for a, b, c in mdl.tris:
+                ca, cb, cc = cam[a], cam[b], cam[c]
+                caz, cbz, ccz = ca[2], cb[2], cc[2]
+                if caz >= NEAR and cbz >= NEAR and ccz >= NEAR and screen_backface(
+                        (hw + ca[0] * focal / caz, hh - ca[1] * yfocal / caz),
+                        (hw + cb[0] * focal / cbz, hh - cb[1] * yfocal / cbz),
+                        (hw + cc[0] * focal / ccz, hh - cc[1] * yfocal / ccz)):
+                    continue                     # back-facing: cull (WinQuake)
                 ax, ay, az = wpos[a]
                 ux1, uy1, uz1 = wpos[b][0] - ax, wpos[b][1] - ay, wpos[b][2] - az
                 vx1, vy1, vz1 = wpos[c][0] - ax, wpos[c][1] - ay, wpos[c][2] - az
@@ -2283,6 +2304,13 @@ class Renderer:
             tris = mdl.tris; tri_st = mdl.tri_st
             for ti in range(len(tris)):
                 a, b, c = tris[ti]
+                ca, cb, cc = cam[a], cam[b], cam[c]
+                caz, cbz, ccz = ca[2], cb[2], cc[2]
+                if caz >= NEAR and cbz >= NEAR and ccz >= NEAR and screen_backface(
+                        (hw + ca[0] * focal / caz, hh - ca[1] * yfocal / caz),
+                        (hw + cb[0] * focal / cbz, hh - cb[1] * yfocal / cbz),
+                        (hw + cc[0] * focal / ccz, hh - cc[1] * yfocal / ccz)):
+                    continue                     # back-facing: cull (WinQuake)
                 (s0, t0), (s1, t1), (s2, t2) = tri_st[ti]
                 ax, ay, az = wpos[a]
                 ux1, uy1, uz1 = wpos[b][0] - ax, wpos[b][1] - ay, wpos[b][2] - az
@@ -2295,7 +2323,6 @@ class Renderer:
                 shi = int(wl * shf)                  # world light * facing
                 if shi > 255:
                     shi = 255
-                ca, cb, cc = cam[a], cam[b], cam[c]
                 # a 1x1 lightmap carries the per-triangle light into raster_poly_tex
                 lm = (1, 1, 0.0, 0.0, bytes((shi,)))
                 raster_poly_tex([(ca[0], ca[1], ca[2], s0, t0),

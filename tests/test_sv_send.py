@@ -82,10 +82,44 @@ def test_build_datagram_writes_svc_time():
     assert w.data[0] == P.svc_time, "datagram must start with svc_time (7)"
 
 
+def test_clientdata_roundtrips_health():
+    from quake.msg import MsgWriter, MsgReader
+    from quake.sv_send import write_clientdata_to_message
+    from quake.cl_parse import ClientState
+    sv = _boot()
+    w = MsgWriter()
+    write_clientdata_to_message(sv, w)       # writes svc_clientdata + payload
+    r = MsgReader(bytes(w.data))
+    assert r.byte() == P.svc_clientdata
+    cl = ClientState()
+    cl.parse_clientdata(r)
+    assert cl.stats[0] == sv.player_health()  # STAT_HEALTH
+    assert r.at_end, "clientdata writer/parser byte counts disagree"
+
+
+def test_build_datagram_parses_into_cl():
+    from quake.msg import MsgWriter, MsgReader
+    from quake.sv_send import build_datagram, write_serverinfo
+    from quake.cl_parse import ClientState
+    sv = _boot()
+    sv.create_baseline()
+    cl = ClientState()
+    # signon first: precache lists + baselines so the client can resolve models
+    sw = MsgWriter(); write_serverinfo(sv, sw)
+    cl.parse_message(MsgReader(bytes(sw.data)))
+    assert cl.model_precache[1].endswith(".bsp")      # world model
+    # then a frame datagram
+    w = MsgWriter(); build_datagram(sv, w)
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert any(e and e.model for e in cl.entities), "no entity linked"
+
+
 if __name__ == "__main__":
     test_baselines_snapshot_spawned_entities()
     test_write_entities_emits_parseable_updates()
     test_clientdata_writes_svc_id()
     test_serverinfo_writes_svc_id()
     test_build_datagram_writes_svc_time()
+    test_clientdata_roundtrips_health()
+    test_build_datagram_parses_into_cl()
     print("OK")

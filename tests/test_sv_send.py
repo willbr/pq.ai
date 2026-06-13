@@ -6,6 +6,7 @@ The full build->parse round-trips (clientdata/datagram/serverinfo) land once
 quake/cl_parse.py exists; until then these assert the writer emits well-formed
 bytes (right svc id, non-empty payload)."""
 import _bootstrap  # noqa: F401
+from quake import protocol as P
 from quake.pak import Pak
 from quake.bsp import Bsp
 from quake.progs import Progs
@@ -56,7 +57,7 @@ def test_clientdata_writes_svc_id():
     w = MsgWriter()
     write_clientdata_to_message(sv, w)
     assert w.data, "no clientdata bytes written"
-    assert w.data[0] == 15, "clientdata must start with svc_clientdata (15)"
+    assert w.data[0] == P.svc_clientdata, "clientdata must start with svc_clientdata (15)"
 
 
 def test_serverinfo_writes_svc_id():
@@ -67,7 +68,7 @@ def test_serverinfo_writes_svc_id():
     w = MsgWriter()
     write_serverinfo(sv, w)
     assert w.data, "no serverinfo bytes written"
-    assert w.data[0] == 11, "serverinfo must start with svc_serverinfo (11)"
+    assert w.data[0] == P.svc_serverinfo, "serverinfo must start with svc_serverinfo (11)"
 
 
 def test_build_datagram_writes_svc_time():
@@ -78,7 +79,7 @@ def test_build_datagram_writes_svc_time():
     w = MsgWriter()
     build_datagram(sv, w)
     assert w.data, "no datagram bytes written"
-    assert w.data[0] == 7, "datagram must start with svc_time (7)"
+    assert w.data[0] == P.svc_time, "datagram must start with svc_time (7)"
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ SV_SendClientDatagram and the serverinfo signon. Reads the server's QuakeC VM
 edicts and emits a protocol-15 message via quake.msg.MsgWriter. The client
 half is quake/cl_parse.py. Functions take a Server so they can stay out of the
 already-large sv.py."""
+import math
 from dataclasses import dataclass
 
 from . import protocol as P
@@ -161,8 +162,7 @@ def write_clientdata_to_message(sv, w):
         bits |= P.SU_WEAPONFRAME
     if armor:
         bits |= P.SU_ARMOR
-    if weapon:
-        bits |= P.SU_WEAPON
+    bits |= P.SU_WEAPON                          # always set (the C guard is commented out) -- sv_main.c
 
     w.byte(P.svc_clientdata)
     w.short(bits)
@@ -174,7 +174,7 @@ def write_clientdata_to_message(sv, w):
         if bits & (P.SU_PUNCH1 << i):
             w.char(int(punch[i]))
         if bits & (P.SU_VELOCITY1 << i):
-            w.char(int(vel[i]) // 16)         # packed /16, sv_main.c
+            w.char(math.trunc(vel[i] / 16))   # packed /16, truncate toward zero -- sv_main.c
     w.long(items)
     if bits & P.SU_WEAPONFRAME:
         w.byte(weaponframe)
@@ -239,7 +239,7 @@ def write_reliable(sv, w):
             w.byte(idx)
             w.string(patt)
     cm = sv.center_msg
-    if cm and cm is not getattr(sv, "_sent_center", None):
+    if cm and cm is not sv._sent_center:
         sv._sent_center = cm
         w.byte(P.svc_centerprint)
         w.string(cm[0])
@@ -249,10 +249,9 @@ def write_reliable(sv, w):
             w.angle(a)
         sv._setangle = None
     if sv.intermission_active():
-        if not getattr(sv, "_sent_intermission", False):
+        if not sv._sent_intermission:
             sv._sent_intermission = True
             w.byte(P.svc_intermission)
-            w.string("")
 
 
 def build_datagram(sv, w):

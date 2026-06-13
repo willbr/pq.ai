@@ -304,6 +304,8 @@ class Server:
         self._prev_stats = {}         # SV_UpdateToReliableMessages stat diffing
         self._prev_lightstyles = {}   # svc_lightstyle change detection
         self._setangle = None         # pending svc_setangle (teleport fixangle)
+        self._sent_center = None      # last centerprint msg sent (dedup)
+        self._sent_intermission = False  # intermission byte sent once per level
         self.cvars = {"skill": float(skill), "deathmatch": 0.0, "coop": 0.0,
                       "teamplay": 0.0, "temp1": 0.0, "noexit": 0.0,
                       "samelevel": 0.0, "sv_gravity": SV_GRAVITY}

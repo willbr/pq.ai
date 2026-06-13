@@ -1326,11 +1326,15 @@ class Client:
         hud_rgb = HUD_GREEN
         if self.show_prof:
             # previous completed frame's smoothed section ms (server/render/
-            # raster/present) as a bar chart. present is timed in the frontend
-            # and frame_end() rolls the buckets, so the figures lag one frame
-            # uniformly. The total row (top of the chart) is tinted by frame
-            # budget via a per-line colour list; every other line stays green.
+            # raster/present) as a bar chart, then a sparkline of recent raw
+            # frame totals. present is timed in the frontend and frame_end()
+            # rolls the buckets, so the figures lag one frame uniformly. The
+            # total row (top of the chart) is tinted by frame budget via a
+            # per-line colour list; every other line stays green.
             prof = PROFILER.bars()
+            graph = PROFILER.graph()
+            if graph:
+                prof += "\n" + graph
             base = hud_str.count("\n") + 1
             colors = [HUD_GREEN] * (base + prof.count("\n") + 1)
             for i, ln in enumerate(prof.split("\n")):

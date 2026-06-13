@@ -87,6 +87,36 @@ def test_lift_carries_a_rider_standing_on_top():
     assert abs(sv.player_carry[2] - 10.0) < 0.5, "carry not reported to the camera"
 
 
+def test_lift_carries_a_dead_body_on_top():
+    """A monster corpse (SOLID_NOT) resting on a lift must ride it up, like in
+    real Quake. WinQuake's SV_PushMove has no early SOLID_NOT skip: an entity
+    standing on the pusher (FL_ONGROUND && groundentity == pusher) is always
+    carried; SOLID_NOT is only special-cased later, in the block path. The port
+    had added a top-of-loop `solid == SOLID_NOT: continue`, so dead bodies were
+    left behind by the lift."""
+    sv = _boot()
+    vm = sv.vm
+    o = lambda n: _off(sv, n)
+    plat = _a_plat(sv)
+    amn = vm.fget_v(plat, o("absmin")); amx = vm.fget_v(plat, o("absmax"))
+    cx = (amn[0] + amx[0]) * 0.5; cy = (amn[1] + amx[1]) * 0.5
+    # a soldier corpse sitting on the plat's top
+    corpse = vm.alloc_edict()
+    vm.fset_f(corpse, o("movetype"), 4.0)        # MOVETYPE_STEP (as monsters)
+    vm.fset_f(corpse, o("solid"), 0.0)           # SOLID_NOT (dead body)
+    vm.fset_v(corpse, o("mins"), (-16.0, -16.0, -24.0))
+    vm.fset_v(corpse, o("maxs"), (16.0, 16.0, 40.0))
+    vm.fset_v(corpse, o("origin"), (cx, cy, amx[2] + 24.0))
+    sv._link_abs(corpse)
+    vm.fset_f(corpse, o("flags"), 512.0)         # FL_ONGROUND
+    vm.fset_i(corpse, o("groundentity"), plat)
+    z0 = vm.fget_v(corpse, o("origin"))[2]
+    vm.fset_v(plat, o("velocity"), (0.0, 0.0, 100.0))   # rise
+    sv._push_move(plat, 0.1)
+    z1 = vm.fget_v(corpse, o("origin"))[2]
+    assert abs((z1 - z0) - 10.0) < 0.5, f"dead body not carried up with the lift ({z1 - z0})"
+
+
 def test_rising_lift_carries_a_walking_monster():
     """A monster standing on a rising lift must ride it up even while its own AI
     runs a movestep that same frame. WinQuake relinks the pusher (SV_LinkEdict)
@@ -222,6 +252,7 @@ def test_descending_pusher_does_not_shove_player_down_through_gaps():
 if __name__ == "__main__":
     test_door_push_never_leaves_player_out_of_bounds()
     test_lift_carries_a_rider_standing_on_top()
+    test_lift_carries_a_dead_body_on_top()
     test_rising_lift_carries_a_walking_monster()
     test_mover_does_not_drag_a_clear_bystander()
     test_descending_pusher_crushes_a_pinned_player()

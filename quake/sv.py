@@ -780,8 +780,10 @@ class Server:
             mt = int(vm.fget_f(e, fmt))
             if mt in (MOVETYPE_PUSH, MOVETYPE_NONE, MOVETYPE_NOCLIP):
                 continue
-            if int(vm.fget_f(e, fsol)) == SOLID_NOT:
-                continue
+            # NOTE: SV_PushMove does NOT skip SOLID_NOT here -- a corpse standing
+            # on the pusher rides it up like anything else (the e1m1 dead-grunt-
+            # on-the-lift case). SOLID_NOT is only special-cased in the block path
+            # below, where Quake squishes a corpse rather than blocking the mover.
             # carried if standing on the mover; otherwise only if the mover's new
             # position actually penetrates it (bbox overlap THEN a real hull test
             # against the mover's brush), like SV_PushMove's two cases. The hull
@@ -807,6 +809,12 @@ class Server:
             # and can't clear is blocked.
             if not self._stuck_in_solids(e, num) and not self._penetrates_pusher(e, num):
                 moved.append((e, old))        # pushed/carried fine
+                continue
+            # a corpse/trigger never blocks a pusher: WinQuake leaves it at the
+            # pushed spot (shrinking its box to fit) rather than firing .blocked,
+            # so a door squishes a dead body instead of reversing off it.
+            if int(vm.fget_f(e, fsol)) in (SOLID_NOT, SOLID_TRIGGER):
+                moved.append((e, old))
                 continue
             # blocked there -- if it can stay where it was, leave it (no carry).
             # "Can stay" means clear of all solids and the pusher: a roof

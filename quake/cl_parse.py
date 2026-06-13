@@ -366,8 +366,8 @@ class SceneFromClient:
 
     The world entity set this presents must match what the old direct-from-sv
     path produced: every live entity with a model, MINUS the player's own body
-    (R_DrawEntitiesOnList skips cl.viewentity in first person -- WinQuake
-    gl_rmain.c:312) and MINUS the world (modelindex 1, the maps/*.bsp), which is
+    (CL_RelinkEntities skips cl.viewentity in first person -- WinQuake
+    cl_main.c:610) and MINUS the world (modelindex 1, the maps/*.bsp), which is
     drawn by the BSP walker, not as an entity. Entities with no model
     (modelindex 0) never carry a precache name and so are skipped naturally."""
 
@@ -376,7 +376,7 @@ class SceneFromClient:
 
     def _world_alias_sprite(self, ext):
         """Live entities whose model has the given extension, excluding the
-        player's own body (viewentity). Yields (num, ClEntity)."""
+        player's own body (viewentity). Yields ClEntity."""
         cl = self.cl
         ve = cl.viewentity
         for num, e in enumerate(cl.entities):

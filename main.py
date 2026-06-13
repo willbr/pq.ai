@@ -800,7 +800,9 @@ def select_frontend(argv, platform):
     its message loop and grabs the mouse natively; `--tk` forces the tkinter
     frontend, which is also the default everywhere else."""
     args = [a for a in argv if a != "--tk"]
-    mapname = args[0] if args else "e1m1"
+    # no map -> "start": boots the title demo loop (demo1/2/3). An explicit map
+    # (python main.py e1m1) still loads a live level.
+    mapname = args[0] if args else "start"
     if "--tk" in argv:
         return "tk", mapname
     if platform == "win32":

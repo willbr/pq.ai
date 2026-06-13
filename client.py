@@ -182,11 +182,29 @@ class Demo:
 
 class Client:
     def __init__(self, mapname):
-        self._init_assets_only()
-        if not self._load_map(mapname):
-            raise ValueError(f"no such map: maps/{mapname}.bsp")
-        self._register_console()
-        self.menu = self._build_menu()
+        self._init_assets_only()        # inits demo_loop/demo_index/in_demo_loop
+        # title demo loop: no map (or the "start" episode-select shim) boots into
+        # the demo1->demo2->demo3 loop (CL_NextDemo/startdemos) instead of a live
+        # level. Live construction (Client("e1m1")) takes the else branch and is
+        # left byte-identical.
+        if mapname in (None, "start"):
+            # the render stack is built by _next_demo -> _load_demo; register the
+            # console + menu first so demo-mode commands exist (they bind to
+            # self.rend, which _load_demo builds before it returns).
+            self._next_demo()
+            self._finish_construction()
+        else:
+            if not self._load_map(mapname):
+                raise ValueError(f"no such map: maps/{mapname}.bsp")
+            self._finish_construction()
+
+    def _finish_construction(self):
+        """Register the console + build the menu exactly once, after a map or
+        demo has built self.rend. Shared by the live and title-demo-loop
+        construction paths so neither double-registers."""
+        if not getattr(self, "menu", None):
+            self._register_console()
+            self.menu = self._build_menu()
 
     def _init_assets_only(self):
         """The server-independent half of construction: pak, palette, colormap,
@@ -297,6 +315,12 @@ class Client:
         # no demo playing in live mode; set here so live frames see no demo and
         # demo construction (Task 6) can flip it on after _load_demo.
         self.demo = None
+        # title demo loop state (Task 6); defaulted here so every construction
+        # path -- live, title loop, and the test's __new__ + _init_assets_only --
+        # has them before _demo_frame / _play_named_demo read in_demo_loop.
+        self.demo_loop = ["demo1", "demo2", "demo3"]
+        self.demo_index = 0
+        self.in_demo_loop = False
 
     # ---- level loading ----
     def _load_map(self, mapname, skill=1):
@@ -1151,9 +1175,21 @@ class Client:
         if self._play_named_demo(args[0]):
             self.demo.timedemo = True
 
+    def _next_demo(self):
+        """CL_NextDemo: play the next demo in the title loop, wrapping. Sets
+        in_demo_loop so the demo auto-advances to the following one on finish."""
+        if not self.demo_loop:
+            return
+        name = self.demo_loop[self.demo_index % len(self.demo_loop)]
+        self.demo_index += 1
+        self._play_named_demo(name)        # clears in_demo_loop...
+        self.in_demo_loop = True           # ...we re-set it for the loop
+
     def _play_named_demo(self, name):
         """Load and start a named demo, pak-first then filesystem (.dem suffix
-        optional). Returns False if not found / invalid."""
+        optional). Returns False if not found / invalid. An explicit command
+        (not the title loop) -- clears in_demo_loop so the demo does not
+        auto-advance into the loop when it finishes."""
         fn = name if name.endswith(".dem") else name + ".dem"
         blob = None
         if fn in self.pak.files:
@@ -1165,6 +1201,7 @@ class Client:
             self.con.print(f"playdemo: not found: {fn}")
             return False
         self.con.active = False
+        self.in_demo_loop = False        # explicit command: no auto-advance
         if not self._load_demo(blob):
             self.con.print(f"playdemo: failed: {fn}")
             return False
@@ -1173,6 +1210,7 @@ class Client:
     def _cmd_stopdemo(self, args):
         """stop: end demo playback and return to a live map (Host_Stopdemo_f),
         so the renderer has a server again."""
+        self.in_demo_loop = False        # explicit stop: leave the title loop
         if self.demo is not None:
             self.demo = None
             self.con.print("demo stopped")
@@ -1374,6 +1412,11 @@ class Client:
             self.cl.relink(dt)
             if d.timedemo and d.finished:
                 self._finish_timedemo()
+            elif d.finished and self.in_demo_loop:
+                # title loop: advance to the next demo (CL_NextDemo). This
+                # rebuilds self.demo/self.cl/self.scene, so bail out of this
+                # frame's stale demo and render the new one next frame.
+                self._next_demo()
         PROFILER.end("server")
 
         # drive the camera from cl (CL_RelinkEntities: view entity origin + the

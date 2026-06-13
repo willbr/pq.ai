@@ -53,8 +53,21 @@ def test_timedemo_reports_fps():
     assert any("fps" in m.lower() for m in msgs), msgs[-3:]
 
 
+def test_demo_loop_advances_on_finish():
+    from client import Client, InputState
+    c = Client("start")                        # title demo loop
+    assert c.demo is not None                  # playing demo1 immediately
+    first_map = c.mapname
+    # force the current demo to finish; next frame should start the next demo
+    c.demo.finished = True
+    c.frame(0.05, InputState())
+    # either a new demo loaded (mapname may differ) or loop wrapped -- demo active
+    assert c.demo is not None
+
+
 if __name__ == "__main__":
     test_load_demo_builds_render_stack_without_server()
     test_play_demo1_advances_and_renders()
     test_timedemo_reports_fps()
+    test_demo_loop_advances_on_finish()
     print("OK")

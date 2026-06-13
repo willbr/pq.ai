@@ -122,9 +122,11 @@ class ClientState:
             # NQ protocol-15: svc_intermission carries NO payload. (Reading a
             # string here would consume the next message's bytes and desync.)
             self.intermission = True
+            self.completed_time = self.mtime[0]    # cl.completed_time = cl.time
         elif cmd == P.svc_finale:
             # svc_finale DOES carry the finale text string.
             self.intermission = True
+            self.completed_time = self.mtime[0]    # cl.completed_time = cl.time
             self.center_msg = r.string()
             self.center_time = self.mtime[0]
         elif cmd == P.svc_setpause:
@@ -174,7 +176,9 @@ class ClientState:
             for _ in range(3):
                 r.coord()                          # inflictor origin (V_ParseDamage)
         elif cmd == P.svc_cutscene:
-            self.center_msg = r.string()           # finale text
+            self.intermission = True
+            self.completed_time = self.mtime[0]    # cl.completed_time = cl.time
+            self.center_msg = r.string()           # cutscene text
             self.center_time = self.mtime[0]
         else:
             raise ValueError(f"unknown svc {cmd} at byte {r.pos}")

@@ -27,8 +27,9 @@ def test_other_platforms_are_tk():
 
 
 def test_default_map_when_none_given():
-    assert main.select_frontend([], "win32") == ("gdi", "e1m1")
-    assert main.select_frontend(["--tk"], "darwin") == ("tk", "e1m1")
+    # no map -> "start": boots the title demo loop (demo1/2/3).
+    assert main.select_frontend([], "win32") == ("gdi", "start")
+    assert main.select_frontend(["--tk"], "darwin") == ("tk", "start")
 
 
 if __name__ == "__main__":

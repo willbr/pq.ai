@@ -128,7 +128,10 @@ def test_console_renderframe_payload_when_active():
     c.con.active = True
     for ch in "map":            # type into the console line
         c.con.key_char(ch)
-    rf = c.frame(0.016, InputState())
+    # the console payload is the wire/flat overlay path; in zbuf it's composited
+    # into the framebuffer instead. Drop into flat mode (toggle zbuf off) to
+    # exercise the payload contract.
+    rf = c.frame(0.016, InputState(commands=frozenset({"zbuf"})))
     assert rf.console is not None
     lines, input_line, cursor_col = rf.console
     assert isinstance(lines, list)

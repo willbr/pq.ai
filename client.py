@@ -950,6 +950,67 @@ class Client:
     def _cmd_quit(self, args):
         self.quit_requested = True
 
+    def _composite_zbuf_ui(self, fb, vw, vh):
+        """zbuf mode: draw centerprint/intermission, console, and menu into the
+        framebuffer with the conchars font -- the real Quake bitmap UI, drawn
+        like the sbar -- instead of handing them to the frontend as OS-native
+        overlays. vw/vh are the view region (vh excludes the appended sbar rows).
+        Ports SCR_DrawCenterString, Con_DrawConsole/Con_DrawInput, and the
+        menu's M_Print/cursor spinner."""
+        cf = self.confont
+
+        # centerprint or the intermission stats panel, centered in the view.
+        ist = self.sv.intermission_stats() if self.intermission else None
+        block = None
+        if ist:
+            mins, secs = divmod(ist["time"], 60)
+            block = ("LEVEL COMPLETE\n\n"
+                     f"Time      {mins}:{secs:02d}\n"
+                     f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
+                     f"Kills     {ist['monsters']} / {ist['total_monsters']}")
+        else:
+            cm = self.sv.center_msg
+            if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
+                block = cm[0]
+        if block:
+            lines = block.split("\n")
+            y0 = int(0.35 * vh) - len(lines) * 4
+            for i, ln in enumerate(lines):
+                cf.text_centered(fb, vw, vw // 2, y0 + i * 8, ln)
+
+        # console: conback backdrop over the top ~40%, text + flashing cursor.
+        con = self.con
+        if con.active:
+            panel = vh * 2 // 5
+            blit_conback(fb, vw, vh, self.conback, panel)
+            con.width = max(20, vw // 8)
+            rows = max(1, panel // 8 - 2)
+            y = 0
+            for ln in con.view_lines(rows):
+                cf.text(fb, vw, 0, y, ln)
+                y += 8
+            cf.text(fb, vw, 0, y, "]" + con.input)
+            if int(self.sv.time * 4) & 1:               # Con_DrawInput cursor
+                cf.char(fb, vw, (con.cursor + 1) * 8, y, 11)
+
+        # menu: dim the view (Draw_FadeScreen), then title + rows; the selected
+        # row gets the spinning cursor (conchars 12/13).
+        if self.menu.active:
+            title, rows = self.menu.view()
+            fade_region(fb, vw, 0, 0, vw, vh)
+            cx = vw // 2
+            y = vh // 4
+            cf.text_centered(fb, vw, cx, y, title)
+            y += 16
+            col = cx - 80
+            for label, value, sel in rows:
+                if sel:
+                    cf.char(fb, vw, col - 16, y, 12 + (int(self.sv.time * 4) & 1))
+                cf.text(fb, vw, col, y, label)
+                if value:
+                    cf.text(fb, vw, cx + 16, y, value)
+                y += 8
+
     # ---- main loop ----
     def frame(self, dt, inp):
         """Advance one frame from `dt` seconds and `inp` intent, returning a
@@ -1161,14 +1222,15 @@ class Client:
                                                     particles=self.sv.particles)
             framebuffer = fbdata
             nprim = fbdata[1] * fbdata[2]
+            fb, vw, vh = fbdata                            # view region (pre-sbar)
             if self.rend.sbar_lines:
-                fb, vw, vh = fbdata
                 fb.extend(bytes(vw * self.rend.sbar_lines))   # the bar rows
                 full_h = vh + self.rend.sbar_lines
                 if st:
                     self.sbar.draw(fb, vw, full_h, st, self.sv.time,
                                    self.item_gettime, self.faceanimtime)
                 framebuffer = fbdata = (fb, vw, full_h)
+            self._composite_zbuf_ui(fb, vw, vh)           # conchars UI overlay
         elif self.mode == "flat" or self.wire_hidden:
             # flat shading, or hidden-line wireframe: both want the back-to-front
             # (painter's) polygon path so near faces occlude far ones. They differ
@@ -1250,27 +1312,31 @@ class Client:
         # intermission: Sbar_IntermissionOverlay's three stat rows -- completed
         # time (m:ss), secrets found/total, monsters killed/total -- centered over
         # the frozen end-of-level camera.
-        ist = self.sv.intermission_stats() if self.intermission else None
-        if ist:
-            mins, secs = divmod(ist["time"], 60)
-            panel = ("LEVEL COMPLETE\n\n"
-                     f"Time      {mins}:{secs:02d}\n"
-                     f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
-                     f"Kills     {ist['monsters']} / {ist['total_monsters']}")
-            overlays.append((w // 2, h // 3, panel, (255, 255, 0), "center"))
-
-        cm = self.sv.center_msg
-        if not ist and cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
-            overlays.append((w // 2, h // 3, cm[0], (255, 255, 0), "center"))
-
-        con = self.con
+        # In zbuf mode these were composited into the framebuffer by
+        # _composite_zbuf_ui; only the wire/flat overlay path emits them here.
         console = None
-        if con.active:
-            con.width = max(20, w // 9)           # ~9px per monospace cell at the HUD size
-            rows = max(1, (h * 2 // 5) // 16 - 1)  # panel is ~40% tall, ~16px lines
-            console = (con.view_lines(rows), "]" + con.input, con.cursor + 1)
+        menu = None
+        if self.mode != "zbuf":
+            ist = self.sv.intermission_stats() if self.intermission else None
+            if ist:
+                mins, secs = divmod(ist["time"], 60)
+                panel = ("LEVEL COMPLETE\n\n"
+                         f"Time      {mins}:{secs:02d}\n"
+                         f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
+                         f"Kills     {ist['monsters']} / {ist['total_monsters']}")
+                overlays.append((w // 2, h // 3, panel, (255, 255, 0), "center"))
 
-        menu = self.menu.view() if self.menu.active else None
+            cm = self.sv.center_msg
+            if not ist and cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
+                overlays.append((w // 2, h // 3, cm[0], (255, 255, 0), "center"))
+
+            con = self.con
+            if con.active:
+                con.width = max(20, w // 9)           # ~9px per monospace cell at the HUD size
+                rows = max(1, (h * 2 // 5) // 16 - 1)  # panel is ~40% tall, ~16px lines
+                console = (con.view_lines(rows), "]" + con.input, con.cursor + 1)
+
+            menu = self.menu.view() if self.menu.active else None
 
         return RenderFrame(mode=render_mode, segs=segs, polys=polys,
                            framebuffer=framebuffer, particles=particles,

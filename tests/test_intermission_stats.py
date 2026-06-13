@@ -105,7 +105,9 @@ def test_client_renders_intermission_overlay():
     sv.gset_f("killed_monsters", 15.0); sv.gset_f("total_monsters", 30.0)
     c.intermission = True
 
-    rf = c.frame(0.05, InputState())
+    # the panel is the wire/flat overlay path; zbuf composites it into the
+    # framebuffer. Toggle zbuf off (-> flat) in this frame to read the overlay.
+    rf = c.frame(0.05, InputState(commands=frozenset({"zbuf"})))
     panel = [o for o in rf.overlays if "LEVEL COMPLETE" in o[2]]
     assert panel, "intermission panel missing from overlays"
     x, y, text, rgb, anchor = panel[0]

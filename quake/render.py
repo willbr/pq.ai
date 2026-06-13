@@ -953,6 +953,7 @@ class Renderer:
         stale_bytes = len(ent[2]) if ent is not None else 0   # overwritten below
         PROFILER.begin("scache")
         self.scache_builds += 1
+        PROFILER.count("scache_builds")     # per-frame: a flush spikes this to hundreds
         lmw, lmh, smin, tmin, lux, _ = self.face_lm[fi]
         cw = lmw << 4
         ch = lmh << 4
@@ -1015,6 +1016,7 @@ class Renderer:
         if self._surf_cache_bytes > 64 * 1024 * 1024:   # crude bound: flush all
             self._surf_cache_map.clear()
             self._surf_cache_bytes = len(out)
+            PROFILER.count("cache_flush")   # next frame rebuilds every surface
         self._surf_cache_map[ckey] = ent
         PROFILER.end("scache")
         return ent
@@ -2566,26 +2568,39 @@ class Renderer:
         # resolve world + brush occlusion in one scanline sweep, then fill each
         # surviving span (write-only -- the stack already ordered them).
         PROFILER.begin("spanfill")
+        npix = nspans = nsurf = 0
         for surf in edges.scan():
             fh = surf.fill
             if fh is not None:
+                nsurf += 1
                 for (su, sv, scount) in surf.spans:
                     fh(su, sv, scount)
+                    npix += scount
+                    nspans += 1
         PROFILER.end("spanfill")
+        # the work behind spanfill: a per-span add (spans << pixels, so cheap).
+        # Lets ms/pixel be tracked -- whether a rising spanfill is more surface
+        # area on screen or a slower fill, which the timing alone can't say.
+        PROFILER.count("pixels", npix)
+        PROFILER.count("spans", nspans)
+        PROFILER.count("surfs", nsurf)
 
         # alias (.mdl) entities -- monsters, items
         PROFILER.begin("alias")
+        ntris = 0
         if alias_ents:
             for mdl, verts, org, ang in alias_ents:
                 r = mdl.boundingradius
                 if not self.box_in_pvs((org[0] - r, org[1] - r, org[2] - r),
                                        (org[0] + r, org[1] + r, org[2] + r), vis):
                     continue
+                ntris += len(mdl.tris)      # submitted (pre-backface-cull) workload
                 if textured and mdl.skin_idx is not None:
                     raster_alias_tex(mdl, verts, org, ang)
                 else:
                     raster_alias(mdl, verts, org, ang)
         PROFILER.end("alias")
+        PROFILER.count("tris", ntris)
 
         # external .bsp pickups (health/ammo/explosive boxes): convex, backface-
         # cull faces. Texture-mapped (textured=True) like the world, otherwise

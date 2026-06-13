@@ -8,9 +8,18 @@ stdlib and UI/OS-agnostic, so it imports cleanly from inside the `quake`
 package (`from .perf import PROFILER`) and from the root frontends
 (`from quake.perf import PROFILER`).
 
+Beyond durations, a frame can also record non-timing metrics: count() for work
+totals (spans filled, surfaces rebuilt, cache flushes) and gauge() for values
+(player position, scene counts, the map name). These never touch the HUD; they
+ride along in the CSV log as extra columns so a slow frame can be explained
+(scache_builds jumping to hundreds == a cache flush) and reproduced (where the
+player stood) rather than left as an anonymous slow row.
+
 Usage:
     with PROFILER.section("render"):
         ...                          # may nest another section() inside
+    PROFILER.count("scache_builds")  # work behind a section (accumulates)
+    PROFILER.gauge("map", "e1m1")    # per-frame value (overwrites)
     ...
     PROFILER.frame_end()             # once per frame: roll buckets into PROFILER.ms
 
@@ -60,9 +69,15 @@ class Profiler:
         self.total_ms = 0.0         # EMA-smoothed top-level total, milliseconds
         self.history = collections.deque(maxlen=HISTORY_LEN)  # raw total-ms per frame
         self._last_raw = {}         # this frame's raw section ms + "total"
+        self._gauges = {}           # name -> value set this frame (overwrite)
+        self._counts = {}           # name -> value accumulated this frame (additive)
+        self._metrics_names = []    # gauge/count names, first-seen order (CSV cols)
+        self._metrics_seen = set()  # registry dedup (per-frame dicts are cleared)
+        self._last_metrics = {}     # this frame's merged non-timing metrics
         self._log = None            # csv.writer while logging, else None
         self._log_file = None       # open file handle while logging
-        self._log_cols = []         # CSV column order (excludes the frame index)
+        self._log_cols = []         # CSV timing column order (excludes frame index)
+        self._log_metrics = []      # CSV non-timing (gauge/count) column order
         self._log_frame = 0         # rows written so far
 
     def begin(self, name):
@@ -82,6 +97,35 @@ class Profiler:
         self._depth -= 1
         if self._depth == 0:        # outermost block: counts toward the frame total
             self._frame_total += elapsed
+
+    def _register_metric(self, name):
+        # first sighting *ever* fixes the metric's CSV column order (gauges and
+        # counts share one namespace, like sections do); names seen after
+        # start_log simply won't get a column, matching how sections behave.
+        # Dedup against a permanent set, not the per-frame dicts (frame_end
+        # clears those, so they'd re-register the name every frame).
+        if name not in self._metrics_seen:
+            self._metrics_seen.add(name)
+            self._metrics_names.append(name)
+
+    def gauge(self, name, value):
+        """Record a per-frame scalar that is a *value*, not a duration: a player
+        position, a scene count already totalled by the caller, a mode flag, a
+        map name (strings are logged verbatim). Overwrites within the frame and
+        clears at frame_end. Logged as its own CSV column next to the timings,
+        so a slow frame can be correlated with where the player stood and what
+        was on screen -- not just how long each section took."""
+        self._register_metric(name)
+        self._gauges[name] = value
+
+    def count(self, name, n=1):
+        """Add to a per-frame counter -- spans filled, surfaces rebuilt, cache
+        flushes, alias triangles. Accumulates across the frame's many calls,
+        then resets. These name the *work* behind a timing section: a `scache`
+        spike reads as `scache_builds` jumping from a handful to hundreds, so a
+        full-cache flush is one column lookup instead of an inference."""
+        self._register_metric(name)
+        self._counts[name] = self._counts.get(name, 0) + n
 
     @contextmanager
     def section(self, name):
@@ -104,10 +148,18 @@ class Profiler:
         raw = {n: self._accum.get(n, 0.0) * 1000.0 for n in self.ms}
         raw["total"] = self._frame_total * 1000.0
         self._last_raw = raw
+        # merge the frame's non-timing metrics (counts then gauges -- gauges win
+        # a name clash, the later, more specific write); kept separate from raw
+        # so report()/bars(), which walk self.ms, never see them.
+        metrics = dict(self._counts)
+        metrics.update(self._gauges)
+        self._last_metrics = metrics
         self.history.append(raw["total"])
         if self._log is not None:
-            self._write_log_row(raw)
+            self._write_log_row(raw, metrics)
         self._accum.clear()
+        self._gauges.clear()
+        self._counts.clear()
         self._frame_total = 0.0
 
     def report(self):
@@ -164,20 +216,38 @@ class Profiler:
 
     def start_log(self, path, open_fn=open):
         """Begin per-frame CSV logging to `path`. Column order is fixed now from
-        the sections seen so far (`total` first, then first-seen section order) --
-        by in-level play that is every section. `open_fn` is an injectable seam
-        for tests. Header: frame,total,<sections...>."""
+        the sections and metrics seen so far (`total` first, then first-seen
+        section order, then first-seen gauge/count order) -- by in-level play
+        that is every section and metric. `open_fn` is an injectable seam for
+        tests. Header: frame,total,<sections...>,<metrics...>."""
         if self._log is not None:        # already logging: close the prior file first
             self.stop_log()
         self._log_file = open_fn(path, "w", newline="")
         self._log = csv.writer(self._log_file)
         self._log_cols = ["total"] + list(self.ms)
+        self._log_metrics = list(self._metrics_names)
         self._log_frame = 0
-        self._log.writerow(["frame"] + self._log_cols)
+        self._log.writerow(["frame"] + self._log_cols + self._log_metrics)
 
-    def _write_log_row(self, raw):
-        """Append one frame's raw ms as a CSV row (frame index first)."""
-        row = [self._log_frame] + [f"{raw.get(c, 0.0):.3f}" for c in self._log_cols]
+    def _fmt_metric(self, v):
+        """Format a metric for CSV: ints (counts) stay whole, floats get 3dp,
+        strings (map name) pass through, a metric absent this frame is blank."""
+        if v is None:
+            return ""
+        if isinstance(v, bool):          # bool is an int subclass: keep 0/1
+            return "1" if v else "0"
+        if isinstance(v, float):
+            return f"{v:.3f}"
+        if isinstance(v, int):
+            return str(v)
+        return str(v)
+
+    def _write_log_row(self, raw, metrics):
+        """Append one frame's raw ms + non-timing metrics as a CSV row (frame
+        index first)."""
+        row = [self._log_frame]
+        row += [f"{raw.get(c, 0.0):.3f}" for c in self._log_cols]
+        row += [self._fmt_metric(metrics.get(c)) for c in self._log_metrics]
         self._log.writerow(row)
         self._log_frame += 1
 

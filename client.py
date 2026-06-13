@@ -1314,6 +1314,17 @@ class Client:
                                           bsp_ents, roll=vroll)
             nprim = len(segs)
         PROFILER.end("render")
+        # scene context for the perf log: the real frame dt, where the player
+        # stood, and what was on screen. A logged spike can then be placed in
+        # the map and reproduced, instead of being an anonymous slow row.
+        PROFILER.gauge("dt", dt * 1000.0)
+        PROFILER.gauge("x", self.pos[0])
+        PROFILER.gauge("y", self.pos[1])
+        PROFILER.gauge("z", self.pos[2])
+        PROFILER.gauge("dlights", len(self.dlights))
+        PROFILER.gauge("particles", len(self.sv.particles))
+        PROFILER.gauge("ents", len(alias_ents) + len(brush_ents) + len(bsp_ents))
+        PROFILER.gauge("map", self.mapname)
 
         # ambient loops follow the listener leaf (S_UpdateAmbientSounds)
         if 0 <= leaf < len(self.bsp.leaf_ambients):

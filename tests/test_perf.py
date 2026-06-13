@@ -284,6 +284,59 @@ def test_logging_writes_header_and_raw_rows():
     assert lines[2] == "1,12.000,12.000", lines[2]
 
 
+def test_gauge_and_count_log_as_extra_columns():
+    """gauge()/count() metrics append their own CSV columns after the timing
+    sections: counts accumulate across the frame and reset, gauges overwrite
+    and clear, ints stay whole, floats get 3dp, strings pass through, and a
+    metric absent for a frame logs blank."""
+    class CaptureIO(io.StringIO):
+        name = "m.csv"
+        def close(self):
+            self.captured = self.getvalue()
+            super().close()
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=0.1)
+    # one frame so "a" (section) and the metric names are known before start_log
+    with p.section("a"):
+        clk.advance(5.0)
+    p.count("builds", 3)
+    p.count("builds")                 # accumulates -> 4 this frame
+    p.gauge("x", 1.5)
+    p.gauge("map", "e1m1")
+    p.frame_end()
+    buf = CaptureIO()
+    p.start_log("m.csv", open_fn=lambda path, mode, **kw: buf)
+    # frame 0: builds counts to 7, gauges set
+    p.count("builds", 7)
+    p.gauge("x", 2.0)
+    p.gauge("map", "e1m1")
+    with p.section("a"):
+        clk.advance(8.0)
+    p.frame_end()
+    # frame 1: no metrics set -> all blank (counts reset, gauges cleared)
+    with p.section("a"):
+        clk.advance(8.0)
+    p.frame_end()
+    p.stop_log()
+    lines = buf.captured.splitlines()
+    assert lines[0] == "frame,total,a,builds,x,map", lines[0]
+    assert lines[1] == "0,8.000,8.000,7,2.000,e1m1", lines[1]
+    assert lines[2] == "1,8.000,8.000,,,", lines[2]   # metrics cleared each frame
+
+
+def test_metrics_dont_leak_into_timing_readouts():
+    """A gauge/count must not appear in self.ms or the bars/report (those are
+    durations only)."""
+    p = Profiler()
+    with p.section("render"):
+        pass
+    p.count("builds", 5)
+    p.gauge("x", 9.0)
+    p.frame_end()
+    assert "builds" not in p.ms and "x" not in p.ms, p.ms
+    assert "builds" not in p.report() and "x" not in p.report()
+
+
 def test_stop_log_without_start_returns_none():
     p = Profiler()
     assert p.stop_log() is None
@@ -321,6 +374,8 @@ if __name__ == "__main__":
     test_graph_maps_totals_to_glyph_heights()
     test_graph_shows_only_last_width_frames()
     test_logging_writes_header_and_raw_rows()
+    test_gauge_and_count_log_as_extra_columns()
+    test_metrics_dont_leak_into_timing_readouts()
     test_stop_log_without_start_returns_none()
     test_double_start_log_closes_the_prior_file()
     print("OK")

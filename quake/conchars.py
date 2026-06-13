@@ -62,12 +62,14 @@ def load_qpic(lump):
 
 
 def blit_conback(fb, fbw, fbh, pic, lines):
-    """Draw_ConsoleBackground: stretch the conback pic across the framebuffer
-    (nearest-neighbour) and paint only the top `lines` rows -- the console
-    panel over the top of the scene."""
+    """Draw_ConsoleBackground: stretch the conback pic (nearest-neighbour) into
+    the top `lines`-row console panel, anchored to the panel's bottom so a
+    partly-open console shows the bottom of the pic (the logo/version), exactly
+    like Quake's `v = (conheight - lines + y)*200/conheight` row sampling."""
     pw, ph, px = pic
-    for dy in range(min(lines, fbh)):
-        sy = (dy * ph // fbh) * pw
+    lines = min(lines, fbh)
+    for dy in range(lines):
+        sy = ((fbh - lines + dy) * ph // fbh) * pw
         d = dy * fbw
         for dx in range(fbw):
             fb[d + dx] = px[sy + dx * pw // fbw]

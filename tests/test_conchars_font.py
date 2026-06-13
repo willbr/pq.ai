@@ -100,6 +100,17 @@ def test_blit_conback_fills_top_rows_only():
     assert all(fb[y * 4 + x] == 0 for y in range(2, 4) for x in range(4))
 
 
+def test_blit_conback_anchors_image_to_bottom():
+    # Draw_ConsoleBackground samples v=(conheight-lines+y)*ph/conheight, so a
+    # partly-open panel shows the BOTTOM of the conback (the logo/version), not
+    # the top. A 1x4 graduated pic into a 4-tall fb with a 2-row panel must show
+    # the bottom two source rows (30,40), anchored to the panel bottom.
+    pic = (1, 4, bytes([10, 20, 30, 40]))
+    fb = bytearray(4)
+    blit_conback(fb, 1, 4, pic, 2)
+    assert list(fb) == [30, 40, 0, 0]
+
+
 def test_fade_region_dithers_to_black():
     fb = bytearray([5] * (4 * 4))
     fade_region(fb, 4, 0, 0, 4, 4)

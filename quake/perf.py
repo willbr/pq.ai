@@ -167,6 +167,8 @@ class Profiler:
         the sections seen so far (`total` first, then first-seen section order) --
         by in-level play that is every section. `open_fn` is an injectable seam
         for tests. Header: frame,total,<sections...>."""
+        if self._log is not None:        # already logging: close the prior file first
+            self.stop_log()
         self._log_file = open_fn(path, "w", newline="")
         self._log = csv.writer(self._log_file)
         self._log_cols = ["total"] + list(self.ms)

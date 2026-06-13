@@ -289,6 +289,21 @@ def test_stop_log_without_start_returns_none():
     assert p.stop_log() is None
 
 
+def test_double_start_log_closes_the_prior_file():
+    """A second start_log without an intervening stop closes the first file
+    rather than leaking the handle."""
+    p = Profiler()
+    first = io.StringIO()
+    first.name = "first.csv"
+    p.start_log("first.csv", open_fn=lambda *a, **kw: first)
+    second = io.StringIO()
+    second.name = "second.csv"
+    p.start_log("second.csv", open_fn=lambda *a, **kw: second)
+    assert first.closed                       # prior file was closed
+    assert p._log_file is second
+    assert p.stop_log() == ("second.csv", 0)
+
+
 if __name__ == "__main__":
     test_section_accumulates_elapsed()
     test_same_name_sums_within_frame()
@@ -307,4 +322,5 @@ if __name__ == "__main__":
     test_graph_shows_only_last_width_frames()
     test_logging_writes_header_and_raw_rows()
     test_stop_log_without_start_returns_none()
+    test_double_start_log_closes_the_prior_file()
     print("OK")

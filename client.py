@@ -323,6 +323,9 @@ class Client:
         self.demo_loop = ["demo1", "demo2", "demo3"]
         self.demo_index = 0
         self.in_demo_loop = False
+        # active DemoWriter while `record` is running; None when not recording.
+        # The live loopback tees its per-frame datagram here (CL_WriteDemoMessage).
+        self.recording = None
 
     # ---- level loading ----
     def _load_map(self, mapname, skill=1):
@@ -1082,6 +1085,8 @@ class Client:
                              "logperf [file]: start/stop per-frame CSV perf logging "
                              "(file defaults to a timestamped perf-<ISO>.csv)")
         con.register_command("map", self._cmd_map, "map <name>: load a level")
+        con.register_command("record", self._cmd_record,
+                             "record <name> [map]: record live play to a .dem file")
         con.register_command("playdemo", self._cmd_playdemo,
                              "playdemo <name>: play a .dem file")
         con.register_command("timedemo", self._cmd_timedemo,
@@ -1161,6 +1166,39 @@ class Client:
         if self._load_map(args[0]):               # rebuilds rend/sv; prints its own miss
             self.con.print(f"loading {args[0]}")
 
+    def _cmd_record(self, args):
+        """record <name> [map]: start a fresh game on the map and capture the
+        live protocol-15 stream to <name>.dem (CL_Record_f). The signon is the
+        demo's first frame; each subsequent live frame's datagram is teed in the
+        loopback drive. `stop` finishes it."""
+        if len(args) < 1:
+            self.con.print("usage: record <name> [map]")
+            return
+        name = args[0]
+        mapname = args[1] if len(args) > 1 else self.mapname
+        # Host_Record_f loads the level: start a new game (default loadout, no
+        # sigils) like the `map` command -- this rebuilds sv + cl + the signon.
+        self.spawn_parms = None
+        self.serverflags = 0.0
+        if not self._load_map(mapname):
+            self.con.print(f"record: no such map: {mapname}")
+            return
+        path = name if name.endswith(".dem") else name + ".dem"
+        path = os.path.join(os.path.dirname(PAK_PATH), path)
+        try:
+            fp = open(path, "wb")
+        except OSError as e:
+            self.con.print(f"record: {e}")
+            return
+        from quake.demo import DemoWriter
+        self.recording = DemoWriter(fp, cdtrack="0")
+        # write the signon as the demo's first frame -- rebuild the bytes
+        # _load_map already parsed into cl (create_baseline ran in _load_map).
+        sw = MsgWriter()
+        write_serverinfo(self.sv, sw)
+        self.recording.write_frame((self.pitch, self.yaw, 0.0), bytes(sw.data))
+        self.con.print(f"recording to {path}")
+
     def _cmd_playdemo(self, args):
         """playdemo <name>: play a .dem file (CL_PlayDemo_f). Looks in the pak
         first (the shareware demos live there), then the filesystem."""
@@ -1214,6 +1252,11 @@ class Client:
     def _cmd_stopdemo(self, args):
         """stop: end demo playback and return to a live map (Host_Stopdemo_f),
         so the renderer has a server again."""
+        if self.recording is not None:   # finish a recording (Host_Stop_f) first
+            self.recording.close()
+            self.recording = None
+            self.con.print("stopped recording")
+            return
         self.in_demo_loop = False        # explicit stop: leave the title loop
         if self.demo is not None:
             self.demo = None
@@ -1572,6 +1615,8 @@ class Client:
         # still read self.sv this phase (explicit Phase 1 scope).
         dg = MsgWriter()
         build_datagram(self.sv, dg)
+        if self.recording is not None:        # tee this frame to the .dem (live path only)
+            self.recording.write_frame((self.pitch, self.yaw, 0.0), bytes(dg.data))
         self.cl.time = self.sv.time           # single-player: client time tracks server
         self.cl.parse_message(MsgReader(dg.data))
         self.cl.relink(dt)

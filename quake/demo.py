@@ -58,6 +58,13 @@ class DemoWriter:
         self.fp.flush()
         self.fp.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
 
 if __name__ == "__main__":                     # python -m quake.demo
     blob = b"1\n" + write_demo_frame((0.0, 0.0, 0.0), b"\x07")

@@ -741,6 +741,21 @@ class Client:
         v = max(0.5, min(1.0, float(v)))
         self._pixel_aspect = v
         self.rend.pixel_aspect = v
+        self._sync_aspect_menu()
+
+    def _sync_aspect_menu(self):
+        """Point the video menu's Aspect row at the option nearest the live
+        value, so a console `pixel_aspect` set is reflected when the menu
+        reopens (and 0.8333333 resolves to CRT despite float imprecision)."""
+        menu = getattr(self, "menu", None)
+        if menu is None:
+            return
+        for item in menu.items:
+            if getattr(item, "title", None) == "Aspect":
+                item.index = min(range(len(item.options)),
+                                 key=lambda j: abs(item.options[j][1]
+                                                   - self._pixel_aspect))
+                break
 
     def _menu_back(self):
         self.menu.active = False

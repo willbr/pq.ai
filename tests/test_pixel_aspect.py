@@ -138,6 +138,18 @@ def test_aspect_row_map():
     assert tkmain.aspect_row_map(200, 1.0) is None          # square: no-op
 
 
+def test_console_set_syncs_menu_aspect_row():
+    # a console `pixel_aspect` set must update the menu's Aspect row too, so
+    # reopening the menu shows the live value (and tolerates 0.8333333 vs 5/6)
+    c = client.Client("e1m1")
+    item = next(i for i in c.menu.items if getattr(i, "title", "") == "Aspect")
+    assert item.value_label == "Square"
+    c.con.execute("pixel_aspect 0.8333333")
+    assert item.value_label == "CRT"
+    c.con.execute("pixel_aspect 1.0")
+    assert item.value_label == "Square"
+
+
 if __name__ == "__main__":
     test_crt_aspect_widens_vertical_fov()
     test_wire_mode_ignores_pixel_aspect()
@@ -147,4 +159,5 @@ if __name__ == "__main__":
     test_menu_aspect_item_drives_client()
     test_letterbox_stretched_height_fills_4_3()
     test_aspect_row_map()
+    test_console_set_syncs_menu_aspect_row()
     print("OK")

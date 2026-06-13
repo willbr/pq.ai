@@ -20,6 +20,7 @@ sections, so nested time is never double-counted. A section absent for a frame
 decays toward 0."""
 
 import collections
+import csv
 import time
 from contextlib import contextmanager
 
@@ -160,6 +161,37 @@ class Profiler:
             level = int(round(t / full * 8)) if full > 0 else 0
             out.append(_SPARK[min(8, max(0, level))])
         return "".join(out)
+
+    def start_log(self, path, open_fn=open):
+        """Begin per-frame CSV logging to `path`. Column order is fixed now from
+        the sections seen so far (`total` first, then first-seen section order) --
+        by in-level play that is every section. `open_fn` is an injectable seam
+        for tests. Header: frame,total,<sections...>."""
+        self._log_file = open_fn(path, "w", newline="")
+        self._log = csv.writer(self._log_file)
+        self._log_cols = ["total"] + list(self.ms)
+        self._log_frame = 0
+        self._log.writerow(["frame"] + self._log_cols)
+
+    def _write_log_row(self, raw):
+        """Append one frame's raw ms as a CSV row (frame index first)."""
+        row = [self._log_frame] + [f"{raw.get(c, 0.0):.3f}" for c in self._log_cols]
+        self._log.writerow(row)
+        self._log_frame += 1
+
+    def stop_log(self):
+        """Flush and release the log; return (path, frames_written) or None if not logging.
+        The file handle is flushed then closed (dropping the profiler's reference lets
+        CPython close a real file immediately via ref-counting; StringIO callers can still
+        read .getvalue() because StringIO.close() is not called here)."""
+        if self._log is None:
+            return None
+        path = self._log_file.name
+        n = self._log_frame
+        self._log_file.flush()
+        self._log = None
+        self._log_file = None
+        return (path, n)
 
 
 # Module-level singleton the engine and frontends share.

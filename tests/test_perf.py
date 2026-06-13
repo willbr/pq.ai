@@ -4,6 +4,8 @@ Pure logic, no engine boot: the Profiler takes an injectable clock, so these
 drive it with a deterministic fake counter (no real sleeps). Run with
 `python test_perf.py` (prints OK) or under pytest."""
 
+import io
+
 import _bootstrap  # noqa: F401  (repo-root sys.path + cwd)
 
 from quake.perf import Profiler
@@ -252,6 +254,35 @@ def test_graph_shows_only_last_width_frames():
     assert len(p.graph(width=3)) == 3
 
 
+def test_logging_writes_header_and_raw_rows():
+    """start_log writes a header of frame + total + seen sections; each
+    frame_end appends one raw (non-EMA) row; stop_log returns (path, n)."""
+    clk = FakeClock()
+    p = Profiler(clock=clk, alpha=0.1)        # heavy smoothing: prove rows are raw
+    with p.section("a"):                       # one frame so "a" is a known section
+        clk.advance(5.0)
+    p.frame_end()
+    buf = io.StringIO()
+    buf.name = "run.csv"
+    p.start_log("run.csv", open_fn=lambda path, mode, **kw: buf)
+    for ms in (8.0, 12.0):
+        with p.section("a"):
+            clk.advance(ms)
+        p.frame_end()
+    result = p.stop_log()
+    assert result == ("run.csv", 2), result
+    assert p._log is None
+    lines = buf.getvalue().splitlines()
+    assert lines[0] == "frame,total,a", lines[0]   # frame + total + seen section
+    assert lines[1] == "0,8.000,8.000", lines[1]   # raw ms, not EMA
+    assert lines[2] == "1,12.000,12.000", lines[2]
+
+
+def test_stop_log_without_start_returns_none():
+    p = Profiler()
+    assert p.stop_log() is None
+
+
 if __name__ == "__main__":
     test_section_accumulates_elapsed()
     test_same_name_sums_within_frame()
@@ -268,4 +299,6 @@ if __name__ == "__main__":
     test_history_records_raw_total_and_bounds()
     test_graph_maps_totals_to_glyph_heights()
     test_graph_shows_only_last_width_frames()
+    test_logging_writes_header_and_raw_rows()
+    test_stop_log_without_start_returns_none()
     print("OK")

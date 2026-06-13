@@ -550,7 +550,10 @@ class Client:
 
     def resize(self, w, h):
         self._view_wh = (w, h)
-        self.rend.resize(w, h)
+        # the renderer may not exist yet (a demo Client resized before its first
+        # _load_demo); _load_demo/_load_map apply the stored _view_wh when built.
+        if getattr(self, "rend", None) is not None:
+            self.rend.resize(w, h)
 
     def shutdown(self):
         """Tear down the audio backend deterministically on quit, before the
@@ -1053,6 +1056,8 @@ class Client:
         con.register_command("map", self._cmd_map, "map <name>: load a level")
         con.register_command("playdemo", self._cmd_playdemo,
                              "playdemo <name>: play a .dem file")
+        con.register_command("timedemo", self._cmd_timedemo,
+                             "timedemo <name>: play a demo flat-out, report fps")
         con.register_command("stop", self._cmd_stopdemo,
                              "stop: end demo playback, return to a live map")
         con.register_command("save", self._cmd_save, "save <name>: save the game")
@@ -1135,6 +1140,16 @@ class Client:
             self.con.print("usage: playdemo <name>")
             return
         self._play_named_demo(args[0])
+
+    def _cmd_timedemo(self, args):
+        """timedemo <name>: play a demo flat-out (one message per frame) and
+        report average fps (CL_TimeDemo_f). _demo_frame calls _finish_timedemo
+        when the run ends."""
+        if not args:
+            self.con.print("usage: timedemo <name>")
+            return
+        if self._play_named_demo(args[0]):
+            self.demo.timedemo = True
 
     def _play_named_demo(self, name):
         """Load and start a named demo, pak-first then filesystem (.dem suffix

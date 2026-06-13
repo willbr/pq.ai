@@ -37,7 +37,24 @@ def test_play_demo1_advances_and_renders():
     assert len(c.scene.alias_entities()) >= 0  # rendered without exception
 
 
+def test_timedemo_reports_fps():
+    from client import Client, InputState
+    from quake.pak import Pak
+    c = Client.__new__(Client); Client._init_assets_only(c)
+    c.resize(640, 480)
+    msgs = []
+    c.con.print = lambda s: msgs.append(s)     # capture console output
+    c._cmd_timedemo(["demo1"])
+    # run frames until the demo finishes
+    for _ in range(5000):
+        c.frame(0.01, InputState())
+        if c.demo is None or c.demo.finished:
+            break
+    assert any("fps" in m.lower() for m in msgs), msgs[-3:]
+
+
 if __name__ == "__main__":
     test_load_demo_builds_render_stack_without_server()
     test_play_demo1_advances_and_renders()
+    test_timedemo_reports_fps()
     print("OK")

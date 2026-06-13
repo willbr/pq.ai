@@ -8,6 +8,7 @@ The writer half is quake/sv_send.py; this parser is its exact mirror -- the
 clientdata SU_* order, the always-sent tail, and the entity U_* field order must
 stay in lockstep with that module."""
 from . import protocol as P
+from . import particles
 from .msg import MsgReader  # noqa: F401  (callers pass readers; kept for typing)
 
 
@@ -70,7 +71,11 @@ class ClientState:
         self.center_time = 0.0       # cl.time when the last centerprint arrived
         self.last_print = None       # svc_print text (demos; engine Con_Printf)
         self.last_stuff = None       # svc_stufftext text (demos; engine Cbuf)
-        self.particles = []          # client-side particle system (relink)
+        self.particles = []          # client-side particle system (relink); each
+                                     # entry is the renderer's 10-element form
+                                     # [x,y,z, vx,vy,vz, color, die, type, ramp]
+                                     # -- same as sv.particles (quake/particles.py)
+        self._tracer_state = [0]     # R_RocketTrail's static tracer counter
         self.dlight_events = []      # (origin, radius, die_time, decay) -- demo dlights
         self.sound_events = []       # (ent, chan, name, vol, atten, origin) for the
                                      # mixer -- drained each demo frame (no server)
@@ -306,7 +311,8 @@ class ClientState:
         dirv = (r.char(), r.char(), r.char())
         count = r.byte()
         color = r.byte()
-        self.particles.append((org, dirv, count, color))
+        particles.run_particle_effect(self.particles, org, dirv, color, count,
+                                      self.time)
 
     def parse_sound(self, r):                      # CL_ParseStartSoundPacket
         field_mask = r.byte()
@@ -333,13 +339,33 @@ class ClientState:
         elif kind in (P.TE_EXPLOSION, P.TE_TAREXPLOSION, P.TE_LAVASPLASH,
                       P.TE_TELEPORT):
             org = (r.coord(), r.coord(), r.coord())
-            if kind in (P.TE_EXPLOSION, P.TE_TAREXPLOSION):
-                # CL_ParseTEnt: explosions spawn a transient dlight at the burst
-                # (radius 350, decays 300/s, lives 0.5s). Demo explosions flash.
+            # CL_ParseTEnt: spawn the r_part.c burst for each (mirrors the
+            # server's _spawn_te). TE_EXPLOSION also flashes a transient dlight.
+            if kind == P.TE_EXPLOSION:
+                particles.particle_explosion(self.particles, org, self.time)
                 self.dlight_events.append((org, 350.0, self.mtime[0] + 0.5, 300.0))
-        else:                                      # spikes/gunshot: a point
-            for _ in range(3):
-                r.coord()
+            elif kind == P.TE_TAREXPLOSION:
+                particles.blob_explosion(self.particles, org, self.time)
+                self.dlight_events.append((org, 350.0, self.mtime[0] + 0.5, 300.0))
+            elif kind == P.TE_LAVASPLASH:
+                particles.lava_splash(self.particles, org, self.time)
+            elif kind == P.TE_TELEPORT:
+                particles.teleport_splash(self.particles, org, self.time)
+        else:                                      # spikes/gunshot: a point burst
+            org = (r.coord(), r.coord(), r.coord())
+            z = (0.0, 0.0, 0.0)
+            # WinQuake CL_ParseTEnt counts: gunshot 20, spike 10, superspike 20,
+            # wizspike 30 (colour 20), knightspike 20 (colour 226).
+            if kind == P.TE_GUNSHOT:
+                particles.run_particle_effect(self.particles, org, z, 0, 20, self.time)
+            elif kind == P.TE_SPIKE:
+                particles.run_particle_effect(self.particles, org, z, 0, 10, self.time)
+            elif kind == P.TE_SUPERSPIKE:
+                particles.run_particle_effect(self.particles, org, z, 0, 20, self.time)
+            elif kind == P.TE_WIZSPIKE:
+                particles.run_particle_effect(self.particles, org, z, 20, 30, self.time)
+            elif kind == P.TE_KNIGHTSPIKE:
+                particles.run_particle_effect(self.particles, org, z, 226, 20, self.time)
 
     # ---- relink / interpolation (CL_RelinkEntities, cl_parse.c:442) ----
     def lerp_point(self):
@@ -413,20 +439,34 @@ class ClientState:
         self._advance_particles(dt)
 
     def _emit_trail(self, e):
-        """Client-side trail seeding from entity effects/model (R_RocketTrail /
-        CL_RelinkEntities). Phase 1: rockets/grenades leave a sparse smoke trail.
-        Refine ramps/types later."""
+        """R_RocketTrail (CL_RelinkEntities): lay a particle trail along the
+        segment a flagged entity moved this frame, with the SAME r_part.c physics
+        as live play (quake/particles.py). WinQuake keys the trail type off the
+        model's .mdl EF flags, which the demo client has not loaded; we derive it
+        from the model NAME instead, which covers the common visible trails
+        (rockets / grenades / blood). msg_origins[1] is last frame's message
+        origin and e.origin this frame's interpolated one, so we only emit when
+        the entity actually moved."""
         name = e.model or ""
-        if "missile" in name or "grenade" in name or (e.effects & 8):
-            ox, oy, oz = e.origin
-            self.particles.append(((ox, oy, oz), (0.0, 0.0, 0.0), 1, 6))
+        if "missile" in name:
+            ttype = 0                              # EF_ROCKET: fire smoke
+        elif "grenade" in name:
+            ttype = 1                              # EF_GRENADE: fire smoke (darker)
+        elif "gib" in name or "zom_gib" in name:
+            ttype = 2                              # EF_GIB / EF_ZOMGIB: blood
+        else:
+            return
+        start = e.msg_origins[1]
+        if start == e.origin:                      # didn't move -> no trail
+            return
+        particles.rocket_trail(self.particles, start, e.origin, ttype,
+                               self.time, self._tracer_state)
 
     def _advance_particles(self, dt):
-        """Age client particles; drop expired. Phase 1 holds simple (origin,
-        dir, count, color) puffs; here we just cap the list so it cannot grow
-        unbounded. Replace with the WinQuake p_free ramp system in a later pass."""
-        if len(self.particles) > 2048:
-            del self.particles[:-2048]
+        """R_DrawParticles: integrate/age/expire every client particle with the
+        SAME r_part.c physics live play uses (quake/particles.py). sv_gravity is
+        the stock 800.0 (the demo client has no cvars)."""
+        self.particles = particles.advance(self.particles, self.time, dt, 800.0)
 
 
 class SceneFromClient:

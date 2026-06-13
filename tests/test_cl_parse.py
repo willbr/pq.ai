@@ -222,7 +222,67 @@ def test_demo_view_angles_interpolate():
     assert abs((vw[1] % 360.0) - 0.0) < 1e-6   # halfway = 360 == 0, not 180
 
 
+def test_demo_particles_move():
+    """The bug: in demo playback (no server) the client particle system was a
+    no-op stub -- svc_particle bursts appeared but never moved or expired. Now
+    cl runs the SAME r_part.c physics live play uses (quake/particles.py), so a
+    parsed burst MUST integrate (positions change) and eventually expire."""
+    cl = ClientState()
+    cl.time = 1.0
+    # svc_particle with a nonzero dir so the spawned pt_slowgrav has velocity.
+    w = MsgWriter()
+    w.byte(P.svc_particle)
+    w.coord(100.0); w.coord(0.0); w.coord(50.0)   # origin
+    w.char(10); w.char(0); w.char(0)              # dir (becomes vel*15)
+    w.byte(30)                                     # count
+    w.byte(0)                                       # color
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert len(cl.particles) == 30, "burst should spawn 30 particles"
+    # particles are the renderer-native 10-element form (x,y,z, vx,vy,vz, ...).
+    p = cl.particles[0]
+    assert len(p) == 10, "client particle must be the 10-element renderer shape"
+    x0, y0, z0 = p[0], p[1], p[2]
+    assert p[3] != 0.0, "nonzero dir -> nonzero x velocity"
+    n0 = len(cl.particles)
+    # advance a few frames -- the position MUST change (it was frozen before)
+    for _ in range(5):
+        cl.time += 0.05
+        cl._advance_particles(0.05)
+    assert cl.particles, "particles vanished too soon"
+    moved = any(abs(q[0] - x0) > 1e-3 or abs(q[2] - z0) > 1e-3
+                for q in cl.particles)
+    assert moved, "demo particles did not move (the bug)"
+    # and they must eventually all expire (pt_slowgrav dies <= 0.5s after spawn)
+    for _ in range(20):
+        cl.time += 0.05
+        cl._advance_particles(0.05)
+    assert len(cl.particles) == 0, "particles never expired"
+    assert n0 == 30
+    _ = (y0,)   # silence unused (kept for symmetry/readability)
+
+
+def test_demo_explosion_spawns_moving_burst():
+    """TE_EXPLOSION in a demo must spawn the r_part.c particle burst (not just a
+    dlight). The accelerating pt_explode particles move fast."""
+    cl = ClientState()
+    cl.time = 2.0
+    cl.mtime[0] = 2.0
+    w = MsgWriter()
+    w.byte(P.svc_temp_entity); w.byte(P.TE_EXPLOSION)
+    w.coord(0.0); w.coord(0.0); w.coord(0.0)
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert len(cl.particles) > 0, "explosion spawned no particles"
+    assert len(cl.dlight_events) == 1, "explosion still flashes a dlight"
+    before = [(p[0], p[1], p[2]) for p in cl.particles]
+    cl.time += 0.05
+    cl._advance_particles(0.05)
+    after = [(p[0], p[1], p[2]) for p in cl.particles]
+    assert before[:len(after)] != after[:len(before)], "explosion burst frozen"
+
+
 if __name__ == "__main__":
+    test_demo_particles_move()
+    test_demo_explosion_spawns_moving_burst()
     test_svc_sound_records_event_for_mixer()
     test_demo_view_angles_interpolate()
     test_parse_time_and_lightstyle()

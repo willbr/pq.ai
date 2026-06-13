@@ -556,13 +556,10 @@ class Client:
         return self.cl.lightstyles if self.demo is not None else self.sv.lightstyles
 
     def _cur_particles(self):
-        if self.demo is None:
-            return self.sv.particles
-        # cl's Phase-1 particle stub holds (origin, dir, count, color) tuples;
-        # the renderer (and _particle_sprites) want the flat sv shape
-        # [x, y, z, vx, vy, vz, color, ...]. Adapt at this boundary.
-        return [(org[0], org[1], org[2], 0.0, 0.0, 0.0, color)
-                for (org, _dir, _count, color) in self.cl.particles]
+        # cl.particles and sv.particles are now the SAME renderer-native shape
+        # ([x,y,z, vx,vy,vz, color, die, type, ramp], quake/particles.py), so no
+        # remap is needed -- pick the right source for the mode.
+        return self.cl.particles if self.demo is not None else self.sv.particles
 
     def _cur_health(self):
         return (self.scene.player_health() if self.demo is not None

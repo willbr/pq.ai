@@ -256,14 +256,19 @@ def test_graph_shows_only_last_width_frames():
 
 def test_logging_writes_header_and_raw_rows():
     """start_log writes a header of frame + total + seen sections; each
-    frame_end appends one raw (non-EMA) row; stop_log returns (path, n)."""
+    frame_end appends one raw (non-EMA) row; stop_log returns (path, n)
+    and closes the file."""
+    class CaptureIO(io.StringIO):
+        name = "run.csv"
+        def close(self):
+            self.captured = self.getvalue()
+            super().close()
     clk = FakeClock()
     p = Profiler(clock=clk, alpha=0.1)        # heavy smoothing: prove rows are raw
     with p.section("a"):                       # one frame so "a" is a known section
         clk.advance(5.0)
     p.frame_end()
-    buf = io.StringIO()
-    buf.name = "run.csv"
+    buf = CaptureIO()
     p.start_log("run.csv", open_fn=lambda path, mode, **kw: buf)
     for ms in (8.0, 12.0):
         with p.section("a"):
@@ -272,7 +277,8 @@ def test_logging_writes_header_and_raw_rows():
     result = p.stop_log()
     assert result == ("run.csv", 2), result
     assert p._log is None
-    lines = buf.getvalue().splitlines()
+    assert buf.closed                          # stop_log closed the file
+    lines = buf.captured.splitlines()
     assert lines[0] == "frame,total,a", lines[0]   # frame + total + seen section
     assert lines[1] == "0,8.000,8.000", lines[1]   # raw ms, not EMA
     assert lines[2] == "1,12.000,12.000", lines[2]

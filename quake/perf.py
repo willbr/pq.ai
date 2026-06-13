@@ -180,15 +180,12 @@ class Profiler:
         self._log_frame += 1
 
     def stop_log(self):
-        """Flush and release the log; return (path, frames_written) or None if not logging.
-        The file handle is flushed then closed (dropping the profiler's reference lets
-        CPython close a real file immediately via ref-counting; StringIO callers can still
-        read .getvalue() because StringIO.close() is not called here)."""
+        """Close the log; return (path, frames_written) or None if not logging."""
         if self._log is None:
             return None
         path = self._log_file.name
         n = self._log_frame
-        self._log_file.flush()
+        self._log_file.close()
         self._log = None
         self._log_file = None
         return (path, n)

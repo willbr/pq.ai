@@ -110,7 +110,9 @@ _FIELDS = ("classname", "model", "modelindex", "origin", "angles", "mins", "maxs
            "ammo_rockets", "ammo_cells", "armorvalue", "armortype",
            "button0", "deadflag", "enemy", "owner", "touch", "goalentity",
            "waterlevel", "watertype", "air_finished", "th_die",
-           "dmg_take", "dmg_save", "dmg_inflictor", "punchangle", "effects")
+           "dmg_take", "dmg_save", "dmg_inflictor", "punchangle", "effects",
+           # render state the protocol serializer (sv_send.py) snapshots/deltas
+           "colormap", "skin")
 
 SOLID_NOT = 0
 SOLID_TRIGGER = 1
@@ -292,6 +294,18 @@ class Server:
         self.model_precache = [""]
         self.sound_precache = [""]
         self.lightstyles = {}
+        # protocol serialization state (quake/sv_send.py):
+        self.baselines = {}          # SV_CreateBaseline: edict -> spawn-time state
+        # Per-frame unreliable protocol events (sounds, temp entities,
+        # svc_particle bursts) accumulated during the QC tick and drained into
+        # the datagram by sv_send.build_datagram. Cleared each frame
+        # (SV_ClearDatagram). Each item is a write_fn closure taking a writer.
+        self.unreliable = []
+        self._prev_stats = {}         # SV_UpdateToReliableMessages stat diffing
+        self._prev_lightstyles = {}   # svc_lightstyle change detection
+        self._setangle = None         # pending svc_setangle (teleport fixangle)
+        self._sent_center = None      # last centerprint msg sent (dedup)
+        self._sent_intermission = False  # intermission byte sent once per level
         self.cvars = {"skill": float(skill), "deathmatch": 0.0, "coop": 0.0,
                       "teamplay": 0.0, "temp1": 0.0, "noexit": 0.0,
                       "samelevel": 0.0, "sv_gravity": SV_GRAVITY}
@@ -455,6 +469,7 @@ class Server:
         self.time += dt
         vm.time = self.time      # for ED_Alloc's freed-slot reuse guard
         self.player_carry = [0.0, 0.0, 0.0]   # reset rider carry for this frame
+        self.unreliable = []                  # SV_ClearDatagram
         self.gset_f("frametime", dt)
         self.gset_f("time", self.time)
         # SV_Physics runs QC StartFrame first: id's re-reads the teamplay and
@@ -2318,6 +2333,37 @@ class Server:
         if not path:
             return None
         return path, int(vm.fget_f(e, f["weaponframe"]))
+
+    # ================================================================
+    # protocol serialization (delegated to quake/sv_send.py to keep the
+    # message-building out of this already-large module)
+    # ================================================================
+    def create_baseline(self):
+        """SV_CreateBaseline (sv_main.c:925) -- snapshot spawn-time entity state
+        into self.baselines. Call after load_level + spawn_player."""
+        from .sv_send import create_baseline
+        create_baseline(self)
+
+    def model_index(self, name):
+        """modelindex for a precached model name, or 0 (SV_ModelIndex,
+        sv_main.c). The client resolves it back via cl.model_precache."""
+        if not name:
+            return 0
+        try:
+            return self.model_precache.index(name)
+        except ValueError:
+            return 0
+
+    def level_name(self):
+        """Printable level title for svc_serverinfo: the worldspawn "message"
+        key (the map's display name), falling back to the map filename."""
+        if self.bsp is not None:
+            try:
+                for fields in parse_entities(self.bsp.entities):
+                    return fields.get("message", self.mapname)
+            except Exception:
+                pass
+        return self.mapname
 
     def update_player(self, origin, angles):
         if not self.player:

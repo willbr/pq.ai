@@ -27,6 +27,9 @@ from quake.sbar import Sbar, SBAR_LINES
 from quake.conchars import ConFont, load_qpic, blit_conback, fade_region
 from quake.perf import PROFILER
 from quake import snd
+from quake.cl_parse import ClientState, SceneFromClient
+from quake.sv_send import write_serverinfo, build_datagram
+from quake.msg import MsgWriter, MsgReader
 
 PAK_PATH = "quake-shareware/id1/pak0.pak"
 # Quake runs the server once per rendered frame with the real frametime (clamped
@@ -387,6 +390,19 @@ class Client:
         # renderer gets sized from it too, replacing its construction default.
         if self._view_wh != (0, 0):
             self.rend.resize(*self._view_wh)
+
+        # Faithful loopback: the renderer reads a client-side entity list (cl)
+        # fed by the server's protocol-15 datagram, not the server edicts
+        # directly. Build the signon once per level (here, and again on every
+        # changelevel since _load_map reruns) so cl's model/sound precache and
+        # baselines exist before the first per-frame datagram. (Rebuilt after
+        # the player spawn so the player edict gets a baseline too.)
+        self.cl = ClientState()
+        self.sv.create_baseline()
+        sw = MsgWriter()
+        write_serverinfo(self.sv, sw)
+        self.cl.parse_message(MsgReader(sw.data))
+        self.scene = SceneFromClient(self.cl)
         return True
 
     def resize(self, w, h):
@@ -1184,7 +1200,20 @@ class Client:
             self.intermission = False
             # sv/bsp just swapped; render the new map's current state below
         PROFILER.end("server")
-        brush_ents = self.sv.brush_models()
+
+        # ---- client/server loopback: serialize this frame into a protocol-15
+        # datagram, parse it into the per-Client ClientState (cl), and relink
+        # (interpolate) so the renderer reads cl, not the server VM edicts.
+        # _change_level above reruns _load_map, which rebuilds self.cl/self.scene
+        # for the new map, so this drives whichever cl is current. Camera and HUD
+        # still read self.sv this phase (explicit Phase 1 scope).
+        dg = MsgWriter()
+        build_datagram(self.sv, dg)
+        self.cl.time = self.sv.time           # single-player: client time tracks server
+        self.cl.parse_message(MsgReader(dg.data))
+        self.cl.relink(dt)
+
+        brush_ents = self.scene.brush_models()
         alias_ents = self._alias_ents()
         alias_ents.extend(self._beam_ents())   # lightning bolts (CL_UpdateTEnts)
         bsp_ents = self._bsp_ents()
@@ -1479,7 +1508,7 @@ class Client:
         models = self.models
         nmodels = len(models)
         now = self.sv.time
-        for mi, org, ang, frame in self.sv.alias_entities():
+        for mi, org, ang, frame in self.scene.alias_entities():
             m = models[mi] if mi < nmodels else None
             if m is None:
                 continue
@@ -1492,7 +1521,7 @@ class Client:
         out = []
         smodels = self.smodels
         n = len(smodels)
-        for mi, org, frame in self.sv.sprite_entities():
+        for mi, org, frame in self.scene.sprite_entities():
             s = smodels[mi] if mi < n else None
             if s is None:
                 continue
@@ -1557,7 +1586,7 @@ class Client:
         out = []
         bmodels = self.bmodels
         nmodels = len(bmodels)
-        for mi, org, ang in self.sv.bsp_model_entities():
+        for mi, org, ang in self.scene.bsp_model_entities():
             pm = bmodels[mi] if mi < nmodels else None
             if pm is None:
                 continue

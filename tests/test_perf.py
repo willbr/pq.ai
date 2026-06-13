@@ -213,6 +213,7 @@ def test_history_records_raw_total_and_bounds():
         clk.advance(10.0)
     p.frame_end()
     assert abs(p.history[-1] - 10.0) < 1e-6, p.history   # raw, not EMA
+    assert abs(p.total_ms - p.history[-1]) > 0.5, (p.total_ms, p.history[-1])  # EMA != raw
     assert p._last_raw["total"] == p.history[-1]
     assert abs(p._last_raw["a"] - 10.0) < 1e-6, p._last_raw
     for _ in range(HISTORY_LEN + 50):    # overfill

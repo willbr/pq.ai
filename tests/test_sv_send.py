@@ -114,6 +114,61 @@ def test_build_datagram_parses_into_cl():
     assert any(e and e.model for e in cl.entities), "no entity linked"
 
 
+def test_picked_up_item_drops_from_loopback():
+    """SV_WriteEntitiesToClient (sv_main.c:451) skips !modelindex || !model:
+    QC hides a picked-up item by clearing its .model string while leaving
+    .modelindex set. The loopback writer must drop it too, mirroring the old
+    Server.alias_entities() path, or picked-up items keep rendering."""
+    from quake.msg import MsgWriter, MsgReader
+    from quake.sv_send import build_datagram, write_serverinfo
+    from quake.cl_parse import ClientState, SceneFromClient
+    sv = _boot()
+    sv.create_baseline()
+    cl = ClientState()
+    sw = MsgWriter(); write_serverinfo(sv, sw)
+    cl.parse_message(MsgReader(bytes(sw.data)))
+
+    vm, f = sv.vm, sv.f
+    # find a live .mdl entity (an item) with both modelindex and model set
+    target = None
+    for e in range(1, vm.num_edicts):
+        if vm.free[e]:
+            continue
+        if vm.fget_i(e, f["modelindex"]) and vm.fget_i(e, f["model"]):
+            name = sv.pr.string(vm.fget_i(e, f["model"]))
+            if name.endswith(".mdl"):
+                target = e
+                break
+    assert target is not None, "no live .mdl item entity found"
+
+    # each call advances server time so the new packet carries a distinct
+    # svc_time -- the client drops entities absent from the last packet by
+    # msgtime (cl_main.c:491), which needs mtime[0] to move.
+    def loopback_alias_count():
+        sv.time += 0.1
+        dg = MsgWriter(); build_datagram(sv, dg)
+        cl.parse_message(MsgReader(bytes(dg.data)))
+        cl.time = sv.time
+        cl.relink(0.0)
+        return len(SceneFromClient(cl).alias_entities())
+
+    before_sv = len(sv.alias_entities())
+    before_loop = loopback_alias_count()
+    assert before_loop == before_sv, (before_loop, before_sv)
+    assert before_sv > 0
+
+    # SUB_Remove/pickup clears .model (string_null) but keeps modelindex
+    vm.fset_i(target, f["model"], 0)
+
+    after_sv = len(sv.alias_entities())
+    assert after_sv == before_sv - 1, (after_sv, before_sv)  # old path drops it
+
+    # the loopback must drop it too -- the bug left it rendering
+    after_loop = loopback_alias_count()
+    assert after_loop == after_sv, (after_loop, after_sv)
+    assert after_loop == before_loop - 1, (after_loop, before_loop)
+
+
 if __name__ == "__main__":
     test_baselines_snapshot_spawned_entities()
     test_write_entities_emits_parseable_updates()
@@ -122,4 +177,5 @@ if __name__ == "__main__":
     test_build_datagram_writes_svc_time()
     test_clientdata_roundtrips_health()
     test_build_datagram_parses_into_cl()
+    test_picked_up_item_drops_from_loopback()
     print("OK")

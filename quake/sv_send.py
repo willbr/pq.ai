@@ -57,8 +57,9 @@ def write_entities_to_client(sv, w, view_origin):
         if base is None:                     # spawned after baseline: full send
             base = Baseline()
         mi = int(vm.fget_i(e, f["modelindex"]))   # modelindex is an int field
-        if mi == 0:                          # invisible (no model) -- skip
-            continue
+        if mi == 0 or vm.fget_i(e, f["model"]) == 0:   # no model index, or
+            continue                                    # model string cleared
+            # (item picked up) -- mirror sv_main.c:451 !modelindex || !model
         frame = int(vm.fget_f(e, f["frame"]))
         colormap = int(vm.fget_f(e, f["colormap"]))
         skin = int(vm.fget_f(e, f["skin"]))

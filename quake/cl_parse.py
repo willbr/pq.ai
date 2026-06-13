@@ -318,8 +318,9 @@ class ClientState:
         for e in self.entities:
             if e is None or not e.model:
                 continue
-            if e.msgtime != self.mtime[0]:        # not updated this message
-                continue
+            if e.msgtime != self.mtime[0]:        # not in the last packet:
+                e.model = None                    # clear it so it stops
+                continue                          # rendering (cl_main.c:491)
             new, old = e.msg_origins[0], e.msg_origins[1]
             na, oa = e.msg_angles[0], e.msg_angles[1]
             if e.forcelink:

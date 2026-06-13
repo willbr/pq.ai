@@ -166,8 +166,36 @@ class RenderFrame:
     # h/pixel_aspect rows (values <1 make pixels taller, giving the VGA CRT look)
 
 
+class Demo:
+    """Drives .dem playback: holds the DemoReader and the timing/timedemo state
+    (cl_demo.c CL_GetMessage). Reading is gated on cl.time so messages play at
+    their recorded cadence; timedemo reads one per frame and reports fps. Task 4
+    fleshes out the playback loop that consumes this state."""
+
+    def __init__(self, reader, timedemo=False):
+        self.reader = reader
+        self.timedemo = timedemo
+        self.finished = False
+        self.frames = 0          # timedemo frame counter
+        self.start_time = None   # wall clock at timedemo frame 1
+
+
 class Client:
     def __init__(self, mapname):
+        self._init_assets_only()
+        if not self._load_map(mapname):
+            raise ValueError(f"no such map: maps/{mapname}.bsp")
+        self._register_console()
+        self.menu = self._build_menu()
+
+    def _init_assets_only(self):
+        """The server-independent half of construction: pak, palette, colormap,
+        sbar/console fonts, the mixer/audio backend, render-mode flags, and the
+        persisted render settings -- everything that does NOT depend on a loaded
+        map or a running server. Live __init__ calls this then _load_map; demo
+        construction (Task 6) calls it then _load_demo. Does NOT register the
+        console or build the menu (the caller does that after a map/demo loads,
+        because _register_console touches self.rend)."""
         self.pak = Pak(PAK_PATH)
         self.progs_data = self.pak.read("progs.dat")
         pal = self.pak.read("gfx/palette.lmp")
@@ -266,11 +294,9 @@ class Client:
         # maps like _zbuf_scale; applied to each freshly built Renderer.
         self.video_res = DEFAULT_VIDEO_RES
         self.con = Console()
-
-        if not self._load_map(mapname):
-            raise ValueError(f"no such map: maps/{mapname}.bsp")
-        self._register_console()
-        self.menu = self._build_menu()
+        # no demo playing in live mode; set here so live frames see no demo and
+        # demo construction (Task 6) can flip it on after _load_demo.
+        self.demo = None
 
     # ---- level loading ----
     def _load_map(self, mapname, skill=1):
@@ -311,36 +337,7 @@ class Client:
                          serverflags=self.serverflags)
         self.sv.load_level()
 
-        # load the .mdl models the level precached, indexed to match modelindex
-        self.models = [None] * len(self.sv.model_precache)
-        for idx, name in enumerate(self.sv.model_precache):
-            if name.endswith(".mdl") and name in self.pak.files:
-                try:
-                    self.models[idx] = Mdl(self.pak.read(name), self.palette)
-                except Exception as e:
-                    print(f"mdl load failed for {name}: {e}")
-        # sprite models (.spr): explosions, bubbles -- billboarded by the
-        # zbuf renderer, indexed by modelindex like the .mdl list
-        self.smodels = [None] * len(self.sv.model_precache)
-        for idx, name in enumerate(self.sv.model_precache):
-            if name.endswith(".spr") and name in self.pak.files:
-                try:
-                    self.smodels[idx] = Spr(self.pak.read(name))
-                except Exception as e:
-                    print(f"spr load failed for {name}: {e}")
-        # load the external .bsp pickup models (health/ammo boxes -- maps/b_*.bsp),
-        # also indexed by modelindex. Skip index 1, the world map itself.
-        self.bmodels = [None] * len(self.sv.model_precache)
-        for idx, name in enumerate(self.sv.model_precache):
-            if idx > 1 and name.endswith(".bsp") and name in self.pak.files:
-                try:
-                    self.bmodels[idx] = PickupModel(Bsp(self.pak.read(name)),
-                                                    self.palette)
-                except Exception as e:
-                    print(f"bsp pickup load failed for {name}: {e}")
-        # first-person weapon view models, loaded on demand (v_*.mdl are not all
-        # precached); path -> Mdl, or None if the file is missing / failed
-        self._vmodels = {}
+        self._load_render_models(self.sv.model_precache)
 
         # sound: decode every precached sample once, drop the old level's voices,
         # then start the deferred looping ambients. sv.snd is wired last so the
@@ -403,6 +400,87 @@ class Client:
         write_serverinfo(self.sv, sw)
         self.cl.parse_message(MsgReader(sw.data))
         self.scene = SceneFromClient(self.cl)
+        return True
+
+    def _load_render_models(self, model_precache):
+        """Load the .mdl/.spr/external-.bsp render models indexed to match
+        modelindex, from a precache name list (the live sv's or a demo cl's).
+        Shared by _load_map and _load_demo so both build self.models/smodels/
+        bmodels identically."""
+        # load the .mdl models the level precached, indexed to match modelindex
+        self.models = [None] * len(model_precache)
+        for idx, name in enumerate(model_precache):
+            if name.endswith(".mdl") and name in self.pak.files:
+                try:
+                    self.models[idx] = Mdl(self.pak.read(name), self.palette)
+                except Exception as e:
+                    print(f"mdl load failed for {name}: {e}")
+        # sprite models (.spr): explosions, bubbles -- billboarded by the
+        # zbuf renderer, indexed by modelindex like the .mdl list
+        self.smodels = [None] * len(model_precache)
+        for idx, name in enumerate(model_precache):
+            if name.endswith(".spr") and name in self.pak.files:
+                try:
+                    self.smodels[idx] = Spr(self.pak.read(name))
+                except Exception as e:
+                    print(f"spr load failed for {name}: {e}")
+        # load the external .bsp pickup models (health/ammo boxes -- maps/b_*.bsp),
+        # also indexed by modelindex. Skip index 1, the world map itself.
+        self.bmodels = [None] * len(model_precache)
+        for idx, name in enumerate(model_precache):
+            if idx > 1 and name.endswith(".bsp") and name in self.pak.files:
+                try:
+                    self.bmodels[idx] = PickupModel(Bsp(self.pak.read(name)),
+                                                    self.palette)
+                except Exception as e:
+                    print(f"bsp pickup load failed for {name}: {e}")
+        # first-person weapon view models, loaded on demand (v_*.mdl are not all
+        # precached); path -> Mdl, or None if the file is missing / failed
+        self._vmodels = {}
+
+    def _load_demo(self, blob):
+        """Set up the render stack to play a .dem: parse the signon (first demo
+        frame) into a fresh cl, take the map + precache from cl, and build
+        bsp/renderer/physics/models WITHOUT a server. Sets self.demo to the
+        playback controller (Task 4 fleshes out the frame loop). Returns False
+        on an empty/invalid demo."""
+        from quake.demo import DemoReader
+        reader = DemoReader(blob)
+        self.cl = ClientState()
+        # the first frame is the signon; parse it so cl.model_precache is filled
+        first = reader.next_frame()
+        if first is None:
+            self.con.print("demo: empty file")
+            return False
+        self.cl.viewangles = list(first[0])
+        self.cl.parse_message(MsgReader(first[1]))
+        mappath = self.cl.model_precache[1]            # "maps/xxx.bsp"
+        self.mapname = mappath[len("maps/"):-len(".bsp")]
+        self.bsp = Bsp(self.pak.read(mappath))
+        self.rend = Renderer(self.bsp, self.palette, self.colormap)
+        self.rend.zbuf_scale = self._zbuf_scale
+        self.rend.pixel_aspect = self._pixel_aspect
+        self.rend.video_res = self.video_res
+        self.rend.resize(self.rend.width, self.rend.height)
+        self.phys = Physics(self.bsp)
+        self._load_render_models(self.cl.model_precache)
+        # sound precache for the demo (so svc_sound could play later)
+        self.mixer.stop_all()
+        for name in self.cl.sound_precache[1:]:
+            snd_path = "sound/" + name
+            if name and snd_path in self.pak.files:
+                self.mixer.precache(name, self.pak.read(snd_path))
+        self.scene = SceneFromClient(self.cl)
+        self.sv = None                                  # no server in demo mode
+        # CL_ClearState cosmetic HUD timers (mirror _load_map)
+        self.item_gettime = [0.0] * 32
+        self._prev_items = 0
+        self.faceanimtime = 0.0
+        self.dlights = {}
+        self.intermission = False
+        if self._view_wh != (0, 0):
+            self.rend.resize(*self._view_wh)
+        self.demo = Demo(reader)                         # controller (Task 4)
         return True
 
     def resize(self, w, h):

@@ -862,7 +862,10 @@ class Renderer:
                 if self.face_lm_styles[fi] is not None:
                     # drop the face's throwaway dlit cache entry, then restore
                     # its style key (the static variant is still cached)
-                    self._surf_cache_map.pop((fi, self.face_lightkey[fi]), None)
+                    old = self._surf_cache_map.pop(
+                        (fi, self.face_lightkey[fi]), None)
+                    if old is not None:
+                        self._surf_cache_bytes -= len(old[2])
                     self._combine_face(fi, styleval)
             self._dlit_faces.clear()
         if not dlights:
@@ -947,6 +950,7 @@ class Renderer:
         ent = self._surf_cache_map.get(ckey)
         if ent is not None and ent[3] is tex:
             return ent
+        stale_bytes = len(ent[2]) if ent is not None else 0   # overwritten below
         PROFILER.begin("scache")
         self.scache_builds += 1
         lmw, lmh, smin, tmin, lux, _ = self.face_lm[fi]
@@ -1002,7 +1006,12 @@ class Renderer:
                     continue
                 o += 16
         ent = (cw, ch, out, tex)
-        self._surf_cache_bytes += len(out)
+        # live-bytes accounting: drop the stale entry we're replacing (a +N
+        # texture swap or rebuilt variant) so the counter tracks what's actually
+        # in the map, not every byte ever built. Without this, dlight pops and
+        # animation overwrites inflate it to the 64MB bound and trigger a full
+        # flush of a healthy cache -- a ~200ms all-surfaces rebuild spike.
+        self._surf_cache_bytes += len(out) - stale_bytes
         if self._surf_cache_bytes > 64 * 1024 * 1024:   # crude bound: flush all
             self._surf_cache_map.clear()
             self._surf_cache_bytes = len(out)

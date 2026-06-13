@@ -50,8 +50,9 @@ pyobjc-framework-Quartz`); without it, `--tk` runs on any Python with tkinter.
 - `Tab` toggle mouse-look (releases the cursor).
 - Render modes: `F` flat-shaded, `Z` textured, `T` toggle texturing, `N` noclip.
 - `F1` (or `` ` ``) the drop-down console; `Esc` the overlay menu (resolution / quit);
-  `P` the profiler HUD (per-frame section milliseconds).
-- Console commands: `map`, `save`/`load`, `god`, `give`, cvars via `set` — `cmdlist`
+  `P` the profiler HUD (per-frame section milliseconds, with a frametime sparkline).
+- Console commands: `map`, `save`/`load`, `god`, `give`, cvars via `set`,
+  `logperf <file>` to record per-frame timings to CSV (run again to stop) — `cmdlist`
   for the rest.
 
 ## How it works
@@ -74,7 +75,7 @@ portable; only the output stream is platform code.
 | `quake/r_edge.py` | The span/edge scanline occlusion engine — a faithful port of WinQuake's `r_edge.c`: per-scanline active-edge list, the keyed surface stack (BSP front-to-back keys from `R_RecursiveWorldNode`, brush models keyed by leaf or BSP-clipped per fragment), id's coplanar tie-breaks and inverted-span guards. Each visible surface comes out as horizontal spans — zero overdraw, no per-pixel depth compare for world geometry |
 | `quake/spr.py` | `.spr` sprite parser (explosions, bubbles, torch flames), billboarded like `R_DrawSprite` |
 | `quake/menu.py` | UI-agnostic overlay menu state machine behind `Esc` (resolution switch, quit) |
-| `quake/perf.py` | Always-on per-frame section profiler (server / render / raster / present), EMA-smoothed; `P` draws the HUD bar chart |
+| `quake/perf.py` | Always-on per-frame section profiler (server / render / raster / present), EMA-smoothed; `P` draws the HUD bar chart + frametime sparkline; `logperf` writes raw per-frame CSV |
 | `quake/snd.py` | Platform-agnostic software sound mixer — a port of `S_PaintChannels` / `SND_Spatialize`. Decodes/resamples once at precache; `mix(nframes)` sums active voices to 16-bit stereo with distance attenuation + stereo pan re-panned every frame. Touches no OS — a backend pulls from it |
 | `quake/console.py` | Quake-style console: command/cvar/alias registry, line editor, history, tab-completion, scrollback; pure (no OS/UI). Both frontends open it with F1 / `` ` `` |
 | `client.py` | UI-agnostic game client: the `Client` core holds the engine stack + all camera/player/game state and exposes `frame(dt, input) -> RenderFrame`; the `InputState` / `RenderFrame` dataclasses are the only contracts shared by the two frontends |

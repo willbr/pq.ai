@@ -12,7 +12,7 @@ Controls:
     N               toggle noclip flight        Tab    toggle mouselook
     F               toggle flat shading         1-8    select weapon
     Z               toggle z-buffer (textured)  T      toggle texturing
-    P               toggle profiler HUD (per-frame section ms)
+    P               toggle profiler HUD (per-frame section ms + frametime sparkline)
     F1 or `         drop-down console           Esc    overlay menu (video / quit)
 
 This is a THIN tkinter frontend: it owns the window, the Tk canvas item pools and

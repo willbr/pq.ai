@@ -41,6 +41,24 @@ def write_demo_frame(viewangles, message):
     return out + bytes(message)
 
 
+class DemoWriter:
+    """Writes a .dem file (CL_Record_f / CL_WriteDemoMessage): the CD-track
+    header line, then one framed message per write_frame call. `fp` is any
+    binary file-like (an open file or a BytesIO). The caller owns opening it;
+    close() flushes and closes it."""
+
+    def __init__(self, fp, cdtrack="0"):
+        self.fp = fp
+        self.fp.write(str(cdtrack).encode("latin-1") + b"\n")
+
+    def write_frame(self, viewangles, message):
+        self.fp.write(write_demo_frame(viewangles, message))
+
+    def close(self):
+        self.fp.flush()
+        self.fp.close()
+
+
 if __name__ == "__main__":                     # python -m quake.demo
     blob = b"1\n" + write_demo_frame((0.0, 0.0, 0.0), b"\x07")
     r = DemoReader(blob)

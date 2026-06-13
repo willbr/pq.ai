@@ -63,6 +63,8 @@ class ClientState:
         self.levelname = ""
         self.center_msg = None
         self.particles = []          # client-side particle system (relink)
+        self.maxclients = 0
+        self.gametype = 0
 
     def entity(self, num):
         e = self.entities[num]
@@ -131,9 +133,18 @@ class ClientState:
             self.parse_temp_entity(r)
         elif cmd == P.svc_cdtrack:
             r.byte(); r.byte()
-        elif cmd in (P.svc_killedmonster, P.svc_foundsecret,
-                     P.svc_sellscreen, P.svc_disconnect):
+        elif cmd == P.svc_killedmonster:
+            self.stats[P.STAT_MONSTERS] += 1
+        elif cmd == P.svc_foundsecret:
+            self.stats[P.STAT_SECRETS] += 1
+        elif cmd in (P.svc_sellscreen, P.svc_disconnect):
             return
+        elif cmd == P.svc_spawnstaticsound:
+            for _ in range(3):
+                r.coord()                          # origin
+            r.byte()                               # sound number
+            r.byte()                               # volume
+            r.byte()                               # attenuation
         else:
             raise ValueError(f"unknown svc {cmd} at byte {r.pos}")
 
@@ -315,12 +326,9 @@ class ClientState:
                 e.origin = new
                 e.angles = na
             else:
-                o = []
-                for j in range(3):
-                    d = new[j] - old[j]
-                    f = 1.0 if abs(d) > 100.0 else frac   # teleport guard
-                    o.append(old[j] + f * d)
-                e.origin = tuple(o)
+                snap = any(abs(new[j] - old[j]) > 100.0 for j in range(3))
+                f = 1.0 if snap else frac                 # teleport snaps all axes
+                e.origin = tuple(old[j] + f * (new[j] - old[j]) for j in range(3))
                 ang = []
                 for j in range(3):
                     d = na[j] - oa[j]

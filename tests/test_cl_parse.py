@@ -86,6 +86,37 @@ def test_relink_teleport_snaps():
     assert abs(cl.entities[6].origin[0] - 500.0) < 1e-6     # snapped to newest
 
 
+def test_relink_teleport_snaps_all_axes():
+    """X jumps >100 so the whole entity must snap: Y must also snap, not lerp."""
+    cl = ClientState()
+    e = cl.entity(7)
+    e.model = "x"
+    # X delta = 490 (triggers snap); Y delta = 20 (small, would lerp to 10 without fix)
+    e.msg_origins = [(500.0, 20.0, 0.0), (10.0, 0.0, 0.0)]  # [new, old]
+    e.msg_angles = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+    e.msgtime = 2.0
+    cl.mtime = [2.0, 1.0]
+    cl.time = 1.5                        # frac = 0.5 without snap
+    cl.relink()
+    # Both axes must snap to the newest message values (f=1.0 for all axes)
+    assert abs(cl.entities[7].origin[0] - 500.0) < 1e-6
+    assert abs(cl.entities[7].origin[1] - 20.0) < 1e-6
+
+
+def test_spawnstaticsound_consumed():
+    """svc_spawnstaticsound (29) must be consumed cleanly; following svc_time parses."""
+    cl = ClientState()
+    w = MsgWriter()
+    w.byte(P.svc_spawnstaticsound)
+    w.coord(100.0); w.coord(200.0); w.coord(300.0)  # origin (3 coords)
+    w.byte(5)    # sound number
+    w.byte(255)  # volume
+    w.byte(1)    # attenuation
+    w.byte(P.svc_time); w.float(7.25)
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert cl.mtime[0] == 7.25           # proves no desync after spawnstaticsound
+
+
 if __name__ == "__main__":
     test_parse_time_and_lightstyle()
     test_baseline_then_update_delta()
@@ -93,4 +124,6 @@ if __name__ == "__main__":
     test_finale_reads_string()
     test_relink_lerps_between_messages()
     test_relink_teleport_snaps()
+    test_relink_teleport_snaps_all_axes()
+    test_spawnstaticsound_consumed()
     print("OK")

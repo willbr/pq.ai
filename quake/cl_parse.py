@@ -62,7 +62,12 @@ class ClientState:
         self.intermission = False
         self.levelname = ""
         self.center_msg = None
+        self.center_time = 0.0       # cl.time when the last centerprint arrived
+        self.last_print = None       # svc_print text (demos; engine Con_Printf)
+        self.last_stuff = None       # svc_stufftext text (demos; engine Cbuf)
         self.particles = []          # client-side particle system (relink)
+        self.dlight_events = []      # (origin, radius, die_time, decay) -- demo dlights
+        self.completed_time = 0.0    # level time frozen at intermission (cl.completed_time)
         self.maxclients = 0
         self.gametype = 0
 
@@ -112,14 +117,18 @@ class ClientState:
             r.byte()                               # phase number -- noted, no-op
         elif cmd == P.svc_centerprint:
             self.center_msg = r.string()
+            self.center_time = self.mtime[0]
         elif cmd == P.svc_intermission:
             # NQ protocol-15: svc_intermission carries NO payload. (Reading a
             # string here would consume the next message's bytes and desync.)
             self.intermission = True
+            self.completed_time = self.mtime[0]    # cl.completed_time = cl.time
         elif cmd == P.svc_finale:
             # svc_finale DOES carry the finale text string.
             self.intermission = True
+            self.completed_time = self.mtime[0]    # cl.completed_time = cl.time
             self.center_msg = r.string()
+            self.center_time = self.mtime[0]
         elif cmd == P.svc_setpause:
             r.byte()
         elif cmd == P.svc_updatestat:
@@ -145,6 +154,32 @@ class ClientState:
             r.byte()                               # sound number
             r.byte()                               # volume
             r.byte()                               # attenuation
+        # --- svc types the live loopback never sends but real demos do
+        # (cl_parse.c). Parse their payload so the stream stays in sync; the
+        # render surface doesn't consume them in Phase 2, so they drop.
+        elif cmd == P.svc_version:
+            r.long()                               # protocol version (checked in C)
+        elif cmd == P.svc_print:
+            self.last_print = r.string()           # Con_Printf in the engine
+        elif cmd == P.svc_stufftext:
+            self.last_stuff = r.string()           # Cbuf_AddText in the engine
+        elif cmd == P.svc_updatename:
+            r.byte(); r.string()                   # scoreboard slot + name
+        elif cmd == P.svc_updatefrags:
+            r.byte(); r.short()                    # scoreboard slot + frags
+        elif cmd == P.svc_updatecolors:
+            r.byte(); r.byte()                     # scoreboard slot + colors
+        elif cmd == P.svc_stopsound:
+            r.short()                              # (channel<<3)|entity
+        elif cmd == P.svc_damage:
+            r.byte(); r.byte()                     # armor + blood
+            for _ in range(3):
+                r.coord()                          # inflictor origin (V_ParseDamage)
+        elif cmd == P.svc_cutscene:
+            self.intermission = True
+            self.completed_time = self.mtime[0]    # cl.completed_time = cl.time
+            self.center_msg = r.string()           # cutscene text
+            self.center_time = self.mtime[0]
         else:
             raise ValueError(f"unknown svc {cmd} at byte {r.pos}")
 
@@ -282,8 +317,11 @@ class ClientState:
                 r.coord()                          # start + end
         elif kind in (P.TE_EXPLOSION, P.TE_TAREXPLOSION, P.TE_LAVASPLASH,
                       P.TE_TELEPORT):
-            for _ in range(3):
-                r.coord()
+            org = (r.coord(), r.coord(), r.coord())
+            if kind in (P.TE_EXPLOSION, P.TE_TAREXPLOSION):
+                # CL_ParseTEnt: explosions spawn a transient dlight at the burst
+                # (radius 350, decays 300/s, lives 0.5s). Demo explosions flash.
+                self.dlight_events.append((org, 350.0, self.mtime[0] + 0.5, 300.0))
         else:                                      # spikes/gunshot: a point
             for _ in range(3):
                 r.coord()
@@ -377,13 +415,19 @@ class SceneFromClient:
 
     def _world_alias_sprite(self, ext):
         """Live entities whose model has the given extension, excluding the
-        player's own body (viewentity). Yields ClEntity."""
+        player's own body (viewentity). Yields ClEntity. Gated on the entity
+        being present in the latest packet (msgtime == mtime[0]) so PVS culling
+        in demos is honoured -- entities that leave the view stop rendering and
+        reappear when seen again. A no-op for the live loopback (the server
+        sends every entity each frame, so msgtime always equals mtime[0])."""
         cl = self.cl
         ve = cl.viewentity
         for num, e in enumerate(cl.entities):
             if e is None or not e.model:
                 continue
             if num == ve:                      # don't draw our own body (1st person)
+                continue
+            if e.msgtime != cl.mtime[0]:       # not in the last packet (PVS)
                 continue
             if e.model.endswith(ext):
                 yield e
@@ -412,8 +456,11 @@ class SceneFromClient:
         # not "*0") is excluded. Matches Server.brush_models' tuple shape
         # (submodel_index, origin, angles, frame). The player can't be a brush.
         out = []
-        for e in self.cl.entities:
+        cl = self.cl
+        for e in cl.entities:
             if e is None or not e.model or not e.model.startswith("*"):
+                continue
+            if e.msgtime != cl.mtime[0]:       # not in the last packet (PVS)
                 continue
             out.append((int(e.model[1:]), e.origin, e.angles, e.frame))
         return out
@@ -429,6 +476,95 @@ class SceneFromClient:
     @property
     def time(self):
         return self.cl.time
+
+    # --- full client-visible surface for demo-mode rendering ---
+    # These mirror the Server query methods the render block reads (sv.py), but
+    # source their values from the parsed client state (cl.stats / cl.items /
+    # cl.entities) instead of the server edicts, so client.py can drive the HUD,
+    # view model, dynamic lights and intermission from a demo with no server.
+
+    def player_health(self):
+        return self.cl.stats[P.STAT_HEALTH]
+
+    def hud_status(self):
+        """Same dict shape as Server.hud_status(), sourced from cl.stats/items.
+        The weapon-name / keys / powerups item-bit decode is the SAME logic the
+        live server uses: both call sv.decode_hud_items (single source of truth).
+        STAT_ACTIVEWEAPON holds the active weapon's IT_ bit (see
+        sv_send.write_clientdata_to_message); items is cl.items."""
+        from .sv import decode_hud_items
+        st = self.cl.stats
+        items = self.cl.items
+        weapon_bit = st[P.STAT_ACTIVEWEAPON]
+        weapon, keys, powerups = decode_hud_items(items, weapon_bit)
+        return {
+            "health": st[P.STAT_HEALTH],
+            "armor": st[P.STAT_ARMOR],
+            "weapon": weapon,
+            "ammo": st[P.STAT_AMMO],
+            "shells": st[P.STAT_SHELLS],
+            "nails": st[P.STAT_NAILS],
+            "rockets": st[P.STAT_ROCKETS],
+            "cells": st[P.STAT_CELLS],
+            "keys": keys,
+            "powerups": powerups,
+            "items": items,
+            "weapon_bit": weapon_bit,
+        }
+
+    def light_entities(self):
+        """Entities carrying engine light effects, like sv.light_entities():
+        (num, origin, effects, is_rocket). is_rocket keys off the model name
+        (rocket/grenade .mdl glow). Mirrors CL_RelinkEntities' dlight logic.
+        Gated on the entity being in the latest packet (PVS-correct in demos)."""
+        out = []
+        cl = self.cl
+        for num, e in enumerate(cl.entities):
+            if e is None or not e.model or num == cl.viewentity:
+                continue
+            if e.msgtime != cl.mtime[0]:        # not in the last packet (PVS)
+                continue
+            name = e.model
+            is_rocket = name.endswith("missile.mdl") or "lavaball" in name
+            if e.effects or is_rocket:
+                out.append((num, e.origin, e.effects, is_rocket))
+        return out
+
+    @property
+    def dlight_events(self):
+        return self.cl.dlight_events
+
+    def view_weapon(self):
+        """(view-model path, frame) from clientdata. STAT_WEAPON holds the
+        modelindex of the active v_*.mdl in the precache (see
+        sv_send.write_clientdata_to_message, which writes sv.model_index of
+        .weaponmodel there); STAT_WEAPONFRAME holds the frame. None if unset."""
+        mi = self.cl.stats[P.STAT_WEAPON]
+        if mi <= 0 or mi >= len(self.cl.model_precache):
+            return None
+        return (self.cl.model_precache[mi], self.cl.stats[P.STAT_WEAPONFRAME])
+
+    @property
+    def center_msg(self):
+        """The latest centerprint as (text, time), matching Server.center_msg's
+        tuple shape (the render block tests sv.time - cm[1] < CENTER_MSG_TIME).
+        None when no message has arrived."""
+        if not self.cl.center_msg:
+            return None
+        return (self.cl.center_msg, self.cl.center_time)
+
+    def intermission_active(self):
+        return self.cl.intermission
+
+    def intermission_stats(self):
+        if not self.cl.intermission:
+            return None
+        st = self.cl.stats
+        return {"time": int(self.cl.completed_time),
+                "secrets": st[P.STAT_SECRETS],
+                "total_secrets": st[P.STAT_TOTALSECRETS],
+                "monsters": st[P.STAT_MONSTERS],
+                "total_monsters": st[P.STAT_TOTALMONSTERS]}
 
 
 if __name__ == "__main__":                       # python -m quake.cl_parse

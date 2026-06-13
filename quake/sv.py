@@ -155,6 +155,22 @@ _WEAPON_NAMES = {
     IT_LIGHTNING: "Lightning Gun",
 }
 
+
+def decode_hud_items(items, weapon_bit):
+    """Decode the player's .items bitfield + active-weapon IT_ bit into the HUD's
+    (weapon name, keys string, powerups string). The single source of truth for
+    this item-bit -> name mapping; Server.hud_status() and
+    SceneFromClient.hud_status() (demo playback) both call it so the status bar
+    renders identically whether driven by the live server or a parsed demo."""
+    keys = " ".join(name for bit, name in
+                    ((IT_KEY1, "silver key"), (IT_KEY2, "gold key"))
+                    if items & bit)
+    powerups = " ".join(name for bit, name in
+                        ((IT_INVISIBILITY, "ring"), (IT_INVULNERABILITY, "pent"),
+                         (IT_SUIT, "suit"), (IT_QUAD, "quad"))
+                        if items & bit)
+    return _WEAPON_NAMES.get(weapon_bit, "?"), keys, powerups
+
 # system globals we read/write
 _GLOBALS = ("self", "other", "time", "frametime", "force_retouch", "skill",
             "v_forward", "v_right", "v_up", "msg_entity", "mapname",
@@ -2298,17 +2314,11 @@ class Server:
         vm, f, e = self.vm, self.f, self.player
         g = lambda n: int(vm.fget_f(e, f[n]))
         items = g("items")
-        keys = " ".join(name for bit, name in
-                        ((IT_KEY1, "silver key"), (IT_KEY2, "gold key"))
-                        if items & bit)
-        powerups = " ".join(name for bit, name in
-                            ((IT_INVISIBILITY, "ring"), (IT_INVULNERABILITY,
-                             "pent"), (IT_SUIT, "suit"), (IT_QUAD, "quad"))
-                            if items & bit)
+        weapon, keys, powerups = decode_hud_items(items, g("weapon"))
         return {
             "health": g("health"),
             "armor": g("armorvalue"),
-            "weapon": _WEAPON_NAMES.get(g("weapon"), "?"),
+            "weapon": weapon,
             "ammo": g("currentammo"),
             "shells": g("ammo_shells"),
             "nails": g("ammo_nails"),

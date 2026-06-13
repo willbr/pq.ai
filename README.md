@@ -52,8 +52,8 @@ pyobjc-framework-Quartz`); without it, `--tk` runs on any Python with tkinter.
 - `F1` (or `` ` ``) the drop-down console; `Esc` the overlay menu (resolution / quit);
   `P` the profiler HUD (per-frame section milliseconds, with a frametime sparkline).
 - Console commands: `map`, `save`/`load`, `god`, `give`, cvars via `set`,
-  `logperf <file>` to record per-frame timings to CSV (run again to stop) — `cmdlist`
-  for the rest.
+  `logperf [file]` to record per-frame timings to CSV (defaults to a timestamped
+  `perf-<ISO>.csv`; run again to stop) — `cmdlist` for the rest.
 
 ## How it works
 

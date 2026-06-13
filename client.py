@@ -7,6 +7,7 @@ import math
 import os
 import random
 import sys
+from datetime import datetime
 from dataclasses import dataclass, field
 
 from quake.pak import Pak
@@ -641,17 +642,17 @@ class Client:
 
     def _cmd_logperf(self, args):
         """Toggle per-frame CSV perf logging. `logperf <file>` starts; a bare
-        `logperf` stops and reports the path + frame count."""
+        `logperf` starts logging to a timestamped `perf-<ISO>.csv`; a bare
+        `logperf` while already logging stops and reports the path + frame count."""
         result = PROFILER.stop_log()
         if result is not None:
             path, n = result
             self.con.print(f"logged {n} frames to {path}")
             return
-        if not args:
-            self.con.print("usage: logperf <file>  (run again to stop)")
-            return
-        PROFILER.start_log(args[0])
-        self.con.print(f"logging perf to {args[0]} (run logperf again to stop)")
+        # colon-free ISO 8601 so the name is valid on every filesystem
+        path = args[0] if args else datetime.now().strftime("perf-%Y-%m-%dT%H-%M-%S.csv")
+        PROFILER.start_log(path)
+        self.con.print(f"logging perf to {path} (run logperf again to stop)")
 
     def _change_level(self, target):
         """Consume a pending changelevel: load the next map, carrying the skill
@@ -837,7 +838,8 @@ class Client:
         con.register_command("texture", mode_cmd(self._toggle_texture), "toggle texturing")
         con.register_command("prof", mode_cmd(self._toggle_prof), "toggle the profiler HUD")
         con.register_command("logperf", self._cmd_logperf,
-                             "logperf <file>: start/stop per-frame CSV perf logging")
+                             "logperf [file]: start/stop per-frame CSV perf logging "
+                             "(file defaults to a timestamped perf-<ISO>.csv)")
         con.register_command("map", self._cmd_map, "map <name>: load a level")
         con.register_command("save", self._cmd_save, "save <name>: save the game")
         con.register_command("load", self._cmd_load, "load <name>: load a save")

@@ -68,6 +68,15 @@ def test_signon_has_three_phases_ending_signonnum_123():
     assert _ends_with_signonnum(phases[2], 3)
 
 
+def test_spawn_block_has_64_lightstyles_and_total_stats():
+    sv = _boot("e1m1")
+    phases = build_signon(sv)
+    seq = _svc_sequence(phases[2])
+    assert seq.count(P.svc_lightstyle) == 64, "all MAX_LIGHTSTYLES sent at spawn"
+    assert seq.count(P.svc_updatestat) >= 4, "total secrets/monsters stats sent"
+
+
 if __name__ == "__main__":
     test_signon_has_three_phases_ending_signonnum_123()
+    test_spawn_block_has_64_lightstyles_and_total_stats()
     print("OK")

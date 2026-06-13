@@ -2168,6 +2168,23 @@ class Server:
         Task 3 wires the real value; 0 is valid (no music)."""
         return int(getattr(self, "_cdtrack", 0))
 
+    def total_secrets(self):
+        """STAT_TOTALSECRETS at spawn (host_cmd.c:1362). Same QC global the
+        intermission tally reads (gget_f "total_secrets")."""
+        return self.gget_f("total_secrets")
+
+    def total_monsters(self):
+        """STAT_TOTALMONSTERS at spawn (host_cmd.c:1364)."""
+        return self.gget_f("total_monsters")
+
+    def found_secrets(self):
+        """STAT_SECRETS at spawn (host_cmd.c:1366)."""
+        return self.gget_f("found_secrets")
+
+    def killed_monsters(self):
+        """STAT_MONSTERS at spawn (host_cmd.c:1368)."""
+        return self.gget_f("killed_monsters")
+
     def model_index(self, name):
         """modelindex for a precached model name, or 0 (SV_ModelIndex,
         sv_main.c). The client resolves it back via cl.model_precache."""

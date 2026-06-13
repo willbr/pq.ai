@@ -263,8 +263,8 @@ def build_signon(sv):
     # --- phase 2: spawn block ---
     w2 = MsgWriter()
     w2.byte(P.svc_time); w2.float(sv.time)
-    write_all_lightstyles(sv, w2)                # Task 2 (minimal until then)
-    write_total_stats(sv, w2)                    # Task 2 (no-op until then)
+    write_all_lightstyles(sv, w2)                # all 64 styles (host_cmd.c:1352)
+    write_total_stats(sv, w2)                    # secret/monster totals (host_cmd.c:1362)
     ang = sv.player_angles() or (0.0, 0.0, 0.0)
     w2.byte(P.svc_setangle)
     w2.angle(ang[0]); w2.angle(ang[1]); w2.angle(0.0)
@@ -281,13 +281,30 @@ def write_static_sounds(sv, w):      # Task 3
     return
 
 
-def write_all_lightstyles(sv, w):    # Task 2 -- minimal stub: emit changed styles
-    for idx, patt in sv.lightstyles.items():
-        w.byte(P.svc_lightstyle); w.byte(idx); w.string(patt)
+def write_all_lightstyles(sv, w):
+    """svc_lightstyle for ALL 64 styles at spawn (host_cmd.c:1352). Styles the
+    QC never set are sent as empty strings, like WinQuake. Seeds
+    sv._prev_lightstyles with what we send so the first per-frame write_reliable
+    doesn't redundantly re-emit every style as "changed" (it still emits on
+    genuine changes -- torches keep flickering)."""
+    for i in range(64):
+        patt = sv.lightstyles.get(i, "")
+        w.byte(P.svc_lightstyle)
+        w.byte(i)
+        w.string(patt)
+        sv._prev_lightstyles[i] = patt
 
 
-def write_total_stats(sv, w):        # Task 2
-    return
+def write_total_stats(sv, w):
+    """svc_updatestat for the secret/monster totals at spawn (host_cmd.c:1362).
+    Same QC globals the intermission tally reads."""
+    for stat, value in ((P.STAT_TOTALSECRETS, sv.total_secrets()),
+                        (P.STAT_TOTALMONSTERS, sv.total_monsters()),
+                        (P.STAT_SECRETS, sv.found_secrets()),
+                        (P.STAT_MONSTERS, sv.killed_monsters())):
+        w.byte(P.svc_updatestat)
+        w.byte(stat)
+        w.long(int(value))
 
 
 def write_serverinfo(sv, w):

@@ -950,6 +950,16 @@ class Client:
     def _cmd_quit(self, args):
         self.quit_requested = True
 
+    def _intermission_block(self, ist):
+        """Sbar_IntermissionOverlay's text: completed time (m:ss), secrets and
+        kills tallies. Shared by the zbuf framebuffer composite and the wire/
+        flat overlay path so the two never diverge."""
+        mins, secs = divmod(ist["time"], 60)
+        return ("LEVEL COMPLETE\n\n"
+                f"Time      {mins}:{secs:02d}\n"
+                f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
+                f"Kills     {ist['monsters']} / {ist['total_monsters']}")
+
     def _composite_zbuf_ui(self, fb, vw, vh):
         """zbuf mode: draw centerprint/intermission, console, and menu into the
         framebuffer with the conchars font -- the real Quake bitmap UI, drawn
@@ -963,11 +973,7 @@ class Client:
         ist = self.sv.intermission_stats() if self.intermission else None
         block = None
         if ist:
-            mins, secs = divmod(ist["time"], 60)
-            block = ("LEVEL COMPLETE\n\n"
-                     f"Time      {mins}:{secs:02d}\n"
-                     f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
-                     f"Kills     {ist['monsters']} / {ist['total_monsters']}")
+            block = self._intermission_block(ist)
         else:
             cm = self.sv.center_msg
             if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
@@ -1230,7 +1236,7 @@ class Client:
                     self.sbar.draw(fb, vw, full_h, st, self.sv.time,
                                    self.item_gettime, self.faceanimtime)
                 framebuffer = fbdata = (fb, vw, full_h)
-            self._composite_zbuf_ui(fb, vw, vh)           # conchars UI overlay
+            self._composite_zbuf_ui(fb, vw, vh)           # conchars UI composite
         elif self.mode == "flat" or self.wire_hidden:
             # flat shading, or hidden-line wireframe: both want the back-to-front
             # (painter's) polygon path so near faces occlude far ones. They differ
@@ -1319,12 +1325,8 @@ class Client:
         if self.mode != "zbuf":
             ist = self.sv.intermission_stats() if self.intermission else None
             if ist:
-                mins, secs = divmod(ist["time"], 60)
-                panel = ("LEVEL COMPLETE\n\n"
-                         f"Time      {mins}:{secs:02d}\n"
-                         f"Secrets   {ist['secrets']} / {ist['total_secrets']}\n"
-                         f"Kills     {ist['monsters']} / {ist['total_monsters']}")
-                overlays.append((w // 2, h // 3, panel, (255, 255, 0), "center"))
+                overlays.append((w // 2, h // 3, self._intermission_block(ist),
+                                 (255, 255, 0), "center"))
 
             cm = self.sv.center_msg
             if not ist and cm and self.sv.time - cm[1] < CENTER_MSG_TIME:

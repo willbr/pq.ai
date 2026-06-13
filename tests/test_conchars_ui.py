@@ -62,6 +62,25 @@ def test_menu_composited_not_overlaid_in_zbuf():
     assert bytes(rf.framebuffer[0]) != base
 
 
+def test_intermission_block_shared_between_paths():
+    c = _client()
+    c.sv.gset_f("intermission_running", 1.0)
+    c.sv.intermission_time = 83.0                       # 1:23
+    c.sv.gset_f("found_secrets", 2.0); c.sv.gset_f("total_secrets", 4.0)
+    c.sv.gset_f("killed_monsters", 15.0); c.sv.gset_f("total_monsters", 30.0)
+    c.intermission = True
+    ist = c.sv.intermission_stats()
+    block = c._intermission_block(ist)
+    assert "Time      1:23" in block
+    assert "Secrets   2 / 4" in block and "Kills     15 / 30" in block
+    # zbuf composites this block into the framebuffer (panel changes pixels)...
+    base = bytes(c.frame(0.0, InputState()).framebuffer[0])  # mode is zbuf
+    # ...and the flat path emits the identical string as an overlay.
+    rf = c.frame(0.05, InputState(commands=frozenset({"zbuf"})))
+    panel = [o for o in rf.overlays if o[4] == "center"]
+    assert panel and panel[0][2] == block
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

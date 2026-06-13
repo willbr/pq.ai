@@ -1936,6 +1936,7 @@ class Renderer:
             (z00, zdx, zdy), (u00, udx, udy), (v00, vdx, vdy) = grads
             y, spans = poly_spans(sx, sy, iw, ih)
             zbl = zb; fbl = fb; iwl = iw; int_ = int   # locals beat LOAD_DEREF/GLOBAL
+            floor_ = math.floor                        # floor, not int: see below
             flat_lm = lmw == 1 and lmh == 1            # sky / alias / pickups:
             rowtab = cmap_rows[(255 - lux[0]) >> 2]    # shade constant per poly
             for xli, xri in spans:
@@ -1946,12 +1947,19 @@ class Renderer:
                     voz = v00 + vdx * xc + vdy * yc
                     row = y * iwl
                     if flat_lm:
+                        # Wrap texels with floor(), not int(): int() truncates
+                        # toward zero, so a *negative* texel coord in (-1,0) reads
+                        # row/col 0 instead of the last row/col, and the texture's
+                        # top/left edge bleeds a one-texel line along a face whose
+                        # mapping crosses 0. That is the stray bright strip on the
+                        # ammo-box bottom (its side texture pads the unused rows at
+                        # the top, which floor() keeps off the visible face).
                         for idx in range(row + xli, row + xri):
                             if iz > zbl[idx]:
                                 z = 1.0 / iz
                                 zbl[idx] = iz
-                                fbl[idx] = rowtab[tex[int_(voz * z) % th * tw
-                                                      + int_(uoz * z) % tw]]
+                                fbl[idx] = rowtab[tex[floor_(voz * z) % th * tw
+                                                      + floor_(uoz * z) % tw]]
                             iz += zdx
                             uoz += udx
                             voz += vdx

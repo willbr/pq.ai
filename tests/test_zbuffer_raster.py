@@ -23,7 +23,8 @@ from quake.pak import Pak
 from quake.bsp import Bsp
 from quake.mdl import Mdl
 import quake.render as render_mod
-from quake.render import Renderer, poly_spans, plane_gradients, screen_backface
+from quake.render import (Renderer, PickupModel, poly_spans, plane_gradients,
+                          screen_backface)
 
 PAK = "quake-shareware/id1/pak0.pak"
 GOLDEN_DIR = "quake-shareware/goldens"
@@ -320,6 +321,50 @@ def test_viewmodel_backface_cull_kills_zfight_shimmer():
         f"backface cull did not quell the nailgun z-fight (flips on={on} off={off})"
 
 
+def test_pickup_box_texels_floor_negative_coords():
+    """The ammo box's side texture pads its unused texels in the top rows; the
+    box face maps t from 0 (bottom edge) to -24 (top), so the bottom strip has
+    t in (-1, 0). Wrapping that with int() (truncates toward zero) reads texel
+    row 0 -- the padding -- as a stray bright line along the box bottom (the
+    e1m4 / e1m2 'weird line around the bottom pixel'); floor() reads the last
+    row, the real art. Render the e1m4 shells box and assert the production
+    sampler floors: it must differ from a forced int()-truncating sampler (which
+    reproduces the bug). If the renderer ever reverts to int(), the two match and
+    this fails."""
+    import math as _math
+    pak = Pak(PAK)
+    pb = pak.read("gfx/palette.lmp")
+    palette = [(pb[i * 3], pb[i * 3 + 1], pb[i * 3 + 2]) for i in range(256)]
+    colormap = pak.read("gfx/colormap.lmp")[:64 * 256]
+    b = Bsp(pak.read("maps/e1m4.bsp"))
+    r = Renderer(b, palette, colormap)
+    r.resize(1600, 1200)
+    pm = PickupModel(Bsp(pak.read("maps/b_shell0.bsp")), palette)
+    box = (-88.0, 2160.0, 1224.0)             # the shells box by the e1m4 spawn
+    center = (box[0] + 12, box[1] + 12, box[2] + 12)
+    eye = (-160.0, 2210.0, 1264.0)
+    dx, dy, dz = center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]
+    yaw = _math.degrees(_math.atan2(dy, dx))
+    pitch = _math.degrees(_math.atan2(-dz, _math.hypot(dx, dy)))
+
+    def render():
+        (fb, w, h), _ = r.render_zbuffer(eye, yaw, pitch, textured=True,
+                                         lightstyles=[256] * 64, time=0.5,
+                                         bsp_ents=[(pm, box, (0.0, 0.0, 0.0))])
+        return bytes(fb), w, h
+
+    fb_prod, w, h = render()
+    saved = _math.floor
+    _math.floor = lambda v: int(v)            # reproduce the pre-fix truncation
+    try:
+        fb_int, _, _ = render()
+    finally:
+        _math.floor = saved
+    diff = sum(1 for a, b2 in zip(fb_prod, fb_int) if a != b2)
+    assert diff > 500, \
+        f"renderer is truncating negative texel coords, not flooring (diff={diff})"
+
+
 def _renderer():
     pak = Pak(PAK)
     pb = pak.read("gfx/palette.lmp")
@@ -415,5 +460,6 @@ if __name__ == "__main__":
     test_screen_backface_winding()
     test_v_nail_has_two_sided_coincident_faces()
     test_viewmodel_backface_cull_kills_zfight_shimmer()
+    test_pickup_box_texels_floor_negative_coords()
     test_golden_frames()
     print("OK")

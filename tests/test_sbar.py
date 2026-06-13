@@ -139,6 +139,33 @@ def test_backtile_fills_margins_on_wide_buffers():
     assert fb[y * wide + 395] == bpx[(y & 63) * 64 + (395 & 63)]
 
 
+def test_intermission_overlay_draws_pics():
+    """Sbar_IntermissionOverlay: the 'complete' title + 'inter' label pics and
+    the big 24x24 digit pics for time/secrets/kills -- NOT the conchars font."""
+    from quake.conchars import load_qpic
+    pak = Pak("quake-shareware/id1/pak0.pak")
+    sb = Sbar(Wad(pak.read("gfx.wad")))
+    complete = load_qpic(pak.read("gfx/complete.lmp"))   # 192x24 opaque title
+    inter = load_qpic(pak.read("gfx/inter.lmp"))         # 160x144 label panel
+    fb = bytearray(bytes((BG,)) * (W * H))
+    ist = {"time": 83, "secrets": 2, "total_secrets": 4,   # 83s -> 1:23
+           "monsters": 15, "total_monsters": 30}
+    sb.intermission_overlay(fb, W, H, ist, complete, inter)
+    sx = (W - 320) // 2                                    # 0 at 320 wide
+    # title + label pics land at id's coords
+    _assert_pic_at(fb, W, sx + 64, 24, complete, "complete title")
+    _assert_pic_at(fb, W, sx + 0, 56, inter, "inter labels")
+    # time 1:23 -- IntermissionNumber(160,64,1,3): 1 digit, x += (3-1)*24 -> 208
+    _assert_pic_at(fb, W, sx + 208, 64, sb.nums[0][1], "time minutes '1'")
+    _assert_pic_at(fb, W, sx + 234, 64, sb.colon, "time colon")
+    _assert_pic_at(fb, W, sx + 246, 64, sb.nums[0][2], "seconds tens '2'")
+    _assert_pic_at(fb, W, sx + 266, 64, sb.nums[0][3], "seconds ones '3'")
+    # secrets 2 / 4 at row 104; slash at 232
+    _assert_pic_at(fb, W, sx + 232, 104, sb.slash, "secrets slash")
+    _assert_pic_at(fb, W, sx + 208, 104, sb.nums[0][2], "secrets found '2'")
+    _assert_pic_at(fb, W, sx + 288, 104, sb.nums[0][4], "secrets total '4'")
+
+
 if __name__ == "__main__":
     test_strips_on_the_right_rows()
     test_face_tiers_and_pain()
@@ -147,4 +174,5 @@ if __name__ == "__main__":
     test_invulnerability_face_and_666()
     test_transparency_keeps_strip_pixels()
     test_backtile_fills_margins_on_wide_buffers()
+    test_intermission_overlay_draws_pics()
     print("OK")

@@ -176,6 +176,10 @@ class Client:
         # the lump the Sbar already loaded; conback is the console backdrop.
         self.confont = ConFont(self.sbar.conchars)
         self.conback = load_qpic(self.pak.read("gfx/conback.lmp"))
+        # intermission ("level complete") screen pics -- Sbar_IntermissionOverlay
+        # draws these (the big digit pics live on the Sbar), not the conchars font.
+        self.sb_complete = load_qpic(self.pak.read("gfx/complete.lmp"))
+        self.sb_inter = load_qpic(self.pak.read("gfx/inter.lmp"))
         # screen colour shifts (view.c): contents/damage/bonus/powerup blend
         # the base palette into view_palette each frame (V_UpdatePalette)
         self.view_palette = self.palette
@@ -969,20 +973,25 @@ class Client:
         menu's M_Print/cursor spinner."""
         cf = self.confont
 
-        # centerprint or the intermission stats panel, centered in the view.
+        # intermission: the authentic Sbar_IntermissionOverlay pics (not text);
+        # centerprint: the conchars centered text. The big-digit layout needs the
+        # 320x200 design space, so tiny framebuffers fall back to the text panel.
         ist = self.sv.intermission_stats() if self.intermission else None
-        block = None
-        if ist:
-            block = self._intermission_block(ist)
+        if ist and vw >= 320 and vh >= 200:
+            self.sbar.intermission_overlay(fb, vw, vh, ist,
+                                           self.sb_complete, self.sb_inter)
         else:
-            cm = self.sv.center_msg
-            if cm and self.sv.time - cm[1] < CENTER_MSG_TIME:
-                block = cm[0]
-        if block:
-            lines = block.split("\n")
-            y0 = int(0.35 * vh) - len(lines) * 4
-            for i, ln in enumerate(lines):
-                cf.text_centered(fb, vw, vw // 2, y0 + i * 8, ln)
+            if ist:
+                block = self._intermission_block(ist)          # tiny-fb fallback
+            else:
+                cm = self.sv.center_msg
+                block = (cm[0] if cm and self.sv.time - cm[1] < CENTER_MSG_TIME
+                         else None)
+            if block:
+                lines = block.split("\n")
+                y0 = int(0.35 * vh) - len(lines) * 4
+                for i, ln in enumerate(lines):
+                    cf.text_centered(fb, vw, vw // 2, y0 + i * 8, ln)
 
         # console: conback backdrop over the top ~40%, text + flashing cursor.
         con = self.con

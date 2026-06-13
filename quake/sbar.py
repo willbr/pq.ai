@@ -72,6 +72,9 @@ class Sbar:
         # (normal, pain) -- mirrors the reversed sb_faces[] fill in Sbar_Init
         self.faces = [(q(f"face{5 - i}"), q(f"face_p{5 - i}"))
                       for i in range(5)]
+        # Sbar_IntermissionNumber's separators: ':' in the time, '/' in tallies
+        self.colon = q("num_colon")
+        self.slash = q("num_slash")
         self.face_invis = q("face_invis")
         self.face_invuln = q("face_invul2")
         self.face_invis_invuln = q("face_inv2")
@@ -122,6 +125,44 @@ class Sbar:
         for ch in s:
             self._pic(fb, fbw, x, y, nums[10 if ch == "-" else int(ch)])
             x += 24
+
+    def _inter_num(self, fb, fbw, x, y, value, digits):
+        """Sbar_IntermissionNumber: big gold digits, left-padded to `digits`
+        (only shifts when the value is shorter; longer values are trimmed)."""
+        s = str(int(value))
+        if len(s) > digits:
+            s = s[len(s) - digits:]
+        if len(s) < digits:
+            x += (digits - len(s)) * 24
+        for ch in s:
+            self._pic(fb, fbw, x, y, self.nums[0][10 if ch == "-" else int(ch)])
+            x += 24
+
+    def intermission_overlay(self, fb, fbw, fbh, ist, complete, inter):
+        """Sbar_IntermissionOverlay (single-player): the end-of-level screen --
+        the 'complete' title pic, the 'inter' Time/Secrets/Kills label panel,
+        and the big 24x24 digit pics (sb_nums) with num_colon/num_slash. Centred
+        horizontally like the status bar ((fbw-320)/2); id's fixed y's are kept.
+        `complete`/`inter` are qpic (w,h,indices) tuples the caller loads."""
+        sx = (fbw - 320) // 2
+        self._pic(fb, fbw, sx + 64, 24, complete)      # Draw_Pic(64,24)
+        self._pic(fb, fbw, sx + 0, 56, inter)          # Draw_TransPic(0,56)
+        # time (m:ss)
+        t = int(ist["time"])
+        dig = t // 60
+        self._inter_num(fb, fbw, sx + 160, 64, dig, 3)
+        num = t - dig * 60
+        self._pic(fb, fbw, sx + 234, 64, self.colon)
+        self._pic(fb, fbw, sx + 246, 64, self.nums[0][num // 10])
+        self._pic(fb, fbw, sx + 266, 64, self.nums[0][num % 10])
+        # secrets found / total
+        self._inter_num(fb, fbw, sx + 160, 104, ist["secrets"], 3)
+        self._pic(fb, fbw, sx + 232, 104, self.slash)
+        self._inter_num(fb, fbw, sx + 240, 104, ist["total_secrets"], 3)
+        # monsters killed / total
+        self._inter_num(fb, fbw, sx + 160, 144, ist["monsters"], 3)
+        self._pic(fb, fbw, sx + 232, 144, self.slash)
+        self._inter_num(fb, fbw, sx + 240, 144, ist["total_monsters"], 3)
 
     # ---- Sbar_Draw ----
     def draw(self, fb, fbw, fbh, st, time, item_gettime, faceanimtime):

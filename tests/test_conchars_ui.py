@@ -73,9 +73,10 @@ def test_intermission_block_shared_between_paths():
     block = c._intermission_block(ist)
     assert "Time      1:23" in block
     assert "Secrets   2 / 4" in block and "Kills     15 / 30" in block
-    # zbuf composites this block into the framebuffer (panel changes pixels)...
+    # the wire/flat overlay path emits this text block; zbuf now draws the
+    # authentic Sbar_IntermissionOverlay pics instead (see test_sbar.py).
     base = bytes(c.frame(0.0, InputState()).framebuffer[0])  # mode is zbuf
-    # ...and the flat path emits the identical string as an overlay.
+    # the flat path emits the identical string as an overlay.
     rf = c.frame(0.05, InputState(commands=frozenset({"zbuf"})))
     panel = [o for o in rf.overlays if o[4] == "center"]
     assert panel and panel[0][2] == block

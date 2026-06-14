@@ -23,8 +23,13 @@ measure against), then gate the expensive, uncertain work behind data.
 
 
 
-qcc
-map tools, bsp, light, vis, quaked
+~~qcc~~ — DONE (`quake/qcc/`): pure-stdlib QuakeC compiler, byte-identical to id's
+   qccdos.exe on v101qc (oracle-diff test). Establishes the pattern for the rest of
+   the toolchain: port the id tool, generate a reference output with the genuine DOS
+   binary under DOSBox-x, diff to byte-identity.
+map tools — qbsp, light, vis, quaked (same byte-identity-vs-oracle approach as qcc;
+   sources in quake-source/quake-tools/qutils + QuakeEd). qbsp first (light/vis depend
+   on its output). Heavier than qcc (BSP tree build, radiosity, PVS flood-fill).
 headless mode for testing
 headless server mode
 bots

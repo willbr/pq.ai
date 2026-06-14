@@ -86,10 +86,10 @@ def test_prespawn_emits_static_sounds():
 
 
 def test_makestatic_entities_emitted():
-    sv = _boot("e1m1")
-    # e1m1 has makestatic torches; after load_level sv.static_entities is populated
-    if not getattr(sv, "static_entities", None):
-        return                                  # map without statics: skip
+    # e1m2 has makestatic torches/flames (e1m1 has none); after load_level
+    # sv.static_entities is populated and the prespawn block emits svc_spawnstatic.
+    sv = _boot("e1m2")
+    assert sv.static_entities, "e1m2 must have makestatic torches/flames"
     seq = _svc_sequence(build_signon(sv)[1])
     assert P.svc_spawnstatic in seq
 

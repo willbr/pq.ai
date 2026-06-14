@@ -273,8 +273,16 @@ def build_signon(sv):
     return [bytes(w0.data), bytes(w1.data), bytes(w2.data)]
 
 
-def write_static_entities(sv, w):    # Task 4
-    return
+def write_static_entities(sv, w):
+    """svc_spawnstatic for each makestatic entity (PF_makestatic, pr_cmds.c:1584):
+    modelindex, frame, colormap, skin, then 3x(coord, angle). Mirrors
+    svc_spawnbaseline minus the entnum; the client parses it into a static entity."""
+    for s in getattr(sv, "static_entities", ()):
+        w.byte(P.svc_spawnstatic)
+        w.byte(s["modelindex"]); w.byte(s["frame"])
+        w.byte(s["colormap"]); w.byte(s["skin"])
+        for i in range(3):
+            w.coord(s["origin"][i]); w.angle(s["angles"][i])
 
 
 def write_static_sounds(sv, w):

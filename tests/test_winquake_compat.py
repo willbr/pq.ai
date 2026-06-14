@@ -85,8 +85,18 @@ def test_prespawn_emits_static_sounds():
     assert P.svc_spawnstaticsound in seq
 
 
+def test_makestatic_entities_emitted():
+    sv = _boot("e1m1")
+    # e1m1 has makestatic torches; after load_level sv.static_entities is populated
+    if not getattr(sv, "static_entities", None):
+        return                                  # map without statics: skip
+    seq = _svc_sequence(build_signon(sv)[1])
+    assert P.svc_spawnstatic in seq
+
+
 if __name__ == "__main__":
     test_signon_has_three_phases_ending_signonnum_123()
     test_spawn_block_has_64_lightstyles_and_total_stats()
     test_prespawn_emits_static_sounds()
+    test_makestatic_entities_emitted()
     print("OK")

@@ -290,6 +290,7 @@ class Server:
         self._model_trail = {}      # modelindex -> trail type (or None), cached
         self.snd = None             # sound mixer (set by host after precache); None -> muted
         self.ambients = []          # deferred looping ambientsounds: (name, pos, vol, atten)
+        self.static_entities = []   # PF_makestatic snapshots: dict(modelindex/frame/colormap/skin/origin/angles)
 
         self.time = 0.0
         self.frametime = 0.1
@@ -359,6 +360,7 @@ class Server:
         vm = self.vm
         # model precache: 0 empty, 1 worldmodel, then inline brush models *1.. *N
         self.ambients = []          # rebuilt below as ambient entities spawn
+        self.static_entities = []   # rebuilt below as makestatic entities spawn
         self.model_precache = ["", self.mapname]
         if self.bsp is not None:
             for i in range(1, len(self.bsp.models)):
@@ -1493,7 +1495,22 @@ class Server:
         self.lightstyles[int(self.vm.parm_f(0))] = self.vm.parm_str(1)
 
     def _pf_makestatic(self):
-        pass            # keep the edict alive so it still renders + animates
+        """makestatic(self): snapshot the entity's render state into a permanent
+        static (torches, flames) and free the edict (PF_makestatic, pr_cmds.c:1584).
+        The signon emits these as svc_spawnstatic so they appear in WinQuake demos.
+        Reads modelindex from the int model field (setmodel set it from the model
+        name, matching the C's SV_ModelIndex(ent->v.model))."""
+        vm, f = self.vm, self.f
+        e = vm.parm_i(0)
+        self.static_entities.append({
+            "modelindex": int(vm.fget_i(e, f["modelindex"])),
+            "frame": int(vm.fget_f(e, f["frame"])),
+            "colormap": int(vm.fget_f(e, f["colormap"])),
+            "skin": int(vm.fget_f(e, f["skin"])),
+            "origin": tuple(vm.fget_v(e, f["origin"])),
+            "angles": tuple(vm.fget_v(e, f["angles"])),
+        })
+        vm.free_edict(e)   # ED_Free: the entity becomes static and is thrown away
 
     def _pf_changelevel(self):
         self.changelevel = self.vm.parm_str(0)

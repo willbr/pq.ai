@@ -128,7 +128,8 @@ def test_rising_lift_carries_a_walking_monster():
     e1m4 "ogre stuck underneath the lift" bug, nondeterministic because it only
     bit when the ogre's random-walk AI happened to step that frame.
 
-    Driven on e1m4, where ogre 90 spawns standing on func_door lift 89."""
+    Driven on e1m4, where an ogre spawns standing on a func_door lift (found by
+    classname below -- makestatic freeing torch edicts at load renumbers them)."""
     pak = Pak(PAK)
     b = Bsp(pak.read("maps/e1m4.bsp"))
     sv = Server(Progs(pak.read("progs.dat")), bsp=b,
@@ -147,11 +148,24 @@ def test_rising_lift_carries_a_walking_monster():
         snapshot()
         sv.run_frame(0.1)
 
-    lift, ogre = 89, 90
-    assert sv.pr.string(vm.fget_i(ogre, o("classname"))) == "monster_ogre", \
-        "test fixture moved: e1m4 edict 90 is no longer the ogre on the lift"
-    assert vm.fget_i(ogre, o("groundentity")) == lift, \
-        "test setup: the ogre should settle standing on the lift"
+    # Find the ogre that settled standing on a func_door lift. We look it up by
+    # classname rather than a hardcoded edict number: makestatic frees its edicts
+    # during level spawn (faithful to WinQuake's ED_Free + ED_Alloc immediate
+    # reuse while time<2s), so the torch-heavy e1m4 renumbers the entities that
+    # spawn after the torches -- the ogre/lift pair is the same, its indices are not.
+    ogre = lift = None
+    for e in range(1, vm.num_edicts):
+        if vm.free[e]:
+            continue
+        if sv.pr.string(vm.fget_i(e, o("classname"))) != "monster_ogre":
+            continue
+        ge = vm.fget_i(e, o("groundentity"))
+        if ge > 0 and not vm.free[ge] and \
+                sv.pr.string(vm.fget_i(ge, o("classname"))) == "door":
+            ogre, lift = e, ge
+            break
+    assert ogre is not None, \
+        "test fixture: no e1m4 ogre settled standing on a func_door lift"
 
     # raise the lift and, every frame, drive a movestep the way the awake ogre's
     # AI would -- the exact interleave (mover moves, then monster re-grounds) that

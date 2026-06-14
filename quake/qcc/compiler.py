@@ -15,7 +15,7 @@ from .types import (type_size, ev_void, ev_string, ev_float, ev_vector,
                     ev_entity, ev_field, ev_function, ev_pointer)
 from .codegen import (OPCODES, OP_INDEX, OP_DONE, OP_LOAD_F, OP_ADDRESS,
                       OP_STORE_V, OP_RETURN, OP_IF, OP_IFNOT, OP_CALL0,
-                      OP_STATE, OP_GOTO, OP_NOT_F, TOP_PRIORITY, NOT_PRIORITY,
+                      OP_STATE, OP_GOTO, TOP_PRIORITY, NOT_PRIORITY,
                       emit)
 
 

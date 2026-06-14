@@ -6,8 +6,7 @@ little-endian. The CRC is a CCITT/XMODEM 16-bit CRC over the generated
 progdefs.h TEXT (must reproduce 5927 for standard Quake)."""
 
 import struct
-from .types import (ev_void, ev_string, ev_float, ev_vector, ev_entity,
-                    ev_field, ev_function, ev_pointer, type_size)
+from .types import (ev_string, ev_float, ev_vector, ev_field, ev_function)
 
 PROG_VERSION = 6
 DEF_SAVEGLOBAL = 1 << 15
@@ -39,9 +38,6 @@ def _crc_bytes(data):
         crc = ((crc << 8) & 0xffff) ^ _CRCTAB[((crc >> 8) ^ byte) & 0xff]
     return crc
 
-
-_CTYPE = {ev_float: "float", ev_vector: "vec3_t", ev_string: "string_t",
-          ev_function: "func_t", ev_entity: "int"}
 
 
 def progdefs_text(state):

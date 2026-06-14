@@ -17,8 +17,7 @@ the offset); vector defs auto-create _x/_y/_z."""
 
 import struct
 
-from .types import (TypeTable, type_size, ev_void, ev_vector, ev_field,
-                    ev_function, ev_string, ev_float)
+from .types import TypeTable, type_size, ev_vector, ev_field
 
 RESERVED_OFS = 28           # OFS_NULL + OFS_RETURN + 8*3 param slots
 OFS_RETURN = 1

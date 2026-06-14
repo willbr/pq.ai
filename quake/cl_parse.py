@@ -239,6 +239,11 @@ class ClientState:
                    if e.modelindex < len(self.model_precache) else None)
         e.msg_origins = [b.origin, b.origin]
         e.msg_angles = [b.angles, b.angles]
+        # static entities (svc_spawnstatic) are never relinked, so seed the
+        # resolved render fields straight from the baseline -- they're permanent
+        # and the renderer reads .origin/.angles directly.
+        e.origin = b.origin
+        e.angles = b.angles
 
     def parse_update(self, bits, r):               # cl_parse.c:330
         if bits & P.U_MOREBITS:
@@ -506,9 +511,22 @@ class SceneFromClient:
             if e.model.endswith(ext):
                 yield e
 
+    def _static_alias(self):
+        """The svc_spawnstatic .mdl entities (wall torches / flames). WinQuake
+        draws these from cl.static_entities; they're permanent and PVS-checked
+        by the renderer, not message-gated, so they always render (no msgtime).
+        Their models are precached, so the same self.models[modelindex] lookup
+        in client.py resolves them. Frame is fixed, but flame .mdl groups
+        auto-cycle by time in Mdl.frame_verts, so they still animate."""
+        for e in self.cl.static_entities:
+            if e.model and e.model.endswith(".mdl"):
+                yield (e.modelindex, e.origin, e.angles, e.frame)
+
     def alias_entities(self):                  # .mdl
-        return [(e.modelindex, e.origin, e.angles, e.frame)
-                for e in self._world_alias_sprite(".mdl")]
+        out = [(e.modelindex, e.origin, e.angles, e.frame)
+               for e in self._world_alias_sprite(".mdl")]
+        out.extend(self._static_alias())
+        return out
 
     def sprite_entities(self):                 # .spr
         return [(e.modelindex, e.origin, e.frame)

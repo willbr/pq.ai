@@ -168,6 +168,34 @@ def test_scene_view_weapon_uses_stat_weapon_modelindex():
     assert vw == ("progs/v_shot.mdl", 3)
 
 
+def test_static_entities_render_as_alias():
+    """svc_spawnstatic (wall torches / flames) must be drawn: the entity is
+    freed server-side (faithful PF_makestatic) and delivered only as a static,
+    so SceneFromClient.alias_entities() must include it -- always, with no
+    msgtime gate -- at its baseline origin/angles/modelindex. The fix that
+    restored torches in live play after makestatic became faithful."""
+    from quake.cl_parse import SceneFromClient
+    cl = ClientState()
+    cl.model_precache = ["", "maps/x.bsp", "progs/flame.mdl"]
+    w = MsgWriter()
+    w.byte(P.svc_spawnstatic)
+    w.byte(2)            # modelindex -> progs/flame.mdl
+    w.byte(0)            # frame
+    w.byte(0); w.byte(0) # colormap, skin
+    for v in (64.0, 128.0, 256.0):
+        w.coord(v); w.angle(0.0)
+    cl.parse_message(MsgReader(bytes(w.data)))
+    assert len(cl.static_entities) == 1
+    se = cl.static_entities[0]
+    # parse_baseline must seed concrete render fields (not leave origin 0,0,0)
+    assert se.origin == (64.0, 128.0, 256.0)
+    assert se.modelindex == 2 and se.model == "progs/flame.mdl"
+    # alias_entities yields the static at its origin/modelindex (no msgtime gate)
+    ae = SceneFromClient(cl).alias_entities()
+    assert any(mi == 2 and abs(org[0] - 64.0) < 1e-6 and abs(org[2] - 256.0) < 1e-6
+               for mi, org, ang, frame in ae), ae
+
+
 def test_temp_entity_explosion_pushes_dlight():
     cl = ClientState()
     cl.mtime[0] = 5.0
@@ -329,4 +357,5 @@ if __name__ == "__main__":
     test_scene_light_entities_from_effects()
     test_scene_view_weapon_uses_stat_weapon_modelindex()
     test_temp_entity_explosion_pushes_dlight()
+    test_static_entities_render_as_alias()
     print("OK")

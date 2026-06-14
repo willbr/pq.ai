@@ -120,10 +120,14 @@ class CompileState:
                 if _str_at(self.strings, self.gi(d.ofs)) == value:
                     return d
             elif imm_type is self.types.float:
-                if self.gf(d.ofs) == value:
+                # C compares G_FLOAT(cn->ofs) == pr_immediate._float, both 32-bit
+                # floats. self.gf() is already float32; round `value` to match so
+                # 0.1, 0.2 etc. (inexact in float32) dedup correctly.
+                if self.gf(d.ofs) == _f32(value):
                     return d
             elif imm_type is self.types.vector:
-                if (self.gf(d.ofs), self.gf(d.ofs + 1), self.gf(d.ofs + 2)) == value:
+                if (self.gf(d.ofs), self.gf(d.ofs + 1), self.gf(d.ofs + 2)) \
+                        == (_f32(value[0]), _f32(value[1]), _f32(value[2])):
                     return d
         # allocate a new constant
         d = Def(imm_type, "IMMEDIATE", self.numpr_globals,
@@ -156,3 +160,11 @@ def _mismatch(name):
 def _str_at(blob, ofs):
     end = blob.index(0, ofs)
     return blob[ofs:end].decode("latin-1")
+
+
+_F32 = __import__("struct").Struct("<f")
+
+
+def _f32(v):
+    """Round a Python double to IEEE single precision (C float), as qccdos does."""
+    return _F32.unpack(_F32.pack(v))[0]

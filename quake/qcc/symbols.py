@@ -15,6 +15,8 @@ Byte-identity invariants live here: temp slots are never reused; immediates are
 deduped by a linear scan of `defs` in insertion order (first appearance fixes
 the offset); vector defs auto-create _x/_y/_z."""
 
+import struct
+
 from .types import (TypeTable, type_size, ev_void, ev_vector, ev_field,
                     ev_function, ev_string, ev_float)
 
@@ -162,7 +164,7 @@ def _str_at(blob, ofs):
     return blob[ofs:end].decode("latin-1")
 
 
-_F32 = __import__("struct").Struct("<f")
+_F32 = struct.Struct("<f")
 
 
 def _f32(v):

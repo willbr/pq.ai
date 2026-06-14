@@ -51,6 +51,7 @@ class CompileState:
         self.functions = [None]                 # index 0 reserved (InitData)
         self.size_fields = 0
         self.cur_file = ""                      # s_file string offset filename
+        self.cur_line = 0                       # source line for statement_lines
         # PR_ParseImmediate / value plumbing
         self.def_ret = Def(None, "temp", OFS_RETURN)
         self.def_parms = [Def(None, "temp", OFS_PARM0 + 3 * i) for i in range(8)]
@@ -139,6 +140,12 @@ class CompileState:
             self.set_gf(d.ofs + 1, value[1])
             self.set_gf(d.ofs + 2, value[2])
         return d
+
+
+    def types_for(self, etype):
+        return (self.types.void, self.types.string, self.types.float,
+                self.types.vector, self.types.entity, self.types.field,
+                self.types.function, self.types.pointer)[etype]
 
 
 def _mismatch(name):

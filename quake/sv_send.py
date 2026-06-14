@@ -57,16 +57,22 @@ def create_baseline(sv):
         )
 
 
-def write_entities_to_client(sv, w, view_origin):
+def write_entities_to_client(sv, w, view_origin, pvs_test=None):
     """SV_WriteEntitiesToClient (sv_main.c:427): per live edict, diff render
     state against its baseline, write the changed-field bitmask (command byte
-    carries U_SIGNAL) then only the changed fields. Phase 1 sends every entity
-    (no PVS cull -- # TODO(perf): cull like sv_main.c:451)."""
+    carries U_SIGNAL) then only the changed fields. When pvs_test is given,
+    cull entities whose world AABB is outside the client's PVS (sv_main.c:451);
+    the player's own (view) edict is never culled. pvs_test(mins, maxs)->bool."""
     vm, f = sv.vm, sv.f
     player = sv.player
     for e in range(1, vm.num_edicts):
         if vm.free[e]:
             continue
+        if pvs_test is not None and e != player:
+            mins = vm.fget_v(e, f["absmin"])
+            maxs = vm.fget_v(e, f["absmax"])
+            if not pvs_test(mins, maxs):
+                continue                     # outside the client's PVS -> cull
         base = sv.baselines.get(e)
         if base is None:                     # spawned after baseline: full send
             base = Baseline()
@@ -363,16 +369,17 @@ def write_reliable(sv, w):
             w.byte(P.svc_intermission)
 
 
-def build_datagram(sv, w):
+def build_datagram(sv, w, pvs_test=None):
     """SV_SendClientDatagram (sv_main.c:720): one frame's message --
     svc_time, clientdata, entity deltas, then reliable updates and the
-    accumulated unreliable events. View origin for (future) PVS culling is the
-    player eye."""
+    accumulated unreliable events. When pvs_test is given, entity updates are
+    PVS-culled (SV_WriteEntitiesToClient); the client builds it from the eye
+    leaf's PVS, defaulting to None (send everything) when no BSP/vis is handy."""
     w.byte(P.svc_time)
     w.float(sv.time)
     write_clientdata_to_message(sv, w)
     eye = sv.player_origin() or (0.0, 0.0, 0.0)
-    write_entities_to_client(sv, w, eye)
+    write_entities_to_client(sv, w, eye, pvs_test=pvs_test)
     write_reliable(sv, w)
     for fn in sv.unreliable:                    # svc_sound / temp ents / particle
         fn(w)

@@ -1654,7 +1654,19 @@ class Client:
         # for the new map, so this drives whichever cl is current. Camera and HUD
         # still read self.sv this phase (explicit Phase 1 scope).
         dg = MsgWriter()
-        build_datagram(self.sv, dg)
+        # PVS-cull the per-frame entity updates against the player eye's PVS
+        # (SV_WriteEntitiesToClient): only entities the player could see are sent,
+        # shrinking recordings and matching WinQuake. The player edict is never
+        # culled. Live render reads cl, which already gates dynamic ents on
+        # msgtime, so a culled (off-PVS) ent vanishes that frame and reappears
+        # with forcelink when back in PVS.
+        peye = self.sv.player_origin()
+        vofs = self.sv.player_view_ofs()
+        if peye is not None:
+            eye_pvs = (peye[0], peye[1], peye[2] + (vofs[2] if vofs else VIEW_HEIGHT))
+        else:
+            eye_pvs = None
+        build_datagram(self.sv, dg, pvs_test=self._pvs_tester(eye_pvs))
         if self.recording is not None:        # tee this frame to the .dem (live path only)
             self.recording.write_frame((self.pitch, self.yaw, 0.0), bytes(dg.data))
         self.cl.time = self.sv.time           # single-player: client time tracks server
@@ -1697,6 +1709,23 @@ class Client:
                 gun_org = (gun_org[0], gun_org[1], gun_org[2] + 2.0)
 
         return self._render_scene(dt, eye, gun_org, dead, inp)
+
+    def _pvs_tester(self, eye):
+        """Build a PVS box-test from the eye leaf's visibility row, for culling
+        per-frame entity updates (a single-leaf approximation of SV_FatPVS).
+        Returns pvs_test(mins, maxs)->bool, or None (cull nothing -- send all)
+        when the eye is in the solid leaf or the leaf carries no vis data, so
+        solid/no-vis leaves don't blank the datagram."""
+        if eye is None:
+            return None
+        leaf = self.rend.point_leaf(eye)
+        if leaf <= 0:                          # leaf 0 / solid -> no PVS, send all
+            return None
+        visofs = self.bsp.leafs[leaf][1]
+        if visofs < 0:
+            return None
+        vis = self.rend.decompress_vis(visofs)
+        return lambda mins, maxs: self.rend.box_in_pvs(mins, maxs, vis)
 
     def _render_scene(self, dt, eye, gun_org, dead, inp):
         """The render half of a frame, shared by live play and demo playback.

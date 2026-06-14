@@ -54,8 +54,14 @@ def test_sprite_entities_reach_the_client():
     e = vm.alloc_edict()
     vm.fset_i(e, f["model"], sv.pr.new_string("progs/s_explod.spr"))
     vm.fset_i(e, f["modelindex"], mi)
-    vm.fset_v(e, f["origin"], (c.pos[0], c.pos[1], c.pos[2] + 40.0))
+    org = (c.pos[0], c.pos[1], c.pos[2] + 40.0)
+    vm.fset_v(e, f["origin"], org)
     vm.fset_f(e, f["frame"], 2.0)
+    # SV_LinkEdict normally sets absmin/absmax; do it by hand so the datagram's
+    # PVS cull (which boxes the entity's world AABB) sees the sprite at its real
+    # position near the player rather than a zero-size box at the world origin.
+    vm.fset_v(e, f["absmin"], (org[0] - 1.0, org[1] - 1.0, org[2] - 1.0))
+    vm.fset_v(e, f["absmax"], (org[0] + 1.0, org[1] + 1.0, org[2] + 1.0))
 
     ents = sv.sprite_entities()
     assert (mi, (c.pos[0], c.pos[1], c.pos[2] + 40.0), 2) in ents

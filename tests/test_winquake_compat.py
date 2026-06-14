@@ -94,9 +94,27 @@ def test_makestatic_entities_emitted():
     assert P.svc_spawnstatic in seq
 
 
+def test_pvs_cull_reduces_entity_count():
+    from quake.msg import MsgWriter
+    from quake.sv_send import write_entities_to_client
+    sv = _boot("e1m1")
+
+    def count_updates(pvs_test):
+        w = MsgWriter()
+        write_entities_to_client(sv, w, sv.player_origin(), pvs_test=pvs_test)
+        return _svc_sequence(bytes(w.data)).count(-1)
+
+    all_n = count_updates(None)                         # no cull: everything
+    # a PVS tester that culls everything but the player should send far fewer
+    culled_n = count_updates(lambda mins, maxs: False)
+    assert culled_n < all_n
+    assert culled_n >= 1                                # the player is always sent
+
+
 if __name__ == "__main__":
     test_signon_has_three_phases_ending_signonnum_123()
     test_spawn_block_has_64_lightstyles_and_total_stats()
     test_prespawn_emits_static_sounds()
     test_makestatic_entities_emitted()
+    test_pvs_cull_reduces_entity_count()
     print("OK")

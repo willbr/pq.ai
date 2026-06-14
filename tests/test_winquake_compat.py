@@ -111,10 +111,133 @@ def test_pvs_cull_reduces_entity_count():
     assert culled_n >= 1                                # the player is always sent
 
 
+def _record_demo(mapname, frames=40):
+    """Record a short session and return the .dem bytes (no file left behind).
+    Boots a live game on the map, starts a DemoWriter (which writes the 3-phase
+    signon as the first three frames), drives `frames` live frames (each tees its
+    PVS-culled datagram), then stops -- the round-trip a real `record` produces."""
+    import os
+    import tempfile
+    from client import Client, InputState
+    c = Client(mapname)
+    c.resize(640, 480)
+    name = os.path.join(tempfile.mkdtemp(), "wq")
+    c._cmd_record([name, mapname])
+    for _ in range(frames):
+        c.frame(0.05, InputState(move_forward=1.0))
+    c._cmd_stopdemo([])
+    path = name + ".dem"
+    with open(path, "rb") as fh:
+        data = fh.read()
+    os.remove(path)
+    return data
+
+
+def test_our_recording_signon_matches_winquake_shape():
+    """Our recording must carry the same signon message *types* a real WinQuake
+    demo does: the 3-phase handshake with svc_signonnum 1/2/3, all 64 lightstyles,
+    spawnstatic/spawnstaticsound/spawnbaseline, totals, and a spawn svc_time. We
+    record e1m2 -- a map that has BOTH makestatic torches and ambient loops, so
+    spawnstatic AND spawnstaticsound both appear (matching demo1.dem's content)."""
+    from quake.demo import DemoReader
+    data = _record_demo("e1m2")
+    r = DemoReader(data)
+    seen = []                                   # svc ids across the signon frames
+    for _ in range(3):                          # the 3 signon frames
+        fr = r.next_frame()
+        assert fr is not None, "recording is missing a signon frame"
+        seen += _svc_sequence(fr[1])
+    assert seen.count(P.svc_signonnum) == 3, "must emit signonnum 1, 2 and 3"
+    assert P.svc_serverinfo in seen and P.svc_setview in seen
+    assert seen.count(P.svc_lightstyle) == 64, "all 64 lightstyles at spawn"
+    assert seen.count(P.svc_updatestat) >= 4, "total secret/monster stats sent"
+    assert P.svc_spawnbaseline in seen
+    assert P.svc_spawnstatic in seen, "e1m2 has makestatic torches"
+    assert P.svc_spawnstaticsound in seen, "e1m2 has ambient loops"
+    assert P.svc_time in seen and P.svc_clientdata in seen   # spawn frame
+    # the first datagram frame after the signon is svc_time-led (Phase 3+)
+    fr = r.next_frame()
+    assert fr is not None and _svc_sequence(fr[1])[0] == P.svc_time
+
+
+# The svc message types a genuine WinQuake demo carries in its signon that
+# carry world/connect state we must reproduce. Scoreboard messages
+# (updatename/updatefrags/updatecolors) are excluded: they are per-client
+# scoreboard chatter, legitimately absent from a fresh single-player recording.
+_MEANINGFUL_SIGNON_SVCS = frozenset((
+    P.svc_serverinfo, P.svc_cdtrack, P.svc_setview, P.svc_signonnum,
+    P.svc_spawnbaseline, P.svc_spawnstatic, P.svc_spawnstaticsound,
+    P.svc_lightstyle, P.svc_updatestat, P.svc_time, P.svc_clientdata,
+))
+
+
+def _demo1_signon_svc_set():
+    """The set of svc message types in the genuine shareware demo1.dem's signon
+    (its first three frames -- a real WinQuake recording on e1m3). This is the
+    gold reference structure our recordings are measured against."""
+    from quake.pak import Pak
+    from quake.demo import DemoReader
+    pak = Pak("quake-shareware/id1/pak0.pak")
+    r = DemoReader(pak.read("demo1.dem"))
+    svcs = set()
+    for _ in range(3):
+        fr = r.next_frame()
+        assert fr is not None, "demo1.dem is missing a signon frame"
+        svcs |= {s for s in _svc_sequence(fr[1]) if s != -1}
+    return svcs
+
+
+def test_our_signon_is_structural_superset_of_demo1():
+    """Cross-engine parity proof against a genuine WinQuake demo: the meaningful
+    signon svc types in demo1.dem (the gold reference) must ALL appear in our own
+    recording's signon. This proves our recordings carry the same connect/world
+    state a real WinQuake recording does -- the structural gate we can run here
+    without a WinQuake binary."""
+    from quake.demo import DemoReader
+    demo1 = _demo1_signon_svc_set()
+    # demo1's meaningful signon types (drop scoreboard chatter we may omit)
+    demo1_meaningful = demo1 & _MEANINGFUL_SIGNON_SVCS
+    # our recording's signon svc set
+    data = _record_demo("e1m2")
+    r = DemoReader(data)
+    ours = set()
+    for _ in range(3):
+        ours |= {s for s in _svc_sequence(r.next_frame()[1]) if s != -1}
+    missing = demo1_meaningful - ours
+    assert not missing, (
+        "our signon is missing meaningful WinQuake types: "
+        + ", ".join(str(m) for m in sorted(missing)))
+
+
+def test_our_recording_replays_in_our_own_player():
+    """End-to-end round-trip: the new-format recording (3-phase signon + culled
+    datagrams) still plays back in pq.ai's own player with a moving camera."""
+    from client import Client, InputState
+    data = _record_demo("e1m2", frames=60)
+    p = Client.__new__(Client)
+    p._init_assets_only()
+    assert p._load_demo(data), "recording did not load in our own player"
+    p.resize(640, 480)
+    moved = False
+    last = None
+    for _ in range(60):
+        if p.demo.finished:
+            break
+        p.frame(0.05, InputState())
+        cur = tuple(p.pos)
+        if last is not None and cur != last:
+            moved = True
+        last = cur
+    assert moved, "recorded demo did not play back with a moving camera"
+
+
 if __name__ == "__main__":
     test_signon_has_three_phases_ending_signonnum_123()
     test_spawn_block_has_64_lightstyles_and_total_stats()
     test_prespawn_emits_static_sounds()
     test_makestatic_entities_emitted()
     test_pvs_cull_reduces_entity_count()
+    test_our_recording_signon_matches_winquake_shape()
+    test_our_signon_is_structural_superset_of_demo1()
+    test_our_recording_replays_in_our_own_player()
     print("OK")

@@ -56,6 +56,7 @@ quake/pak.py        PAK archive reader → raw lumps by name
   ├─ quake/bsp.py   BSP v29 → flat tuple arrays (faces, planes, leaves, PVS, lightmaps, entity string)
   ├─ quake/mdl.py   .mdl alias models → per-frame float vertex sets
   └─ quake/progs.py progs.dat → bytecode statements, defs, globals buffer (eval_t union)
+quake/qcc/          QuakeC compiler: progs.src + .qc → progs.dat (byte-identical to id's qcc; oracle in tests/; run via `python -m quake.qcc`)
 quake/pr_exec.py    QuakeC VM: opcode loop + flat integer-indexed edict store
 quake/sv.py         server: ~70 builtins (pr_cmds.c port), entity spawning, think/movetype loop, player, combat
 quake/physics.py    clip-hull tracing + player/monster movement; backs the collision builtins

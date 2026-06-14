@@ -56,8 +56,61 @@ def test_crc_matches_oracle():
     assert crc == 5927, crc
 
 
+V101 = "quake-source/quake-tools/qcc/v101qc/progs.src"
+
+
+def _lumps(data):
+    import struct
+    h = struct.unpack_from("<2i 12i i", data, 0)
+    names = ["statements", "globaldefs", "fielddefs", "functions",
+             "strings", "globals"]
+    esz = {"statements": 8, "globaldefs": 8, "fielddefs": 8,
+           "functions": 36, "strings": 1, "globals": 4}
+    out = {}
+    for i, n in enumerate(names):
+        ofs, cnt = h[2 + i * 2], h[3 + i * 2]
+        out[n] = data[ofs:ofs + cnt * esz[n]]
+    out["entityfields"] = h[14]
+    out["crc"] = h[1]
+    return out
+
+
+def test_per_lump_matches_oracle():
+    mine = _lumps(compile_progs_src(V101))
+    ref = _lumps(_oracle())
+    assert mine["crc"] == ref["crc"], "crc"
+    assert mine["entityfields"] == ref["entityfields"], "entityfields"
+    for lump in ("strings", "functions", "statements", "globaldefs",
+                 "fielddefs", "globals"):
+        assert mine[lump] == ref[lump], (
+            f"lump {lump} differs: mine={len(mine[lump])} ref={len(ref[lump])}")
+
+
+def test_byte_identical_to_oracle():
+    assert compile_progs_src(V101) == _oracle()
+
+
+def test_self_compiled_boots():
+    from quake.pak import Pak
+    from quake.bsp import Bsp
+    from quake.progs import Progs
+    from quake.sv import Server
+    from quake.physics import Physics
+    data = compile_progs_src(V101)
+    pak = Pak("quake-shareware/id1/pak0.pak")
+    b = Bsp(pak.read("maps/e1m1.bsp"))
+    sv = Server(Progs(data), bsp=b, mapname="maps/e1m1.bsp", skill=1, pak=pak)
+    sv.phys = Physics(b)
+    sv.load_level()
+    for _ in range(3):
+        sv.run_frame(0.1)
+
+
 if __name__ == "__main__":
     test_oracle_present_and_valid()
     test_inline_minimal_compile()
     test_crc_matches_oracle()
+    test_per_lump_matches_oracle()
+    test_byte_identical_to_oracle()
+    test_self_compiled_boots()
     print("OK")

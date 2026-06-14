@@ -277,8 +277,21 @@ def write_static_entities(sv, w):    # Task 4
     return
 
 
-def write_static_sounds(sv, w):      # Task 3
-    return
+def write_static_sounds(sv, w):
+    """svc_spawnstaticsound for each looping ambient the QC spawned (PF_ambient
+    sound, pr_cmds.c:506): 3 coords, sound index, vol*255, atten*64. Sourced from
+    sv.ambients (list of (name, pos, vol, atten)), which load_level built from the
+    ambientsound builtin."""
+    for name, pos, vol, atten in sv.ambients:
+        idx = sv.sound_index(name)
+        if idx <= 0:
+            continue
+        w.byte(P.svc_spawnstaticsound)
+        for c in pos:
+            w.coord(c)
+        w.byte(idx)
+        w.byte(min(255, int(vol * 255)))
+        w.byte(min(255, int(atten * 64)))
 
 
 def write_all_lightstyles(sv, w):

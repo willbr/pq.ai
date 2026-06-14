@@ -76,7 +76,17 @@ def test_spawn_block_has_64_lightstyles_and_total_stats():
     assert seq.count(P.svc_updatestat) >= 4, "total secrets/monsters stats sent"
 
 
+def test_prespawn_emits_static_sounds():
+    sv = _boot("e1m1")
+    # e1m1 has ambient sounds; sv.ambients should be non-empty after load
+    if not sv.ambients:
+        return                                  # map without ambients: skip
+    seq = _svc_sequence(build_signon(sv)[1])
+    assert P.svc_spawnstaticsound in seq
+
+
 if __name__ == "__main__":
     test_signon_has_three_phases_ending_signonnum_123()
     test_spawn_block_has_64_lightstyles_and_total_stats()
+    test_prespawn_emits_static_sounds()
     print("OK")

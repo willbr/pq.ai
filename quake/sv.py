@@ -383,10 +383,15 @@ class Server:
 
         spawned = inhibited = noclass = 0
         first = True
+        self._cdtrack = 0
         for fields in parse_entities(self.bsp.entities):
             if first:
                 num = 0                 # the worldspawn block fills edict 0
                 first = False
+                try:                    # worldspawn "sounds" -> svc_cdtrack
+                    self._cdtrack = int(float(fields.get("sounds", 0)))
+                except (TypeError, ValueError):
+                    self._cdtrack = 0
             else:
                 num = vm.alloc_edict()
             self._parse_edict(num, fields)
@@ -2164,8 +2169,8 @@ class Server:
         create_baseline(self)
 
     def cdtrack(self):
-        """CD music track for svc_cdtrack: the worldspawn "sounds" field, or 0.
-        Task 3 wires the real value; 0 is valid (no music)."""
+        """CD music track for svc_cdtrack: the worldspawn "sounds" field (set in
+        load_level), or 0. 0 is valid (no music)."""
         return int(getattr(self, "_cdtrack", 0))
 
     def total_secrets(self):
@@ -2192,6 +2197,17 @@ class Server:
             return 0
         try:
             return self.model_precache.index(name)
+        except ValueError:
+            return 0
+
+    def sound_index(self, name):
+        """sound index for a precached sound name, or 0 (SV_SoundIndex,
+        sv_main.c), mirroring model_index. The client resolves it back via
+        cl.sound_precache."""
+        if not name:
+            return 0
+        try:
+            return self.sound_precache.index(name)
         except ValueError:
             return 0
 

@@ -32,6 +32,8 @@ class Lexer:
         self.immediate = None            # float or (x,y,z)
         self.immediate_string = ""
         self.frames = {}                 # name -> index
+        self.nummacros = 0               # pr_nummacros: advances per token,
+        #                                  even on duplicate names (pr_lex.c)
 
     def error(self, msg):
         raise QCCError(self.file, self.line, msg)
@@ -160,7 +162,13 @@ class Lexer:
                 w = self._simple_token()
                 if w is None:
                     break
-                self.frames[w] = len(self.frames)
+                # pr_lex.c PR_ParseFrame: pr_nummacros++ for EVERY token, so a
+                # repeated name (e.g. knight.qc's "$frame attackb1 attackb1 ...")
+                # advances the sequence number — the dup is not collapsed. But
+                # PR_FindMacro scans pr_framemacros linearly and returns the
+                # FIRST match, so a repeated name keeps its earliest index.
+                self.frames.setdefault(w, self.nummacros)
+                self.nummacros += 1
             self.next()
         elif word in _SKIP_GRABS:
             while self._simple_token() is not None:

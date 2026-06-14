@@ -35,8 +35,15 @@ class TypeTable:
         # type_function is a void() used for state forward-decls (pr_lex.c:49)
         self.function = Type(ev_function, aux_type=self.void)
         self.pointer = Type(ev_pointer)
-        self.floatfield = Type(ev_field, aux_type=self.float)  # pr_lex.c:53
-        self._complex = [self.function]   # PR_BeginCompilation links type_function
+        # type_floatfield (pr_lex.c:53) is a STANDALONE field type used only for
+        # vector-field elements (_x/_y/_z); pr_comp.c passes &type_floatfield
+        # directly and never links it into pr.types. So it is intentionally NOT
+        # interned here: `floatfield is field_of(float)` is False, exactly as in
+        # C, where parsed `.float` fields are a separate object. This never
+        # affects output -- only etype ints reach progs.dat / opcode selection.
+        self.floatfield = Type(ev_field, aux_type=self.float)
+        # only type_function is interned at start (qcc.c:561 pr.types = &type_function)
+        self._complex = [self.function]
 
     def _find(self, proto):
         for t in self._complex:
